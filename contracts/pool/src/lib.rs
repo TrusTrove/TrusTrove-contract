@@ -49,6 +49,9 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::ActiveInvoiceCount, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxUtilizationBps, &8500u32);
         Self::extend_instance_ttl(&env);
     }
 
@@ -116,6 +119,29 @@ impl PoolContract {
         env.storage()
             .persistent()
             .extend_ttl(&lp_init_key, 100, 2_000_000);
+
+        // Track LP in the LPList if not already present
+        let mut lp_list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPList)
+            .unwrap_or_else(|| Vec::new(&env));
+        let mut found = false;
+        for i in 0..lp_list.len() {
+            if lp_list.get(i).unwrap() == lp {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            lp_list.push_back(lp.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::LPList, &lp_list);
+            env.storage()
+                .persistent()
+                .extend_ttl(&DataKey::LPList, 100, 2_000_000);
+        }
 
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
         Self::extend_instance_ttl(&env);
@@ -251,6 +277,17 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
         }
 
+        let max_util_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxUtilizationBps)
+            .unwrap_or(8500);
+        let new_total_funded = total_funded + funded_amount;
+        let new_utilization = (new_total_funded * 10000 / total_deposits) as u32;
+        if new_utilization > max_util_bps {
+            panic_with_error!(&env, PoolError::UtilizationCapExceeded);
+        }
+
         let escrow_contract: Address = env
             .storage()
             .instance()
@@ -324,6 +361,53 @@ impl PoolContract {
             .instance()
             .get(&DataKey::TotalYieldDistributed)
             .unwrap();
+
+        // Distribute yield events to each LP proportionally
+        let total_shares: u128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
+        if yield_amount > 0 && total_shares > 0 {
+            let timestamp = env.ledger().timestamp();
+            let lp_list: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LPList)
+                .unwrap_or_else(|| Vec::new(&env));
+
+            for i in 0..lp_list.len() {
+                let lp_addr = lp_list.get(i).unwrap();
+                let lp_shares: u128 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::LPShares(lp_addr.clone()))
+                    .unwrap_or(0);
+                if lp_shares == 0 {
+                    continue;
+                }
+
+                let lp_share_bps = (lp_shares * 10000 / total_shares) as u32;
+                let lp_yield = yield_amount * lp_shares / total_shares;
+
+                let yield_event = YieldEvent {
+                    invoice_id: invoice_id.clone(),
+                    yield_amount: lp_yield,
+                    timestamp,
+                    lp_share_bps,
+                };
+
+                let history_key = DataKey::LPYieldHistory(lp_addr.clone());
+                let mut history: Vec<YieldEvent> = env
+                    .storage()
+                    .persistent()
+                    .get(&history_key)
+                    .unwrap_or_else(|| Vec::new(&env));
+                history.push_back(yield_event);
+                env.storage().persistent().set(&history_key, &history);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&history_key, 100, 2_000_000);
+
+                events::yield_distributed(&env, &lp_addr, &invoice_id, lp_yield, lp_share_bps);
+            }
+        }
 
         env.storage()
             .instance()
@@ -445,6 +529,11 @@ impl PoolContract {
             total_yield_distributed: total_yield,
             active_invoice_count: active_count,
             total_shares,
+            max_utilization_bps: env
+                .storage()
+                .instance()
+                .get(&DataKey::MaxUtilizationBps)
+                .unwrap_or(8500),
         }
     }
 
@@ -490,6 +579,13 @@ impl PoolContract {
         }
     }
 
+    pub fn get_lp_yield_history(env: Env, lp: Address) -> Vec<YieldEvent> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LPYieldHistory(lp))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
     pub fn get_utilization_rate(env: Env) -> u32 {
         let total_deposits: u128 = env
             .storage()
@@ -505,6 +601,25 @@ impl PoolContract {
             return 0;
         }
         (total_funded * 10000 / total_deposits) as u32
+    }
+
+    pub fn set_max_utilization(env: Env, new_cap_bps: u32) {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+        if new_cap_bps > 10000 {
+            panic_with_error!(&env, PoolError::InvalidCapValue);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxUtilizationBps, &new_cap_bps);
+        Self::extend_instance_ttl(&env);
+    }
+
+    pub fn get_max_utilization(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxUtilizationBps)
+            .unwrap_or(8500)
     }
 
     fn extend_instance_ttl(env: &Env) {

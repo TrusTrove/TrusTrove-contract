@@ -14,4 +14,6 @@ pub enum PoolError {
     AlreadyFunded = 9,
     InvoiceNotFound = 10,
     AssetMismatch = 11,
+    UtilizationCapExceeded = 12,
+    InvalidCapValue = 13,
 }

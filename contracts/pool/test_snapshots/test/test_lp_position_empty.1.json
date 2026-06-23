@@ -830,6 +830,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "MaxUtilizationBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 8500
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "TotalDeposits"
                             }
                           ]

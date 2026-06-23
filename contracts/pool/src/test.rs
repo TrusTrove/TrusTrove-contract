@@ -336,6 +336,43 @@ fn test_utilization_rate_after_funding() {
     assert!(rate < 10000);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_fund_invoice_fails_when_utilization_cap_exceeded() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000); // 10k USDC
+    
+    // face_value = 10k, funding required = 9.8k
+    // 98% utilization exceeds default 85% cap
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+}
+
+#[test]
+fn test_set_max_utilization_succeeds() {
+    let te = setup();
+    assert_eq!(te.pool.get_max_utilization(), 8500);
+    
+    te.pool.set_max_utilization(&10000);
+    assert_eq!(te.pool.get_max_utilization(), 10000);
+    
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    
+    // Should succeed because cap is now 100%
+    assert!(te.pool.fund_invoice(&invoice_id));
+    
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.max_utilization_bps, 10000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_set_max_utilization_fails_if_invalid() {
+    let te = setup();
+    te.pool.set_max_utilization(&10001);
+}
+
 // ============== MULTI-LP TESTS ==============
 
 #[test]
@@ -359,4 +396,168 @@ fn test_multiple_lps_can_deposit() {
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_shares, 30_000_000_000);
     assert_eq!(stats.total_deposits, 30_000_000_000);
+}
+
+// ============== YIELD HISTORY TESTS ==============
+
+/// Helper: drives an invoice through the full lifecycle: create → list → fund → ship → confirm → repay.
+/// Returns the invoice_id and the yield amount (face_value - funded_amount).
+fn full_repayment_flow(te: &TestEnv) -> (BytesN<32>, u128) {
+    let invoice_id = create_and_list(te, &te.usdc_id);
+
+    // face_value = 10_000_000_000, discount_bps = 200 (2%)
+    // funded_amount = 10_000_000_000 * (10000 - 200) / 10000 = 9_800_000_000
+    // yield = 10_000_000_000 - 9_800_000_000 = 200_000_000
+    let funded_amount: u128 = 10_000_000_000 * (10000 - 200) / 10000;
+    let yield_amount: u128 = 10_000_000_000 - funded_amount;
+
+    te.pool.fund_invoice(&invoice_id);
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.invoice.repay(&invoice_id);
+
+    (invoice_id, yield_amount)
+}
+
+#[test]
+fn test_yield_history_empty_initially() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let history = te.pool.get_lp_yield_history(&te.lp);
+    assert_eq!(history.len(), 0);
+}
+
+#[test]
+fn test_yield_history_after_single_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let (invoice_id, yield_amount) = full_repayment_flow(&te);
+
+    let history = te.pool.get_lp_yield_history(&te.lp);
+    assert_eq!(history.len(), 1);
+
+    let event = history.get(0).unwrap();
+    assert_eq!(event.invoice_id, invoice_id);
+    assert_eq!(event.yield_amount, yield_amount);
+    // Single LP owns 100% of shares
+    assert_eq!(event.lp_share_bps, 10000);
+}
+
+#[test]
+fn test_yield_history_multiple_lps_proportional() {
+    let te = setup();
+
+    // Set up LP2
+    let lp2 = Address::generate(&te.env);
+    let lp2_bal_key = TKey(lp2.clone());
+    te.env.as_contract(&te.usdc_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&lp2_bal_key, &100_000_000_000_000i128);
+    });
+
+    // LP1 deposits 30B, LP2 deposits 70B → LP1 gets 30%, LP2 gets 70%
+    te.pool.deposit(&te.lp, &30_000_000_000);
+    te.pool.deposit(&lp2, &70_000_000_000);
+
+    let (invoice_id, yield_amount) = full_repayment_flow(&te);
+
+    // LP1: 30% share
+    let history1 = te.pool.get_lp_yield_history(&te.lp);
+    assert_eq!(history1.len(), 1);
+    let ev1 = history1.get(0).unwrap();
+    assert_eq!(ev1.invoice_id, invoice_id);
+    assert_eq!(ev1.lp_share_bps, 3000);
+    assert_eq!(ev1.yield_amount, yield_amount * 30_000_000_000 / 100_000_000_000);
+
+    // LP2: 70% share
+    let history2 = te.pool.get_lp_yield_history(&lp2);
+    assert_eq!(history2.len(), 1);
+    let ev2 = history2.get(0).unwrap();
+    assert_eq!(ev2.invoice_id, invoice_id);
+    assert_eq!(ev2.lp_share_bps, 7000);
+    assert_eq!(ev2.yield_amount, yield_amount * 70_000_000_000 / 100_000_000_000);
+
+    // Yield shares should sum to the total yield (within rounding)
+    assert!(ev1.yield_amount + ev2.yield_amount <= yield_amount);
+}
+
+#[test]
+fn test_yield_history_multiple_repayments() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let (invoice_id_1, yield_1) = full_repayment_flow(&te);
+    let (invoice_id_2, yield_2) = full_repayment_flow(&te);
+
+    let history = te.pool.get_lp_yield_history(&te.lp);
+    assert_eq!(history.len(), 2);
+
+    let ev1 = history.get(0).unwrap();
+    assert_eq!(ev1.invoice_id, invoice_id_1);
+    assert_eq!(ev1.yield_amount, yield_1);
+    assert_eq!(ev1.lp_share_bps, 10000);
+
+    let ev2 = history.get(1).unwrap();
+    assert_eq!(ev2.invoice_id, invoice_id_2);
+    assert_eq!(ev2.yield_amount, yield_2);
+    assert_eq!(ev2.lp_share_bps, 10000);
+}
+
+#[test]
+fn test_yield_history_multiple_lps_multiple_repayments() {
+    let te = setup();
+
+    // Set up LP2
+    let lp2 = Address::generate(&te.env);
+    let lp2_bal_key = TKey(lp2.clone());
+    te.env.as_contract(&te.usdc_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&lp2_bal_key, &100_000_000_000_000i128);
+    });
+
+    // LP1 deposits 40B, LP2 deposits 60B → 40/60 split
+    te.pool.deposit(&te.lp, &40_000_000_000);
+    te.pool.deposit(&lp2, &60_000_000_000);
+
+    let total_shares_before = 100_000_000_000u128;
+
+    let (inv_id_1, yield_1) = full_repayment_flow(&te);
+
+    // After first repayment, total_deposits increases by yield_1 but shares stay the same.
+    // So the share ratio stays 40/60 for the second repayment too.
+    let (inv_id_2, yield_2) = full_repayment_flow(&te);
+
+    // LP1 history: 2 events, both at 40% share (4000 bps)
+    let h1 = te.pool.get_lp_yield_history(&te.lp);
+    assert_eq!(h1.len(), 2);
+
+    let e1_0 = h1.get(0).unwrap();
+    assert_eq!(e1_0.invoice_id, inv_id_1);
+    assert_eq!(e1_0.lp_share_bps, 4000);
+    assert_eq!(e1_0.yield_amount, yield_1 * 40_000_000_000 / total_shares_before);
+
+    let e1_1 = h1.get(1).unwrap();
+    assert_eq!(e1_1.invoice_id, inv_id_2);
+    assert_eq!(e1_1.lp_share_bps, 4000);
+    assert_eq!(e1_1.yield_amount, yield_2 * 40_000_000_000 / total_shares_before);
+
+    // LP2 history: 2 events, both at 60% share (6000 bps)
+    let h2 = te.pool.get_lp_yield_history(&lp2);
+    assert_eq!(h2.len(), 2);
+
+    let e2_0 = h2.get(0).unwrap();
+    assert_eq!(e2_0.invoice_id, inv_id_1);
+    assert_eq!(e2_0.lp_share_bps, 6000);
+    assert_eq!(e2_0.yield_amount, yield_1 * 60_000_000_000 / total_shares_before);
+
+    let e2_1 = h2.get(1).unwrap();
+    assert_eq!(e2_1.invoice_id, inv_id_2);
+    assert_eq!(e2_1.lp_share_bps, 6000);
+    assert_eq!(e2_1.yield_amount, yield_2 * 60_000_000_000 / total_shares_before);
 }

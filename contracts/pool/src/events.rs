@@ -34,3 +34,20 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
         loss_amount,
     );
 }
+
+pub fn yield_distributed(
+    env: &Env,
+    lp: &Address,
+    invoice_id: &BytesN<32>,
+    yield_amount: u128,
+    share_bps: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "yield_distributed"),
+            lp.clone(),
+            invoice_id.clone(),
+        ),
+        (yield_amount, share_bps),
+    );
+}

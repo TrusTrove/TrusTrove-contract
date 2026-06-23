@@ -10,6 +10,7 @@ pub struct PoolStats {
     pub total_yield_distributed: u128,
     pub active_invoice_count: u32,
     pub total_shares: u128,
+    pub max_utilization_bps: u32,
 }
 
 #[contracttype]
@@ -19,6 +20,15 @@ pub struct LPPosition {
     pub usdc_value: u128,
     pub yield_earned: u128,
     pub deposit_count: u32,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct YieldEvent {
+    pub invoice_id: BytesN<32>,
+    pub yield_amount: u128,
+    pub timestamp: u64,
+    pub lp_share_bps: u32,
 }
 
 #[contracttype]
@@ -37,4 +47,7 @@ pub enum DataKey {
     LPYieldEarned(Address),
     LPInitialDeposit(Address),
     FundedInvoice(BytesN<32>),
+    LPYieldHistory(Address),
+    LPList,
+    MaxUtilizationBps,
 }
