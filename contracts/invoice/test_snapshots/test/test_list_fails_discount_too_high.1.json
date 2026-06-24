@@ -362,6 +362,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "listed_at"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "repaid_at"
                       },
                       "val": "void"

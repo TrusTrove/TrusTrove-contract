@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Map, String};
+use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Map, String, Vec};
 
 mod errors;
 mod events;
@@ -46,6 +46,42 @@ impl RegistryContract {
         events::issuer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    pub fn batch_register_issuers(env: Env, entries: Vec<(Address, Map<String, String>)>) -> u32 {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        admin.require_auth();
+
+        let mut count: u32 = 0;
+        for entry in entries.iter() {
+            let (address, metadata) = entry;
+            let key = DataKey::Profile(address.clone());
+            if env.storage().persistent().has(&key) {
+                continue;
+            }
+
+            let profile = Profile {
+                address: address.clone(),
+                role: Role::Issuer,
+                verified: true,
+                registered_at: env.ledger().timestamp(),
+                metadata,
+            };
+
+            env.storage().persistent().set(&key, &profile);
+            env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+            events::issuer_registered(&env, &address);
+            count += 1;
+        }
+
+        if count > 0 {
+            Self::extend_instance_ttl(&env);
+        }
+        count
     }
 
     pub fn register_buyer(env: Env, address: Address, metadata: Map<String, String>) -> bool {

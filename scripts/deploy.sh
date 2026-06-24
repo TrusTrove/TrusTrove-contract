@@ -3,7 +3,11 @@ set -e
 
 STELLAR="/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe"
 
-source .env.example
+if [ -f .env ]; then
+  source .env
+else
+  source .env.example
+fi
 
 echo "=== Building all contracts ==="
 "$STELLAR" contract build

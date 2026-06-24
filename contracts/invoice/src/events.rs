@@ -70,3 +70,10 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>) {
         (),
     );
 }
+
+pub fn invoice_expired(env: &Env, invoice_id: &BytesN<32>) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_expired"), invoice_id.clone()),
+        (),
+    );
+}

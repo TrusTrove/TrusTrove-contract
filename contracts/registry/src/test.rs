@@ -1,7 +1,7 @@
 #![cfg(test)]
 
 use crate::{RegistryContract, RegistryContractClient};
-use soroban_sdk::{map, testutils::Address as _, Address, Env, String};
+use soroban_sdk::{map, testutils::Address as _, vec, Address, Env, String, Vec};
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
     let env = Env::default();
@@ -113,4 +113,114 @@ fn test_get_profile_unknown_panics() {
     client.initialize(&admin);
     let unknown = Address::generate(&env);
     client.get_profile(&unknown);
+}
+
+#[test]
+fn test_batch_register_issuers_empty_vec() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let entries = Vec::new(&env);
+    let count = client.batch_register_issuers(&entries);
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn test_batch_register_issuers_all_new() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    let metadata1 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Issuer 1")
+        )
+    ];
+    let metadata2 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Issuer 2")
+        )
+    ];
+    let metadata3 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Issuer 3")
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), metadata1),
+        (issuer2.clone(), metadata2),
+        (issuer3.clone(), metadata3),
+    ];
+
+    let count = client.batch_register_issuers(&entries);
+    assert_eq!(count, 3);
+
+    assert!(client.is_verified(&issuer1));
+    assert!(client.is_verified(&issuer2));
+    assert!(client.is_verified(&issuer3));
+
+    assert_eq!(client.get_profile(&issuer1).role, crate::Role::Issuer);
+    assert_eq!(client.get_profile(&issuer2).role, crate::Role::Issuer);
+    assert_eq!(client.get_profile(&issuer3).role, crate::Role::Issuer);
+}
+
+#[test]
+fn test_batch_register_issuers_all_duplicate() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    client.register_issuer(&issuer1, &map![&env]);
+    client.register_issuer(&issuer2, &map![&env]);
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), map![&env]),
+        (issuer2.clone(), map![&env]),
+    ];
+
+    let count = client.batch_register_issuers(&entries);
+    assert_eq!(count, 0);
+}
+
+#[test]
+fn test_batch_register_issuers_mixed() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env); // existing
+    let issuer2 = Address::generate(&env); // new
+    let issuer3 = Address::generate(&env); // new
+
+    client.register_issuer(&issuer1, &map![&env]);
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), map![&env]),
+        (issuer2.clone(), map![&env]),
+        (issuer3.clone(), map![&env]),
+    ];
+
+    let count = client.batch_register_issuers(&entries);
+    assert_eq!(count, 2);
+
+    assert!(client.is_verified(&issuer1));
+    assert!(client.is_verified(&issuer2));
+    assert!(client.is_verified(&issuer3));
 }

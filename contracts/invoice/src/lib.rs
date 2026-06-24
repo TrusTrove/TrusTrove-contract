@@ -126,6 +126,7 @@ impl InvoiceContract {
             due_date,
             status: InvoiceStatus::Created,
             created_at: now,
+            listed_at: None,
             funded_at: None,
             shipped_at: None,
             issuer_confirmed: false,
@@ -177,6 +178,7 @@ impl InvoiceContract {
         }
         invoice.status = InvoiceStatus::Listed;
         invoice.discount_bps = discount_bps;
+        invoice.listed_at = Some(env.ledger().timestamp());
         env.storage().persistent().set(&inv_key, &invoice);
         env.storage()
             .persistent()
@@ -503,6 +505,83 @@ impl InvoiceContract {
             result.push_back(invoice);
         }
         result
+    }
+
+    pub fn set_expiry_window(env: Env, window: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::ExpiryWindow, &window);
+        Self::extend_instance_ttl(&env);
+    }
+
+    pub fn get_expiry_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ExpiryWindow)
+            .unwrap_or(7 * 24 * 60 * 60)
+    }
+
+    pub fn check_auth(_env: Env, address: Address) {
+        address.require_auth();
+    }
+
+    pub fn expire_listing(env: Env, invoice_id: BytesN<32>) -> bool {
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        if invoice.status != InvoiceStatus::Listed {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        let is_issuer = env
+            .try_invoke_contract::<(), soroban_sdk::Error>(
+                &env.current_contract_address(),
+                &Symbol::new(&env, "check_auth"),
+                (invoice.issuer.clone(),).into_val(&env),
+            )
+            .is_ok();
+
+        if is_issuer {
+            // Already authorized by issuer
+        } else {
+            admin.require_auth();
+        }
+
+        let listed_at = invoice.listed_at.unwrap_or(0);
+        let expiry_window = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExpiryWindow)
+            .unwrap_or(7 * 24 * 60 * 60);
+
+        let current_time = env.ledger().timestamp();
+        if current_time <= listed_at + expiry_window {
+            panic_with_error!(&env, InvoiceError::ListingNotExpired);
+        }
+
+        let prev_status = invoice.status.clone();
+        invoice.status = InvoiceStatus::Expired;
+        env.storage().persistent().set(&inv_key, &invoice);
+
+        self::move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Expired);
+        events::invoice_expired(&env, &invoice_id);
+        true
     }
 }
 
