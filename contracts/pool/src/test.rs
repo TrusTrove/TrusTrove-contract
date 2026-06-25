@@ -519,3 +519,27 @@ fn test_handle_default_unknown_invoice_returns_false() {
     let result = te.pool.handle_default(&dummy_id);
     assert!(!result);
 }
+
+#[test]
+fn test_deposit_when_deposits_zero_but_shares_exist() {
+    let te = setup();
+
+    // Deposit exact amount needed to fund the standard test invoice
+    // (10B face value, 200bps discount = 9.8B funding amount)
+    te.pool.deposit(&te.lp, &9_800_000_000);
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    // Trigger default, wiping out all pool deposits
+    te.pool.handle_default(&invoice_id);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 0);
+    assert!(stats.total_shares > 0);
+
+    // Attempt new deposit, which should not panic and should issue 1-to-1 shares
+    let lp2 = create_lp_with_balance(&te, 10_000_000_000);
+    let new_shares = te.pool.deposit(&lp2, &5_000_000_000);
+    assert_eq!(new_shares, 5_000_000_000);
+}

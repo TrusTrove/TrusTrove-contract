@@ -73,7 +73,7 @@ impl PoolContract {
             .get(&DataKey::TotalDeposits)
             .unwrap();
 
-        let shares_to_issue = if total_shares == 0 {
+        let shares_to_issue = if total_shares == 0 || total_deposits == 0 {
             usdc_amount
         } else {
             usdc_amount * total_shares / total_deposits

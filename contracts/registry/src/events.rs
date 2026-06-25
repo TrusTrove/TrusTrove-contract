@@ -14,3 +14,10 @@ pub fn address_revoked(env: &Env, address: &Address) {
     env.events()
         .publish((Symbol::new(env, "address_revoked"), address.clone()), ());
 }
+
+pub fn profile_verified(env: &Env, address: &Address, status: bool) {
+    env.events().publish(
+        (Symbol::new(env, "profile_verified"), address.clone()),
+        status,
+    );
+}

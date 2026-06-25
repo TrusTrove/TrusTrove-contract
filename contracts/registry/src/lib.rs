@@ -144,6 +144,27 @@ impl RegistryContract {
         true
     }
 
+    pub fn verify_profile(env: Env, address: Address, verify: bool) -> bool {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        admin.require_auth();
+        let key = DataKey::Profile(address.clone());
+        let mut profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        profile.verified = verify;
+        env.storage().persistent().set(&key, &profile);
+        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        events::profile_verified(&env, &address, verify);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
