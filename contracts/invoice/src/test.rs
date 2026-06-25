@@ -581,3 +581,193 @@ fn test_expire_listing_stranger_panics() {
     // Calling expire_listing without mocking auths for issuer or admin should panic due to failed require_auth.
     client.expire_listing(&invoice_id);
 }
+
+// ===================== Integration Test (Full Lifecycle) =====================
+
+use trusttrove_escrow::EscrowContract as RealEscrow;
+use trusttrove_escrow::EscrowContractClient as RealEscrowClient;
+use trusttrove_pool::PoolContract as RealPool;
+use trusttrove_pool::PoolContractClient as RealPoolClient;
+use trusttrove_registry::RegistryContract as RealRegistry;
+use trusttrove_registry::RegistryContractClient as RealRegistryClient;
+
+#[contract]
+pub struct IntegrationMockToken;
+
+#[contractimpl]
+impl IntegrationMockToken {
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        let from_key = ITKey(from.clone());
+        let to_key = ITKey(to.clone());
+        let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+        let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&from_key, &(from_bal - amount));
+        env.storage()
+            .persistent()
+            .set(&to_key, &(to_bal + amount));
+    }
+
+    pub fn balance(env: Env, addr: Address) -> i128 {
+        env.storage().persistent().get(&ITKey(addr)).unwrap_or(0)
+    }
+}
+
+#[contracttype]
+pub struct ITKey(Address);
+
+struct IntegrationTestEnv {
+    _env: Env,
+    invoice: crate::InvoiceContractClient<'static>,
+    pool: RealPoolClient<'static>,
+    _registry: RealRegistryClient<'static>,
+    issuer: Address,
+    buyer: Address,
+    _lp: Address,
+}
+
+fn setup_integration() -> IntegrationTestEnv {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let lp = Address::generate(&env);
+
+    // Deploy mock USDC token
+    let usdc_id = env.register_contract(None, IntegrationMockToken);
+
+    // Fund LP and buyer with USDC
+    let lp_key = ITKey(lp.clone());
+    let buyer_key = ITKey(buyer.clone());
+    env.as_contract(&usdc_id, || {
+        env.storage()
+            .persistent()
+            .set(&lp_key, &100_000_000_000_000i128);
+        env.storage()
+            .persistent()
+            .set(&buyer_key, &100_000_000_000_000i128);
+    });
+
+    // Deploy and initialize registry
+    let registry_id = env.register_contract(None, RealRegistry);
+    let registry = RealRegistryClient::new(&env, &registry_id);
+    registry.initialize(&admin);
+    registry
+        .register_issuer(&issuer, &soroban_sdk::Map::new(&env));
+    registry
+        .register_buyer(&buyer, &soroban_sdk::Map::new(&env));
+
+    // Deploy and initialize invoice
+    let invoice_id = env.register_contract(None, crate::InvoiceContract);
+    let invoice = crate::InvoiceContractClient::new(&env, &invoice_id);
+    invoice.initialize(&admin, &registry_id);
+
+    // Deploy escrow and pool
+    let escrow_id = env.register_contract(None, RealEscrow);
+    let pool_id = env.register_contract(None, RealPool);
+
+    let pool = RealPoolClient::new(&env, &pool_id);
+    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id);
+
+    let escrow = RealEscrowClient::new(&env, &escrow_id);
+    escrow.initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+
+    // Wire pool contract on invoice
+    invoice.set_pool_contract(&pool_id);
+
+    // LP deposits into pool
+    pool.deposit(&lp, &100_000_000_000);
+
+    IntegrationTestEnv {
+        _env: env,
+        invoice,
+        pool,
+        _registry: registry,
+        issuer,
+        buyer,
+        _lp: lp,
+    }
+}
+
+#[test]
+fn test_full_lifecycle_integration() {
+    let te = setup_integration();
+
+    let face_value: u128 = 10_000_000_000;
+    let discount_bps: u32 = 200;
+    let funded_amount = face_value * (10000 - discount_bps as u128) / 10000; // 9_800_000_000
+    let yield_amount = face_value - funded_amount; // 200_000_000
+
+    // ---- Stage 1: Create invoice ----
+    let due_date = te._env.ledger().timestamp() + 86400;
+    let invoice_id = te
+        .invoice
+        .create(&te.issuer, &te.buyer, &face_value, &due_date, &te.pool.get_usdc_asset());
+    assert_eq!(te.invoice.get_status(&invoice_id), 0); // Created
+
+    let inv = te.invoice.get(&invoice_id);
+    assert_eq!(inv.issuer, te.issuer);
+    assert_eq!(inv.buyer, te.buyer);
+    assert_eq!(inv.face_value, face_value);
+    assert_eq!(inv.status, crate::InvoiceStatus::Created);
+
+    // ---- Stage 2: List for financing ----
+    te.invoice.list_for_financing(&invoice_id, &discount_bps);
+    assert_eq!(te.invoice.get_status(&invoice_id), 1); // Listed
+
+    // ---- Stage 3: Fund via pool ----
+    let stats_before_fund = te.pool.get_stats();
+    te.pool.fund_invoice(&invoice_id);
+    assert_eq!(te.invoice.get_status(&invoice_id), 2); // Funded
+    let inv = te.invoice.get(&invoice_id);
+    assert!(inv.funding_pool.is_some());
+
+    let stats_after_fund = te.pool.get_stats();
+    assert_eq!(stats_after_fund.active_invoice_count, 1);
+    assert_eq!(
+        stats_after_fund.total_funded - stats_before_fund.total_funded,
+        funded_amount
+    );
+
+    // ---- Stage 4: Mark as shipped ----
+    te.invoice.mark_shipped(&invoice_id);
+    assert_eq!(te.invoice.get_status(&invoice_id), 3); // Active
+
+    // ---- Stage 5: Confirm delivery (both parties) ----
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    assert_eq!(te.invoice.get_status(&invoice_id), 3); // Still Active (only issuer)
+    let inv = te.invoice.get(&invoice_id);
+    assert!(inv.issuer_confirmed);
+    assert!(!inv.buyer_confirmed);
+
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    assert_eq!(te.invoice.get_status(&invoice_id), 4); // Confirmed
+    let inv = te.invoice.get(&invoice_id);
+    assert!(inv.issuer_confirmed);
+    assert!(inv.buyer_confirmed);
+
+    // ---- Stage 6: Repay ----
+    let stats_before_repay = te.pool.get_stats();
+    te.invoice.repay(&invoice_id);
+    assert_eq!(te.invoice.get_status(&invoice_id), 5); // Repaid
+
+    // ---- Assert pool yield increased ----
+    let stats_after_repay = te.pool.get_stats();
+    assert_eq!(
+        stats_after_repay.total_yield_distributed,
+        stats_before_repay.total_yield_distributed + yield_amount
+    );
+    assert_eq!(
+        stats_after_repay.total_deposits,
+        stats_before_repay.total_deposits + yield_amount
+    );
+    assert_eq!(stats_after_repay.total_funded, 0);
+    assert_eq!(stats_after_repay.active_invoice_count, 0);
+
+    // LP position reflects yield
+    let pos = te.pool.get_lp_position(&te._lp);
+    assert_eq!(pos.usdc_value, 100_000_000_000 + yield_amount);
+}
