@@ -205,8 +205,8 @@ fn test_batch_register_issuers_empty_vec() {
     let admin = Address::generate(&env);
     client.initialize(&admin);
     let entries = Vec::new(&env);
-    let count = client.batch_register_issuers(&entries);
-    assert_eq!(count, 0);
+    let skipped = client.batch_register_issuers(&entries);
+    assert_eq!(skipped.len(), 0);
 }
 
 #[test]
@@ -248,8 +248,8 @@ fn test_batch_register_issuers_all_new() {
         (issuer3.clone(), metadata3),
     ];
 
-    let count = client.batch_register_issuers(&entries);
-    assert_eq!(count, 3);
+    let skipped = client.batch_register_issuers(&entries);
+    assert_eq!(skipped.len(), 0);
 
     assert!(client.is_verified(&issuer1));
     assert!(client.is_verified(&issuer2));
@@ -278,8 +278,11 @@ fn test_batch_register_issuers_all_duplicate() {
         (issuer2.clone(), map![&env]),
     ];
 
-    let count = client.batch_register_issuers(&entries);
-    assert_eq!(count, 0);
+    let skipped = client.batch_register_issuers(&entries);
+    // Both were already registered — both are reported as skipped.
+    assert_eq!(skipped.len(), 2);
+    assert!(skipped.contains(&issuer1));
+    assert!(skipped.contains(&issuer2));
 }
 
 #[test]
@@ -301,8 +304,10 @@ fn test_batch_register_issuers_mixed() {
         (issuer3.clone(), map![&env]),
     ];
 
-    let count = client.batch_register_issuers(&entries);
-    assert_eq!(count, 2);
+    let skipped = client.batch_register_issuers(&entries);
+    // Only issuer1 was already registered.
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped.contains(&issuer1));
 
     assert!(client.is_verified(&issuer1));
     assert!(client.is_verified(&issuer2));

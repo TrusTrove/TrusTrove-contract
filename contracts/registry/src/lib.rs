@@ -81,7 +81,9 @@ impl RegistryContract {
         true
     }
 
-    pub fn batch_register_issuers(env: Env, entries: Vec<(Address, Map<String, String>)>) -> u32 {
+    // Returns the list of addresses that were skipped (already registered) so
+    // the caller knows exactly which entries were not processed (#66).
+    pub fn batch_register_issuers(env: Env, entries: Vec<(Address, Map<String, String>)>) -> Vec<Address> {
         let admin: Address = env
             .storage()
             .instance()
@@ -89,11 +91,13 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         admin.require_auth();
 
-        let mut count: u32 = 0;
+        let mut skipped: Vec<Address> = Vec::new(&env);
+        let mut registered: u32 = 0;
         for entry in entries.iter() {
             let (address, metadata) = entry;
             let key = DataKey::Profile(address.clone());
             if env.storage().persistent().has(&key) {
+                skipped.push_back(address.clone());
                 continue;
             }
 
@@ -108,13 +112,13 @@ impl RegistryContract {
             env.storage().persistent().set(&key, &profile);
             env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
             events::issuer_registered(&env, &address);
-            count += 1;
+            registered += 1;
         }
 
-        if count > 0 {
+        if registered > 0 {
             Self::extend_instance_ttl(&env);
         }
-        count
+        skipped
     }
 
     /// Registers a new buyer profile with initial metadata.
