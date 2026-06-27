@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 4,
+    "address": 5,
     "nonce": 0
   },
   "auth": [
@@ -739,7 +739,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000004"
               },
               {
-                "symbol": "release_to_pool"
+                "symbol": "handle_default"
               }
             ],
             "data": {
@@ -748,10 +748,7 @@
                   "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
                 },
                 {
-                  "u128": {
-                    "hi": 0,
-                    "lo": 1000000001
-                  }
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 }
               ]
             }
@@ -773,7 +770,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 3
                 }
               }
             ],
@@ -783,7 +780,7 @@
                   "string": "failing with contract error"
                 },
                 {
-                  "u32": 5
+                  "u32": 3
                 }
               ]
             }
@@ -805,7 +802,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 3
                 }
               }
             ],
@@ -830,7 +827,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 3
                 }
               }
             ],
@@ -855,7 +852,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 3
                 }
               }
             ],
@@ -865,7 +862,7 @@
                   "string": "contract call failed"
                 },
                 {
-                  "symbol": "release_to_pool"
+                  "symbol": "handle_default"
                 },
                 {
                   "vec": [
@@ -873,10 +870,7 @@
                       "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
                     },
                     {
-                      "u128": {
-                        "hi": 0,
-                        "lo": 1000000001
-                      }
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                     }
                   ]
                 }
@@ -900,7 +894,7 @@
               },
               {
                 "error": {
-                  "contract": 5
+                  "contract": 3
                 }
               }
             ],
