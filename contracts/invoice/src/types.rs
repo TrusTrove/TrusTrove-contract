@@ -52,4 +52,9 @@ pub enum DataKey {
     InvoicesByBuyer(Address),
     InvoicesByStatus(u32),
     ExpiryWindow,
+    // Per-field hot-path keys for gas-efficient cross-contract getter reads (#62)
+    FieldStatus(BytesN<32>),
+    FieldFaceValue(BytesN<32>),
+    FieldDiscountBps(BytesN<32>),
+    FieldFundingAsset(BytesN<32>),
 }
