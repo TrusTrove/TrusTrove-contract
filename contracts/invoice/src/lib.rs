@@ -781,12 +781,7 @@ impl InvoiceContract {
         result
     }
 
-    pub fn get_by_issuer(
-        env: Env,
-        address: Address,
-        page: u32,
-        page_size: u32,
-    ) -> Vec<Invoice> {
+    pub fn get_by_issuer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
         if page_size == 0 {
             return Vec::new(&env);
         }
@@ -818,12 +813,7 @@ impl InvoiceContract {
         result
     }
 
-    pub fn get_by_buyer(
-        env: Env,
-        address: Address,
-        page: u32,
-        page_size: u32,
-    ) -> Vec<Invoice> {
+    pub fn get_by_buyer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
         if page_size == 0 {
             return Vec::new(&env);
         }
