@@ -30,6 +30,7 @@ pub struct Invoice {
     pub shipped_at: Option<u64>,
     pub issuer_confirmed: bool,
     pub buyer_confirmed: bool,
+    pub repaid_amount: u128,
     pub repaid_at: Option<u64>,
     pub funding_asset: Address,
     pub funding_pool: Option<Address>,
@@ -52,4 +53,9 @@ pub enum DataKey {
     InvoicesByBuyer(Address),
     InvoicesByStatus(u32),
     ExpiryWindow,
+    // Per-field hot-path keys for gas-efficient cross-contract getter reads (#62)
+    FieldStatus(BytesN<32>),
+    FieldFaceValue(BytesN<32>),
+    FieldDiscountBps(BytesN<32>),
+    FieldFundingAsset(BytesN<32>),
 }

@@ -189,13 +189,13 @@ impl EscrowContract {
         pool.require_auth();
 
         let key = DataKey::Locked(invoice_id.clone());
-        let record: EscrowRecord = env
+        let mut record: EscrowRecord = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        if repayment_amount != record.amount {
+        if repayment_amount > record.amount {
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
 
@@ -213,7 +213,15 @@ impl EscrowContract {
             EscrowAction::ReleasedToPool,
             repayment_amount,
         );
-        env.storage().persistent().remove(&key);
+
+        if repayment_amount == record.amount {
+            env.storage().persistent().remove(&key);
+        } else {
+            record.amount -= repayment_amount;
+            env.storage().persistent().set(&key, &record);
+            env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        }
+
         Self::extend_instance_ttl(&env);
         events::released_to_pool(&env, &invoice_id, &pool, repayment_amount);
         true

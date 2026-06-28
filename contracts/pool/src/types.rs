@@ -23,6 +23,13 @@ pub struct LPPosition {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
+pub struct FundedInvoiceData {
+    pub remaining_funded: u128,
+    pub remaining_face_value: u128,
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     InvoiceContract,

@@ -387,7 +387,13 @@ impl PoolContract {
             .set(&DataKey::ActiveInvoiceCount, &(active_count + 1));
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        env.storage().persistent().set(&funded_key, &funded_amount);
+        env.storage().persistent().set(
+            &funded_key,
+            &FundedInvoiceData {
+                remaining_funded: funded_amount,
+                remaining_face_value: face_value,
+            },
+        );
         env.storage()
             .persistent()
             .extend_ttl(&funded_key, 100, 2_000_000);
@@ -410,7 +416,6 @@ impl PoolContract {
         //
         // # Panics
         // * `InvoiceNotFound` if the invoice is not funded.
-        // * `InvalidAmount` if the repayment amount is less than the funded amount.
         //
         // # Example
         // ```ignore
@@ -424,16 +429,24 @@ impl PoolContract {
         invoice_contract.require_auth();
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        let funded_amount: u128 = env
+        let mut data: FundedInvoiceData = env
             .storage()
             .persistent()
             .get(&funded_key)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
-        if amount < funded_amount {
-            panic_with_error!(&env, PoolError::InvalidAmount);
+
+        let principal_portion: u128;
+        let yield_amount: u128;
+        let is_final = amount >= data.remaining_face_value;
+
+        if is_final {
+            principal_portion = data.remaining_funded;
+            yield_amount = amount - principal_portion;
+        } else {
+            principal_portion = amount * data.remaining_funded / data.remaining_face_value;
+            yield_amount = amount - principal_portion;
         }
 
-        let yield_amount = amount - funded_amount;
         let total_deposits: u128 = env
             .storage()
             .instance()
@@ -455,18 +468,26 @@ impl PoolContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+            .set(&DataKey::TotalFunded, &(total_funded - principal_portion));
 
-        let active_count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ActiveInvoiceCount)
-            .unwrap();
-        env.storage()
-            .instance()
-            .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
-
-        env.storage().persistent().remove(&funded_key);
+        if is_final {
+            let active_count: u32 = env
+                .storage()
+                .instance()
+                .get(&DataKey::ActiveInvoiceCount)
+                .unwrap();
+            env.storage()
+                .instance()
+                .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
+            env.storage().persistent().remove(&funded_key);
+        } else {
+            data.remaining_funded -= principal_portion;
+            data.remaining_face_value -= amount;
+            env.storage().persistent().set(&funded_key, &data);
+            env.storage()
+                .persistent()
+                .extend_ttl(&funded_key, 100, 2_000_000);
+        }
 
         events::repayment_received(&env, &invoice_id, amount, yield_amount);
         Self::extend_instance_ttl(&env);
@@ -498,7 +519,8 @@ impl PoolContract {
         if !env.storage().persistent().has(&funded_key) {
             return false;
         }
-        let funded_amount: u128 = env.storage().persistent().get(&funded_key).unwrap();
+        let data: FundedInvoiceData = env.storage().persistent().get(&funded_key).unwrap();
+        let funded_amount = data.remaining_funded;
 
         let escrow_contract: Address = env
             .storage()
