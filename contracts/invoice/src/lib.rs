@@ -757,7 +757,7 @@ impl InvoiceContract {
         let mut skipped = 0u32;
         let mut result: Vec<Invoice> = Vec::new(&env);
         for i in 0..count {
-            if result.len() >= page_size as usize {
+            if result.len() >= page_size {
                 break;
             }
             let id: BytesN<32> = env
@@ -791,17 +791,17 @@ impl InvoiceContract {
             .persistent()
             .get(&DataKey::IssuerIndexCount(address.clone()))
             .unwrap_or(0);
-        let start = page.saturating_mul(page_size) as usize;
-        if start >= count as usize {
+        let start = page.saturating_mul(page_size);
+        if start >= count {
             return Vec::new(&env);
         }
-        let end = core::cmp::min(start + page_size as usize, count as usize);
+        let end = core::cmp::min(start.saturating_add(page_size), count);
         let mut result: Vec<Invoice> = Vec::new(&env);
         for i in start..end {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::IssuerIndexEntry(address.clone(), i as u32))
+                .get(&DataKey::IssuerIndexEntry(address.clone(), i))
                 .unwrap();
             let invoice: Invoice = env
                 .storage()
@@ -823,17 +823,17 @@ impl InvoiceContract {
             .persistent()
             .get(&DataKey::BuyerIndexCount(address.clone()))
             .unwrap_or(0);
-        let start = page.saturating_mul(page_size) as usize;
-        if start >= count as usize {
+        let start = page.saturating_mul(page_size);
+        if start >= count {
             return Vec::new(&env);
         }
-        let end = core::cmp::min(start + page_size as usize, count as usize);
+        let end = core::cmp::min(start.saturating_add(page_size), count);
         let mut result: Vec<Invoice> = Vec::new(&env);
         for i in start..end {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::BuyerIndexEntry(address.clone(), i as u32))
+                .get(&DataKey::BuyerIndexEntry(address.clone(), i))
                 .unwrap();
             let invoice: Invoice = env
                 .storage()
