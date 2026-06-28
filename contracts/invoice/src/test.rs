@@ -201,11 +201,11 @@ fn test_get_by_issuer_returns_correct_invoices() {
     client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let invoices = client.get_by_issuer(&issuer);
+    let invoices = client.get_by_issuer(&issuer, &0, &10);
     assert_eq!(invoices.len(), 2);
 
     let other = Address::generate(&env);
-    let empty = client.get_by_issuer(&other);
+    let empty = client.get_by_issuer(&other, &0, &10);
     assert_eq!(empty.len(), 0);
 }
 
@@ -217,7 +217,7 @@ fn test_get_by_buyer_returns_correct_invoices() {
     client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let invoices = client.get_by_buyer(&buyer);
+    let invoices = client.get_by_buyer(&buyer, &0, &10);
     assert_eq!(invoices.len(), 2);
 }
 
@@ -229,8 +229,77 @@ fn test_get_by_status_returns_correct_invoices() {
     client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let created = client.get_by_status(&InvoiceStatus::Created);
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &10);
     assert_eq!(created.len(), 2);
+}
+
+#[test]
+fn test_get_by_issuer_pagination() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    for i in 0..5 {
+        client.create(
+            &issuer,
+            &buyer,
+            &(1_000_000_000 + i as u128),
+            &due_date,
+            &usdc,
+        );
+    }
+
+    let page0 = client.get_by_issuer(&issuer, &0, &2);
+    assert_eq!(page0.len(), 2);
+    let page1 = client.get_by_issuer(&issuer, &1, &2);
+    assert_eq!(page1.len(), 2);
+    let page2 = client.get_by_issuer(&issuer, &2, &2);
+    assert_eq!(page2.len(), 1);
+    let page3 = client.get_by_issuer(&issuer, &3, &2);
+    assert_eq!(page3.len(), 0);
+}
+
+#[test]
+fn test_get_by_buyer_pagination() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    for i in 0..4 {
+        client.create(
+            &issuer,
+            &buyer,
+            &(1_000_000_000 + i as u128),
+            &due_date,
+            &usdc,
+        );
+    }
+
+    let page0 = client.get_by_buyer(&buyer, &0, &3);
+    assert_eq!(page0.len(), 3);
+    let page1 = client.get_by_buyer(&buyer, &1, &3);
+    assert_eq!(page1.len(), 1);
+}
+
+#[test]
+fn test_get_by_status_pagination() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    for i in 0..4 {
+        client.create(
+            &issuer,
+            &buyer,
+            &(1_000_000_000 + i as u128),
+            &due_date,
+            &usdc,
+        );
+    }
+
+    let page0 = client.get_by_status(&InvoiceStatus::Created, &0, &2);
+    assert_eq!(page0.len(), 2);
+    let page1 = client.get_by_status(&InvoiceStatus::Created, &1, &2);
+    assert_eq!(page1.len(), 2);
+    let empty = client.get_by_status(&InvoiceStatus::Created, &0, &0);
+    assert_eq!(empty.len(), 0);
 }
 
 #[test]
@@ -333,13 +402,13 @@ fn test_get_by_status_filters_correctly() {
     let id1 = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let created = client.get_by_status(&InvoiceStatus::Created);
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &10);
     assert_eq!(created.len(), 2);
 
     client.list_for_financing(&id1, &200);
-    let created = client.get_by_status(&InvoiceStatus::Created);
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &10);
     assert_eq!(created.len(), 1);
-    let listed = client.get_by_status(&InvoiceStatus::Listed);
+    let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &10);
     assert_eq!(listed.len(), 1);
 }
 
