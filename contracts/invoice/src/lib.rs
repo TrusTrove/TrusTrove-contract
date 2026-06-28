@@ -737,7 +737,12 @@ impl InvoiceContract {
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
     }
 
-    pub fn get_by_status(env: Env, status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice> {
+    pub fn get_by_status(
+        env: Env,
+        status: InvoiceStatus,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Invoice> {
         if page_size == 0 {
             return Vec::new(&env);
         }
@@ -776,7 +781,12 @@ impl InvoiceContract {
         result
     }
 
-    pub fn get_by_issuer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+    pub fn get_by_issuer(
+        env: Env,
+        address: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Invoice> {
         if page_size == 0 {
             return Vec::new(&env);
         }
@@ -808,7 +818,12 @@ impl InvoiceContract {
         result
     }
 
-    pub fn get_by_buyer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+    pub fn get_by_buyer(
+        env: Env,
+        address: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Invoice> {
         if page_size == 0 {
             return Vec::new(&env);
         }
