@@ -919,3 +919,257 @@ fn test_full_lifecycle_multiple_invoices() {
     assert_eq!(pos.usdc_value, 90_600_000_000);
     assert_eq!(pos.yield_earned, 0);
 }
+
+// ============== EDGE CASE TESTS ==============
+
+fn create_and_list_ext(
+    te: &TestEnv,
+    funding_asset: &Address,
+    face_value: u128,
+    discount_bps: u32,
+) -> BytesN<32> {
+    let due_date = te.env.ledger().timestamp() + 86400;
+    let invoice_id =
+        te.invoice
+            .create(&te.issuer, &te.buyer, &face_value, &due_date, funding_asset);
+    te.invoice.list_for_financing(&invoice_id, &discount_bps);
+    invoice_id
+}
+
+#[test]
+fn test_edge_min_deposit_and_withdraw() {
+    let te = setup();
+    // Minimum positive deposit = 1
+    let shares = te.pool.deposit(&te.lp, &1);
+    assert_eq!(shares, 1, "1 USDC deposit gives 1 share at 1:1");
+
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 1);
+    assert_eq!(pos.usdc_value, 1);
+
+    let usdc = te.pool.withdraw(&te.lp, &1);
+    assert_eq!(usdc, 1, "1 share withdraw returns 1 USDC at 1:1");
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 0);
+    assert_eq!(stats.total_shares, 0);
+}
+
+#[test]
+fn test_edge_large_deposit_near_u128_max() {
+    let te = setup();
+    // i128::MAX is the largest balance MockToken can hold
+    let max_i128 = i128::MAX as u128;
+    let lp2 = create_lp_with_balance(&te, i128::MAX);
+
+    let shares = te.pool.deposit(&lp2, &max_i128);
+    assert_eq!(shares, max_i128, "large deposit issues 1:1 shares");
+
+    let pos = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos.shares, max_i128);
+    assert_eq!(pos.usdc_value, max_i128);
+
+    // Withdraw all
+    let usdc = te.pool.withdraw(&lp2, &max_i128);
+    assert_eq!(usdc, max_i128, "full withdrawal returns deposited amount");
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_edge_deposit_overflow_panics() {
+    let te = setup();
+    let lp2 = create_lp_with_balance(&te, i128::MAX);
+
+    // First deposit: large total_shares (10^20)
+    te.pool.deposit(&lp2, &100_000_000_000_000_000_000u128);
+
+    // Second deposit: product = 5e18 * 1e20 = 5e38 > u128::MAX → overflow
+    te.pool.deposit(&lp2, &5_000_000_000_000_000_000u128);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_edge_withdraw_overflow_panics() {
+    let te = setup();
+    let lp2 = create_lp_with_balance(&te, i128::MAX);
+
+    // Single large deposit: total_shares = 1e20, total_deposits = 1e20
+    te.pool.deposit(&lp2, &100_000_000_000_000_000_000u128);
+
+    // Withdraw all: shares * total_deposits = 1e20 * 1e20 = 1e40 > u128::MAX
+    te.pool.withdraw(&lp2, &100_000_000_000_000_000_000u128);
+}
+
+#[test]
+fn test_edge_fund_repay_with_zero_discount() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Invoice with 0 discount → funded_amount = face_value
+    let invoice_id = create_and_list_ext(&te, &te.usdc_id, 10_000_000_000, 0);
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, 10_000_000_000);
+    assert_eq!(stats.active_invoice_count, 1);
+
+    // Repay with exact face_value → zero yield
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.invoice.repay(&invoice_id);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, 0);
+    assert_eq!(stats.total_yield_distributed, 0);
+    assert_eq!(stats.total_deposits, 100_000_000_000);
+}
+
+#[test]
+fn test_edge_fund_repay_with_max_discount() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Invoice with max 5000bps discount → funded at 50% face value
+    let invoice_id = create_and_list_ext(&te, &te.usdc_id, 20_000_000_000, 5000);
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // funded_amount = 20B * (10000 - 5000) / 10000 = 10B
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, 10_000_000_000);
+
+    // Repay face_value (20B) → yield = 10B
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.invoice.repay(&invoice_id);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, 0);
+    assert_eq!(stats.total_yield_distributed, 10_000_000_000);
+    assert_eq!(stats.total_deposits, 110_000_000_000);
+}
+
+#[test]
+fn test_edge_fund_default_at_min_deposit() {
+    let te = setup();
+    // Deposit just enough to fund one invoice (9.8B)
+    te.pool.deposit(&te.lp, &9_800_000_000);
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.available_liquidity, 0);
+    assert_eq!(stats.utilization_rate_bps, 10000);
+
+    // Default → deposits wiped
+    te.pool.handle_default(&invoice_id);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 0);
+    assert_eq!(stats.total_funded, 0);
+
+    // New deposit after total_deposits=0, total_shares>0 should work
+    let lp2 = create_lp_with_balance(&te, 10_000_000_000);
+    let shares = te.pool.deposit(&lp2, &5_000_000_000);
+    assert_eq!(shares, 5_000_000_000, "deposit after wipe uses 1:1 because total_deposits==0");
+}
+
+#[test]
+fn test_edge_split_fund_two_invoices_min_liquidity() {
+    let te = setup();
+    // Deposit enough for 2 invoices (19.6B)
+    te.pool.deposit(&te.lp, &19_600_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    let inv2 = create_and_list(&te, &te.usdc_id);
+
+    te.pool.fund_invoice(&inv1);
+    te.pool.fund_invoice(&inv2);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.available_liquidity, 0);
+    assert_eq!(stats.total_funded, 19_600_000_000);
+
+    // Repay one, keeping available_liquidity at 0
+    te.invoice.mark_shipped(&inv1);
+    te.invoice.confirm_delivery(&inv1, &te.issuer);
+    te.invoice.confirm_delivery(&inv1, &te.buyer);
+    te.invoice.repay(&inv1);
+
+    // After repay: total_deposits increased by 200M yield
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.available_liquidity, 10_000_000_000);
+    assert_eq!(stats.total_funded, 9_800_000_000);
+}
+
+#[test]
+fn test_edge_withdraw_exact_available_liquidity() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+
+    // available = 100B - 9.8B = 90.2B
+    // Withdraw exactly the available amount
+    let usdc = te.pool.withdraw(&te.lp, &90_200_000_000);
+    assert_eq!(usdc, 90_200_000_000, "withdraw exactly available liquidity");
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.available_liquidity, 0);
+    assert_eq!(stats.total_shares, 9_800_000_000);
+
+    // Remaining shares (backing the funded invoice)
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 9_800_000_000);
+}
+
+#[test]
+fn test_edge_max_utilization_rate_boundaries() {
+    let te = setup();
+
+    // 0% utilization
+    assert_eq!(te.pool.get_utilization_rate(), 0);
+
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    assert_eq!(te.pool.get_utilization_rate(), 0);
+
+    // Push to exactly 10000 bps (100%) by funding all available
+    // Need total_deposits >= funded_amount; use 0 discount
+    let invoice_id = create_and_list_ext(&te, &te.usdc_id, 10_000_000_000, 0);
+    te.pool.fund_invoice(&invoice_id);
+
+    assert_eq!(te.pool.get_utilization_rate(), 10000);
+    assert_eq!(te.pool.get_stats().available_liquidity, 0);
+}
+
+#[test]
+fn test_edge_deposit_after_partial_default_with_remainder_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.handle_default(&inv1);
+
+    // After default: total_deposits = 90.2B, total_shares = 100B
+    // share price = 90.2B / 100B = 0.902
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 90_200_000_000);
+    assert_eq!(stats.total_shares, 100_000_000_000);
+
+    // New LP deposits at below-par share price
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let shares = te.pool.deposit(&lp2, &9_020_000_000);
+    // 9.02B * 100B / 90.2B = 10B (exact division, no remainder)
+    assert_eq!(shares, 10_000_000_000);
+
+    let pos = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos.shares, 10_000_000_000);
+    assert_eq!(pos.usdc_value, 9_020_000_000);
+}
