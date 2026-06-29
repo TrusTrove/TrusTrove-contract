@@ -79,12 +79,20 @@ impl RegistryContract {
         true
     }
 
-    // Returns the list of addresses that were skipped (already registered) so
+    // Maximum number of entries accepted by batch_register_issuers to prevent
+// gas exhaustion and DoS from oversized input vectors.
+const MAX_BATCH_SIZE: u32 = 100;
+
+// Returns the list of addresses that were skipped (already registered) so
     // the caller knows exactly which entries were not processed (#66).
     pub fn batch_register_issuers(
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
     ) -> Vec<Address> {
+        if entries.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, RegistryError::BatchTooLarge);
+        }
+
         let admin: Address = env
             .storage()
             .instance()

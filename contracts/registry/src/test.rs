@@ -315,6 +315,21 @@ fn test_batch_register_issuers_mixed() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_batch_register_issuers_exceeds_max_panics() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let mut entries = Vec::new(&env);
+    for _ in 0..101 {
+        let addr = Address::generate(&env);
+        entries.push_back((addr, map![&env]));
+    }
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
 fn test_verify_profile_updates_status() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
