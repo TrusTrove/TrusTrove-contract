@@ -735,18 +735,33 @@ impl InvoiceContract {
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
     }
 
-    pub fn get_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
+    pub fn get_by_status(
+        env: Env,
+        status: InvoiceStatus,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<Invoice> {
+        if page_size == 0 {
+            return Vec::new(&env);
+        }
+
+        let status_u32 = status as u32;
         let count: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::StatusIndexCount(status as u32))
+            .get(&DataKey::StatusIndexCount(status_u32))
             .unwrap_or(0);
+        let skip = page.saturating_mul(page_size);
+        let mut skipped = 0u32;
         let mut result: Vec<Invoice> = Vec::new(&env);
         for i in 0..count {
+            if result.len() >= page_size {
+                break;
+            }
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::StatusIndexEntry(status as u32, i))
+                .get(&DataKey::StatusIndexEntry(status_u32, i))
                 .unwrap();
             let invoice: Invoice = env
                 .storage()
@@ -754,20 +769,33 @@ impl InvoiceContract {
                 .get(&DataKey::Invoice(id))
                 .unwrap();
             if invoice.status == status {
-                result.push_back(invoice);
+                if skipped < skip {
+                    skipped += 1;
+                } else {
+                    result.push_back(invoice);
+                }
             }
         }
         result
     }
 
-    pub fn get_by_issuer(env: Env, address: Address) -> Vec<Invoice> {
+    pub fn get_by_issuer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+        if page_size == 0 {
+            return Vec::new(&env);
+        }
+
         let count: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::IssuerIndexCount(address.clone()))
             .unwrap_or(0);
+        let start = page.saturating_mul(page_size);
+        if start >= count {
+            return Vec::new(&env);
+        }
+        let end = core::cmp::min(start.saturating_add(page_size), count);
         let mut result: Vec<Invoice> = Vec::new(&env);
-        for i in 0..count {
+        for i in start..end {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
@@ -783,14 +811,23 @@ impl InvoiceContract {
         result
     }
 
-    pub fn get_by_buyer(env: Env, address: Address) -> Vec<Invoice> {
+    pub fn get_by_buyer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+        if page_size == 0 {
+            return Vec::new(&env);
+        }
+
         let count: u32 = env
             .storage()
             .persistent()
             .get(&DataKey::BuyerIndexCount(address.clone()))
             .unwrap_or(0);
+        let start = page.saturating_mul(page_size);
+        if start >= count {
+            return Vec::new(&env);
+        }
+        let end = core::cmp::min(start.saturating_add(page_size), count);
         let mut result: Vec<Invoice> = Vec::new(&env);
-        for i in 0..count {
+        for i in start..end {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
