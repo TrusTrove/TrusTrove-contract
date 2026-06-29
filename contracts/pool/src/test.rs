@@ -947,7 +947,10 @@ fn test_precision_withdraw_ceil_recovers_value() {
     // Ceiling: 1000 (full deposit recovered)
     let usdc = te.pool.withdraw(&lp2, &shares);
     assert!(usdc > 999, "ceiling returns more than floor");
-    assert_eq!(usdc, 1000, "ceiling rounding recovers full 1000 USDC deposit");
+    assert_eq!(
+        usdc, 1000,
+        "ceiling rounding recovers full 1000 USDC deposit"
+    );
 
     let pos = te.pool.get_lp_position(&lp2);
     assert_eq!(pos.shares, 0);
@@ -1017,7 +1020,10 @@ fn test_precision_dust_share_gets_1_usdc() {
     // Withdraw that 1 share — ceiling rounding prevents value loss
     // 1 * total_deposits / total_shares = floor ≈ 0 or 1 depending on state
     let usdc = te.pool.withdraw(&lp2, &shares);
-    assert!(usdc >= 1, "ceiling rounding ensures dust share returns >= 1 USDC");
+    assert!(
+        usdc >= 1,
+        "ceiling rounding ensures dust share returns >= 1 USDC"
+    );
 
     let pos = te.pool.get_lp_position(&lp2);
     assert_eq!(pos.shares, 0);
@@ -1044,6 +1050,12 @@ fn test_precision_multiple_withdrawals_accumulate() {
     let stats = te.pool.get_stats();
     let floor_per_490 = 490 * stats.total_deposits / stats.total_shares;
     let floor_total = floor_per_490 * 2;
-    assert!(total >= floor_total, "ceiling rounding recovers value on each partial withdrawal");
-    assert!(total <= floor_total + 2, "at most 2 extra from ceiling on two withdrawals");
+    assert!(
+        total >= floor_total,
+        "ceiling rounding recovers value on each partial withdrawal"
+    );
+    assert!(
+        total <= floor_total + 2,
+        "at most 2 extra from ceiling on two withdrawals"
+    );
 }
