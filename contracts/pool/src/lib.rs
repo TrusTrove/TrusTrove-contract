@@ -440,6 +440,16 @@ impl PoolContract {
     pub fn handle_default(env: Env, invoice_id: BytesN<32>) -> bool {
         // Forwards a defaulted invoice to escrow default handling.
         //
+        // When an invoice defaults, `EscrowContract::handle_default` transfers the
+        // previously locked `funded_amount` back to the pool's USDC balance. Since
+        // `TotalDeposits` represents the total assets owned by the pool (including
+        // funds held in escrow on the pool's behalf), the pool's NAV does not change
+        // when those funds simply move from escrow back into the pool's balance.
+        // Only `TotalFunded` is decremented to reflect that the invoice is no longer
+        // active; `TotalDeposits` and the share price remain stable. This avoids the
+        // previous off-by-default-loss accounting that artificially depressed the
+        // share price after every default. See issue #128.
+        //
         // # Arguments
         // * `env` - The Soroban environment.
         // * `invoice_id` - The defaulted invoice.
@@ -477,18 +487,10 @@ impl PoolContract {
             env.invoke_contract(&escrow_contract, &Symbol::new(&env, "handle_default"), args);
 
         let total_funded: u128 = env.storage().instance().get(&DataKey::TotalFunded).unwrap();
-        let total_deposits: u128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalDeposits)
-            .unwrap();
 
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits - funded_amount));
 
         let active_count: u32 = env
             .storage()

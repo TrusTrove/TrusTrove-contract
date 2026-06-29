@@ -583,15 +583,16 @@ fn test_handle_default() {
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
 
-    // funded_amount = 10_000_000_000 * 9800 / 10000 = 9_800_000_000
-    let funded_amount = 9_800_000_000;
-
     let before = te.pool.get_stats();
     let result = te.pool.handle_default(&invoice_id);
     assert!(result);
 
     let after = te.pool.get_stats();
-    assert_eq!(after.total_deposits, before.total_deposits - funded_amount);
+    // Issue #128: When escrow returns the locked principal to the pool's
+    // balance, the pool's NAV does not change -- only TotalFunded is
+    // decremented. This preserves the share price and prevents the
+    // off-by-default-loss accounting bug.
+    assert_eq!(after.total_deposits, before.total_deposits);
     assert_eq!(after.total_funded, 0);
     assert_eq!(after.active_invoice_count, 0);
 }
@@ -605,27 +606,70 @@ fn test_handle_default_unknown_invoice_returns_false() {
 }
 
 #[test]
-fn test_deposit_when_deposits_zero_but_shares_exist() {
+fn test_handle_default_preserves_share_price() {
+    // Issue #128 acceptance criteria: share price must remain stable after a
+    // default recovery so that LPs do not see a phantom loss on an invoice
+    // whose principal is returned to the pool's balance by escrow.
     let te = setup();
-
-    // Deposit exact amount needed to fund the standard test invoice
-    // (10B face value, 200bps discount = 9.8B funding amount)
-    te.pool.deposit(&te.lp, &9_800_000_000);
+    te.pool.deposit(&te.lp, &100_000_000_000);
 
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
 
-    // Trigger default, wiping out all pool deposits
+    // Active funding does not move total_deposits or total_shares -- only
+    // total_funded/utilization. So the share price is the same during
+    // funding as before it.
+    let stats_before_default = te.pool.get_stats();
+    assert_eq!(stats_before_default.total_funded, 9_800_000_000);
+    let price_during = stats_before_default.total_deposits / stats_before_default.total_shares;
+
     te.pool.handle_default(&invoice_id);
 
-    let stats = te.pool.get_stats();
-    assert_eq!(stats.total_deposits, 0);
-    assert!(stats.total_shares > 0);
+    let stats_after = te.pool.get_stats();
+    assert_eq!(
+        stats_after.total_deposits, stats_before_default.total_deposits,
+        "TotalDeposits must remain constant across a default recovery (issue #128)"
+    );
+    assert_eq!(
+        stats_after.total_shares, stats_before_default.total_shares,
+        "TotalShares must be unaffected by handle_default"
+    );
+    assert_eq!(stats_after.total_funded, 0);
+    assert_eq!(
+        stats_after.total_deposits / stats_after.total_shares,
+        price_during,
+        "Share price must remain stable after default recovery"
+    );
 
-    // Attempt new deposit, which should not panic and should issue 1-to-1 shares
-    let lp2 = create_lp_with_balance(&te, 10_000_000_000);
-    let new_shares = te.pool.deposit(&lp2, &5_000_000_000);
-    assert_eq!(new_shares, 5_000_000_000);
+    // And the LP's reported usdc_value must equal their pre-default deposit.
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 100_000_000_000);
+    assert_eq!(pos.usdc_value, 100_000_000_000);
+}
+
+#[test]
+fn test_handle_default_restores_full_available_liquidity() {
+    // After a default the escrow-led principal is back in the pool's balance,
+    // so available_liquidity must climb back to 100% of deposits, not stay
+    // depressed by a phantom TotalDeposits subtraction.
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let stats_after_default = {
+        te.pool.handle_default(&invoice_id);
+        te.pool.get_stats()
+    };
+
+    assert_eq!(stats_after_default.total_deposits, 100_000_000_000);
+    assert_eq!(stats_after_default.total_funded, 0);
+    assert_eq!(
+        stats_after_default.available_liquidity, 100_000_000_000,
+        "available_liquidity must equal TotalDeposits when no invoices are active"
+    );
+    assert_eq!(stats_after_default.utilization_rate_bps, 0);
 }
 
 // ============== MULTI-INVOICE LIFECYCLE TESTS ==============
@@ -654,20 +698,23 @@ fn test_multi_invoice_fund_two_repay_one_default_one() {
     assert_eq!(stats_after_repay.active_invoice_count, 1);
     assert_eq!(stats_after_repay.total_yield_distributed, 200_000_000);
     assert_eq!(stats_after_repay.total_funded, 9_800_000_000);
+    assert_eq!(stats_after_repay.total_deposits, 100_200_000_000);
 
-    // Default inv2: removes 9_800_000_000 from deposits
+    // Default inv2: principal returns to the pool's balance.
+    // TotalDeposits is unchanged (issue #128), only TotalFunded drops.
     te.pool.handle_default(&inv2);
 
     let stats_final = te.pool.get_stats();
     assert_eq!(stats_final.active_invoice_count, 0);
     assert_eq!(stats_final.total_funded, 0);
-    // total_deposits = 100B (initial) + 200M (yield from repaid) - 9.8B (defaulted) = 90_400_000_000
-    assert_eq!(stats_final.total_deposits, 90_400_000_000);
+    // total_deposits = 100B + 200M (yield from repaid inv1) = 100_200_000_000.
+    // Defaults no longer subtract from TotalDeposits.
+    assert_eq!(stats_final.total_deposits, 100_200_000_000);
 
-    // LP value reflects both outcomes
+    // LP value reflects the yield harvested, NOT a phantom loss on inv2.
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.shares, 100_000_000_000);
-    assert_eq!(pos.usdc_value, 90_400_000_000);
+    assert_eq!(pos.usdc_value, 100_200_000_000);
 }
 
 #[test]
@@ -680,14 +727,15 @@ fn test_multi_invoice_default_first_then_repay_second() {
     te.pool.fund_invoice(&inv1);
     te.pool.fund_invoice(&inv2);
 
-    // Default inv1 first
+    // Default inv1 first. Per issue #128 TotalDeposits must NOT be reduced.
     te.pool.handle_default(&inv1);
 
     let stats_mid = te.pool.get_stats();
     assert_eq!(stats_mid.active_invoice_count, 1);
-    assert_eq!(stats_mid.total_deposits, 90_200_000_000);
+    assert_eq!(stats_mid.total_deposits, 100_000_000_000);
+    assert_eq!(stats_mid.total_funded, 9_800_000_000);
 
-    // Repay inv2: adds yield on reduced pool
+    // Repay inv2: yield is added on the (now-preserved) pool size.
     te.invoice.mark_shipped(&inv2);
     te.invoice.confirm_delivery(&inv2, &te.issuer);
     te.invoice.confirm_delivery(&inv2, &te.buyer);
@@ -696,8 +744,8 @@ fn test_multi_invoice_default_first_then_repay_second() {
     let stats_final = te.pool.get_stats();
     assert_eq!(stats_final.active_invoice_count, 0);
     assert_eq!(stats_final.total_funded, 0);
-    // 90.2B (after default) + 200M (yield from repay) = 90_400_000_000
-    assert_eq!(stats_final.total_deposits, 90_400_000_000);
+    // 100B (TotalDeposits preserved through default) + 200M (yield from repay) = 100_200_000_000.
+    assert_eq!(stats_final.total_deposits, 100_200_000_000);
     assert_eq!(stats_final.total_yield_distributed, 200_000_000);
 }
 
@@ -756,7 +804,13 @@ fn test_new_lp_deposits_after_multiple_yield_events() {
 // ============== SERIES OF DEFAULTS TESTS ==============
 
 #[test]
-fn test_series_of_defaults_erodes_lp_value() {
+fn test_series_of_defaults_preserves_lp_principal() {
+    // Issue #128: under the correct accounting, defaults do NOT subtract from
+    // TotalDeposits because the locked principal is still owned by the pool
+    // (escrow is just custodying it).  Repeated defaults therefore preserve
+    // the LP's principal even though every yield opportunity is lost.
+    // Only the missed yield differentiates this scenario from a clean
+    // deposit/withdraw round-trip.
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
 
@@ -769,15 +823,15 @@ fn test_series_of_defaults_erodes_lp_value() {
     te.pool.handle_default(&inv1);
     te.pool.handle_default(&inv2);
 
-    // Deposits reduced by 2 * 9.8B = 19.6B
+    // TotalDeposits stays at 100B because no yield was ever added.
     let stats = te.pool.get_stats();
-    assert_eq!(stats.total_deposits, 80_400_000_000);
+    assert_eq!(stats.total_deposits, 100_000_000_000);
     assert_eq!(stats.total_funded, 0);
     assert_eq!(stats.active_invoice_count, 0);
 
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.shares, 100_000_000_000);
-    assert_eq!(pos.usdc_value, 80_400_000_000);
+    assert_eq!(pos.usdc_value, 100_000_000_000);
     assert_eq!(pos.yield_earned, 0);
 }
 
@@ -790,17 +844,20 @@ fn test_withdraw_after_default_partial() {
     te.pool.fund_invoice(&inv1);
     te.pool.handle_default(&inv1);
 
-    // After default: 100B - 9.8B = 90.2B deposits, 100B shares
+    // After default (issue #128): TotalDeposits preserved at 100B,
+    // TotalFunded drops to 0, available liquidity returns to 100B.
     let stats = te.pool.get_stats();
-    assert_eq!(stats.total_deposits, 90_200_000_000);
+    assert_eq!(stats.total_deposits, 100_000_000_000);
+    assert_eq!(stats.total_funded, 0);
+    assert_eq!(stats.available_liquidity, 100_000_000_000);
 
-    // Withdraw half shares: 50B shares → 50B * 90.2B / 100B = 45_100_000_000 USDC
+    // Withdraw half shares: 50B * 100B / 100B = 50_000_000_000 USDC
     let usdc_returned = te.pool.withdraw(&te.lp, &50_000_000_000);
-    assert_eq!(usdc_returned, 45_100_000_000);
+    assert_eq!(usdc_returned, 50_000_000_000);
 
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.shares, 50_000_000_000);
-    assert_eq!(pos.usdc_value, 45_100_000_000);
+    assert_eq!(pos.usdc_value, 50_000_000_000);
 }
 
 #[test]
@@ -812,8 +869,9 @@ fn test_withdraw_full_after_default() {
     te.pool.fund_invoice(&inv1);
     te.pool.handle_default(&inv1);
 
+    // Full withdrawal of the LP's principal: 100B * 100B / 100B = 100B.
     let usdc_returned = te.pool.withdraw(&te.lp, &100_000_000_000);
-    assert_eq!(usdc_returned, 90_200_000_000);
+    assert_eq!(usdc_returned, 100_000_000_000);
 
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_deposits, 0);
@@ -834,11 +892,12 @@ fn test_two_lps_one_withdraws_after_default() {
     te.pool.fund_invoice(&inv1);
     te.pool.handle_default(&inv1);
 
-    // Both LPs share the loss equally (50/50)
+    // After the corrected accounting (issue #128) each LP gets their full
+    // original deposit back -- there is no shared principal loss on default.
     let usdc1 = te.pool.withdraw(&te.lp, &50_000_000_000);
     let usdc2 = te.pool.withdraw(&lp2, &50_000_000_000);
-    assert_eq!(usdc1, 45_100_000_000);
-    assert_eq!(usdc2, 45_100_000_000);
+    assert_eq!(usdc1, 50_000_000_000);
+    assert_eq!(usdc2, 50_000_000_000);
 
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_deposits, 0);
@@ -910,12 +969,13 @@ fn test_full_lifecycle_multiple_invoices() {
     let stats_final = te.pool.get_stats();
     assert_eq!(stats_final.active_invoice_count, 0);
     assert_eq!(stats_final.total_funded, 0);
-    // 100B + 200M (inv1 yield) - 9.8B (inv2 default) + 200M (inv3 yield) = 90_600_000_000
-    assert_eq!(stats_final.total_deposits, 90_600_000_000);
+    // 100B (initial, preserved through inv2 default) + 200M (inv1 yield) + 200M (inv3 yield) = 100_400_000_000.
+    // Default of inv2 no longer subtracts from TotalDeposits (issue #128).
+    assert_eq!(stats_final.total_deposits, 100_400_000_000);
     assert_eq!(stats_final.total_yield_distributed, 400_000_000);
 
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.shares, 100_000_000_000);
-    assert_eq!(pos.usdc_value, 90_600_000_000);
+    assert_eq!(pos.usdc_value, 100_400_000_000);
     assert_eq!(pos.yield_earned, 0);
 }
