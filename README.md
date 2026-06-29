@@ -67,7 +67,7 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 ```
 
 ```
-create(issuer, buyer, face_value, due_date) → invoice_id
+create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
 list_for_financing(invoice_id, discount_bps) → bool
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
@@ -78,6 +78,17 @@ get(invoice_id) → Invoice
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
 ```
+
+**Supported Assets:** The invoice contract maintains a whitelist of supported funding assets. Only assets registered via `add_supported_asset` can be used when creating invoices. This prevents issuers from creating invoices with unsupported tokens that no pool can fund. The admin manages the supported asset list:
+
+```
+add_supported_asset(asset)    ← admin only
+remove_supported_asset(asset) ← admin only
+is_supported_asset(asset) → bool
+get_supported_asset_count() → u32
+```
+
+Currently supported assets: USDC (Stellar testnet), XLM (Stellar testnet).
 
 ### escrow_contract
 

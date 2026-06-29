@@ -90,6 +90,7 @@ pub fn expiry_window_set(env: &Env, window: u64) {
         .publish((Symbol::new(env, "expiry_window_set"),), window);
 }
 
+#[allow(dead_code)]
 pub fn delivery_unconfirmed(env: &Env, invoice_id: &BytesN<32>) {
     env.events().publish(
         (Symbol::new(env, "delivery_unconfirmed"), invoice_id.clone()),

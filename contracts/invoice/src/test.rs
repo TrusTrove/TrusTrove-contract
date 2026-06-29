@@ -88,6 +88,7 @@ fn setup() -> Setup {
     client.initialize(&admin, &registry_id);
 
     let usdc_asset = Address::generate(&env);
+    client.add_supported_asset(&usdc_asset);
 
     (env, client, issuer, buyer, registry_client, usdc_asset)
 }
@@ -111,6 +112,7 @@ fn setup_with_admin() -> SetupWithAdmin {
     client.initialize(&admin, &registry_id);
 
     let usdc_asset = Address::generate(&env);
+    client.add_supported_asset(&usdc_asset);
 
     (
         env,
@@ -459,6 +461,7 @@ fn test_create_invoice_with_xlm_asset() {
     let (env, client, issuer, buyer, _, _usdc) = setup();
     let due_date = env.ledger().timestamp() + 86400;
     let xlm_asset = Address::generate(&env);
+    client.add_supported_asset(&xlm_asset);
 
     let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &xlm_asset);
     let invoice = client.get(&invoice_id);
@@ -487,14 +490,14 @@ fn test_expire_listing_succeeds_by_issuer() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    let result = client.expire_listing(&invoice_id, &issuer);
+    let result = client.expire_listing(&invoice_id);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
 
 #[test]
 fn test_expire_listing_succeeds_by_admin() {
-    let (env, client, issuer, buyer, _, usdc, admin) = setup_with_admin();
+    let (env, client, issuer, buyer, _, usdc, _admin) = setup_with_admin();
     let due_date = env.ledger().timestamp() + 86400;
     let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
     client.list_for_financing(&invoice_id, &200);
@@ -502,24 +505,77 @@ fn test_expire_listing_succeeds_by_admin() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    let result = client.expire_listing(&invoice_id, &admin);
+    let result = client.expire_listing(&invoice_id);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_expire_listing_unauthorized_caller_panics() {
-    let (env, client, issuer, buyer, _, usdc) = setup();
+    let env = Env::default();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (admin.clone(), registry_id.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &registry_id);
+
+    let usdc = Address::generate(&env);
+    client.add_supported_asset(&usdc);
     let due_date = env.ledger().timestamp() + 86400;
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                1_000_000_000u128,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
     let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "list_for_financing",
+            args: (invoice_id.clone(), 200u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
     client.list_for_financing(&invoice_id, &200);
 
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    let stranger = Address::generate(&env);
-    client.expire_listing(&invoice_id, &stranger);
+    client.expire_listing(&invoice_id);
 }
 
 #[test]
@@ -533,7 +589,7 @@ fn test_expire_listing_early_panics() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 5 * 24 * 60 * 60);
 
-    client.expire_listing(&invoice_id, &issuer);
+    client.expire_listing(&invoice_id);
 }
 
 #[test]
@@ -546,7 +602,7 @@ fn test_expire_listing_wrong_status_panics() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    client.expire_listing(&invoice_id, &issuer);
+    client.expire_listing(&invoice_id);
 }
 
 #[test]
@@ -562,7 +618,7 @@ fn test_expire_listing_configurable_window() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 86400 + 1);
 
-    let result = client.expire_listing(&invoice_id, &issuer);
+    let result = client.expire_listing(&invoice_id);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
@@ -642,6 +698,7 @@ fn test_expire_listing_stranger_no_auth_panics() {
     client.initialize(&admin, &registry_id);
 
     let usdc = Address::generate(&env);
+    client.add_supported_asset(&usdc);
     let due_date = env.ledger().timestamp() + 86400;
 
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
@@ -676,9 +733,9 @@ fn test_expire_listing_stranger_no_auth_panics() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    let stranger = Address::generate(&env);
+    let _stranger = Address::generate(&env);
     // No mock auth for stranger — require_auth() will fail.
-    client.expire_listing(&invoice_id, &stranger);
+    client.expire_listing(&invoice_id);
 }
 
 // ── Issue #62: per-field getter tests ─────────────────────────────────────────
@@ -849,10 +906,91 @@ fn prop_expiry_window_bounds_are_respected_across_values() {
             client.list_for_financing(&id, &200);
             env.ledger()
                 .set_timestamp(env.ledger().timestamp() + window + 1);
-            let expired = client.expire_listing(&id, &issuer);
+            let expired = client.expire_listing(&id);
             prop_assert!(expired);
             prop_assert_eq!(client.get(&id).status, InvoiceStatus::Expired);
             Ok(())
         })
         .unwrap();
+}
+
+// ============== SUPPORTED ASSET TESTS ==============
+
+#[test]
+fn test_add_supported_asset() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+
+    assert!(!client.is_supported_asset(&asset));
+    client.add_supported_asset(&asset);
+    assert!(client.is_supported_asset(&asset));
+    assert_eq!(client.get_supported_asset_count(), 2);
+}
+
+#[test]
+fn test_add_supported_asset_idempotent() {
+    let (_env, client, _, _, _, usdc) = setup();
+
+    assert!(client.is_supported_asset(&usdc));
+    client.add_supported_asset(&usdc);
+    assert!(client.is_supported_asset(&usdc));
+    assert_eq!(client.get_supported_asset_count(), 1);
+}
+
+#[test]
+fn test_remove_supported_asset() {
+    let (env, client, _, _, _, usdc) = setup();
+    let asset = Address::generate(&env);
+    client.add_supported_asset(&asset);
+    assert_eq!(client.get_supported_asset_count(), 2);
+
+    client.remove_supported_asset(&asset);
+    assert!(!client.is_supported_asset(&asset));
+    assert_eq!(client.get_supported_asset_count(), 1);
+
+    assert!(client.is_supported_asset(&usdc));
+}
+
+#[test]
+fn test_remove_supported_asset_idempotent() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+
+    client.remove_supported_asset(&asset);
+    assert!(!client.is_supported_asset(&asset));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_create_fails_unsupported_asset() {
+    let (env, client, issuer, buyer, _, _) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let unsupported = Address::generate(&env);
+
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &unsupported);
+}
+
+#[test]
+fn test_create_succeeds_with_supported_asset() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    let invoice = client.get(&invoice_id);
+    assert_eq!(invoice.funding_asset, usdc);
+}
+
+#[test]
+fn test_add_then_remove_then_create_fails() {
+    let (env, client, issuer, buyer, _, _) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let asset = Address::generate(&env);
+
+    client.add_supported_asset(&asset);
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &asset);
+    let invoice = client.get(&invoice_id);
+    assert_eq!(invoice.funding_asset, asset);
+
+    client.remove_supported_asset(&asset);
+    assert!(!client.is_supported_asset(&asset));
 }

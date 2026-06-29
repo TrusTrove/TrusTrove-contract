@@ -3,6 +3,7 @@
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
+use trusttrove_common::persistent_set;
 
 mod errors;
 mod events;
@@ -71,7 +72,6 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxUtilizationBps, &8500u32);
-        Self::extend_instance_ttl(&env);
     }
 
     pub fn get_usdc_asset(env: Env) -> Address {
@@ -124,15 +124,6 @@ impl PoolContract {
             .get(&DataKey::TotalDeposits)
             .unwrap();
 
-        // Share issuance preserves the current share price for existing LPs.
-        // On the first deposit (no shares or deposits yet) shares are issued 1:1 with USDC,
-        // establishing the initial price of 1 share = 1 USDC.
-        // On subsequent deposits:
-        //   shares_to_issue = usdc_amount / share_price
-        //                   = usdc_amount * total_shares / total_deposits
-        // This means a new LP gets proportionally fewer shares if the share price has risen
-        // (because existing LPs earned yield), which is the correct behaviour — it prevents
-        // a new depositor from diluting the yield already accrued by earlier LPs.
         let shares_to_issue = if total_shares == 0 || total_deposits == 0 {
             usdc_amount
         } else {
@@ -148,12 +139,7 @@ impl PoolContract {
 
         let lp_shares_key = DataKey::LPShares(lp.clone());
         let lp_shares: u128 = env.storage().persistent().get(&lp_shares_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&lp_shares_key, &(lp_shares + shares_to_issue));
-        env.storage()
-            .persistent()
-            .extend_ttl(&lp_shares_key, 100, 2_000_000);
+        persistent_set(&env, &lp_shares_key, &(lp_shares + shares_to_issue));
 
         let lp_deposit_count_key = DataKey::LPDepositCount(lp.clone());
         let count: u32 = env
@@ -161,24 +147,13 @@ impl PoolContract {
             .persistent()
             .get(&lp_deposit_count_key)
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&lp_deposit_count_key, &(count + 1));
-        env.storage()
-            .persistent()
-            .extend_ttl(&lp_deposit_count_key, 100, 2_000_000);
+        persistent_set(&env, &lp_deposit_count_key, &(count + 1));
 
         let lp_init_key = DataKey::LPInitialDeposit(lp.clone());
         let init_dep: u128 = env.storage().persistent().get(&lp_init_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&lp_init_key, &(init_dep + usdc_amount));
-        env.storage()
-            .persistent()
-            .extend_ttl(&lp_init_key, 100, 2_000_000);
+        persistent_set(&env, &lp_init_key, &(init_dep + usdc_amount));
 
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
-        Self::extend_instance_ttl(&env);
         shares_to_issue
     }
 
@@ -227,10 +202,6 @@ impl PoolContract {
         let total_funded: u128 = env.storage().instance().get(&DataKey::TotalFunded).unwrap();
         let available = total_deposits - total_funded;
 
-        // Redemption value = shares * share_price = shares * (total_deposits / total_shares).
-        // total_deposits grows each time a repayment is received (yield is credited to the pool)
-        // while total_shares only changes on deposit/withdraw.  The rising ratio rewards LPs
-        // who stayed in the pool while invoices were repaid.
         let usdc_to_return = shares * total_deposits / total_shares;
         if usdc_to_return > available {
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
@@ -251,12 +222,7 @@ impl PoolContract {
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
 
-        env.storage()
-            .persistent()
-            .set(&lp_shares_key, &(lp_shares - shares));
-        env.storage()
-            .persistent()
-            .extend_ttl(&lp_shares_key, 100, 2_000_000);
+        persistent_set(&env, &lp_shares_key, &(lp_shares - shares));
 
         let init_dep_key = DataKey::LPInitialDeposit(lp.clone());
         let init_dep: u128 = env.storage().persistent().get(&init_dep_key).unwrap_or(0);
@@ -265,15 +231,9 @@ impl PoolContract {
 
         let yield_key = DataKey::LPYieldEarned(lp.clone());
         let prev_yield: u128 = env.storage().persistent().get(&yield_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&yield_key, &(prev_yield + yield_earned));
-        env.storage()
-            .persistent()
-            .extend_ttl(&yield_key, 100, 2_000_000);
+        persistent_set(&env, &yield_key, &(prev_yield + yield_earned));
 
         events::lp_withdrawn(&env, &lp, usdc_to_return, shares);
-        Self::extend_instance_ttl(&env);
         usdc_to_return
     }
 
@@ -387,19 +347,9 @@ impl PoolContract {
             .set(&DataKey::ActiveInvoiceCount, &(active_count + 1));
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        env.storage().persistent().set(
-            &funded_key,
-            &FundedInvoiceData {
-                remaining_funded: funded_amount,
-                remaining_face_value: face_value,
-            },
-        );
-        env.storage()
-            .persistent()
-            .extend_ttl(&funded_key, 100, 2_000_000);
+        persistent_set(&env, &funded_key, &funded_amount);
 
         events::invoice_funded(&env, &invoice_id, funded_amount);
-        Self::extend_instance_ttl(&env);
         true
     }
 
@@ -416,6 +366,7 @@ impl PoolContract {
         //
         // # Panics
         // * `InvoiceNotFound` if the invoice is not funded.
+        // * `InvalidAmount` if the repayment amount is less than the funded amount.
         //
         // # Example
         // ```ignore
@@ -429,24 +380,16 @@ impl PoolContract {
         invoice_contract.require_auth();
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        let mut data: FundedInvoiceData = env
+        let funded_amount: u128 = env
             .storage()
             .persistent()
             .get(&funded_key)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
-
-        let principal_portion: u128;
-        let yield_amount: u128;
-        let is_final = amount >= data.remaining_face_value;
-
-        if is_final {
-            principal_portion = data.remaining_funded;
-            yield_amount = amount - principal_portion;
-        } else {
-            principal_portion = amount * data.remaining_funded / data.remaining_face_value;
-            yield_amount = amount - principal_portion;
+        if amount < funded_amount {
+            panic_with_error!(&env, PoolError::InvalidAmount);
         }
 
+        let yield_amount = amount - funded_amount;
         let total_deposits: u128 = env
             .storage()
             .instance()
@@ -468,29 +411,20 @@ impl PoolContract {
         );
         env.storage()
             .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - principal_portion));
+            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
 
-        if is_final {
-            let active_count: u32 = env
-                .storage()
-                .instance()
-                .get(&DataKey::ActiveInvoiceCount)
-                .unwrap();
-            env.storage()
-                .instance()
-                .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
-            env.storage().persistent().remove(&funded_key);
-        } else {
-            data.remaining_funded -= principal_portion;
-            data.remaining_face_value -= amount;
-            env.storage().persistent().set(&funded_key, &data);
-            env.storage()
-                .persistent()
-                .extend_ttl(&funded_key, 100, 2_000_000);
-        }
+        let active_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveInvoiceCount)
+            .unwrap();
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
+
+        env.storage().persistent().remove(&funded_key);
 
         events::repayment_received(&env, &invoice_id, amount, yield_amount);
-        Self::extend_instance_ttl(&env);
         true
     }
 
@@ -519,8 +453,7 @@ impl PoolContract {
         if !env.storage().persistent().has(&funded_key) {
             return false;
         }
-        let data: FundedInvoiceData = env.storage().persistent().get(&funded_key).unwrap();
-        let funded_amount = data.remaining_funded;
+        let funded_amount: u128 = env.storage().persistent().get(&funded_key).unwrap();
 
         let escrow_contract: Address = env
             .storage()
@@ -560,7 +493,6 @@ impl PoolContract {
         env.storage().persistent().remove(&funded_key);
 
         events::invoice_defaulted(&env, &invoice_id, funded_amount);
-        Self::extend_instance_ttl(&env);
         true
     }
 
@@ -716,11 +648,6 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxUtilizationBps, &new_cap_bps);
-        Self::extend_instance_ttl(&env);
         true
-    }
-
-    fn extend_instance_ttl(env: &Env) {
-        env.storage().instance().extend_ttl(100, 2_000_000);
     }
 }

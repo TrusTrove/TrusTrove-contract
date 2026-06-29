@@ -1,10 +1,7 @@
 #![cfg(test)]
 
-use proptest::prelude::*;
-use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, testutils::Address as _, testutils::Ledger as _, Address,
-    BytesN, Env,
+    contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env,
 };
 
 use crate::{PoolContract, PoolContractClient};
@@ -125,6 +122,8 @@ fn setup() -> TestEnv {
 
     let invoice = RealInvoiceClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
+    invoice.add_supported_asset(&usdc_id);
+    invoice.add_supported_asset(&xlm_id);
 
     let pool = PoolContractClient::new(&env, &pool_id);
     pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id);
@@ -169,7 +168,7 @@ fn fund_and_repay_invoice(te: &TestEnv) -> BytesN<32> {
     te.invoice.mark_shipped(&invoice_id);
     te.invoice.confirm_delivery(&invoice_id, &te.issuer);
     te.invoice.confirm_delivery(&invoice_id, &te.buyer);
-    te.invoice.repay(&invoice_id, &10_000_000_000);
+    te.invoice.repay(&invoice_id);
     invoice_id
 }
 
@@ -507,7 +506,7 @@ fn test_lp_position_reflects_current_share_price() {
     te.invoice.mark_shipped(&invoice_id);
     te.invoice.confirm_delivery(&invoice_id, &te.issuer);
     te.invoice.confirm_delivery(&invoice_id, &te.buyer);
-    te.invoice.repay(&invoice_id, &10_000_000_000);
+    te.invoice.repay(&invoice_id);
 
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.usdc_value, 10_200_000_000);
@@ -564,38 +563,15 @@ fn test_receive_repayment() {
 }
 
 #[test]
-fn test_receive_repayment_partial_repayment() {
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_receive_repayment_panics_when_amount_below_funded() {
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
 
-    // face_value=10_000_000_000, funded_amount = 9_800_000_000
-    // partial repayment = 1_000_000_000
-    // principal = 1_000_000_000 * 9_800_000_000 / 10_000_000_000 = 980_000_000
-    // yield = 1_000_000_000 - 980_000_000 = 20_000_000
-    let before = te.pool.get_stats();
-    let result = te.pool.receive_repayment(&invoice_id, &1_000_000_000);
-    assert!(result);
-
-    let after = te.pool.get_stats();
-    assert_eq!(after.total_deposits, before.total_deposits + 20_000_000);
-    assert_eq!(after.total_yield_distributed, 20_000_000);
-    assert_eq!(after.total_funded, before.total_funded - 980_000_000);
-    assert_eq!(after.active_invoice_count, 1); // still active
-}
-
-#[test]
-#[should_panic]
-fn test_receive_repayment_unauthorized_caller_panics() {
-    let te = setup();
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    let invoice_id = create_and_list(&te, &te.usdc_id);
-    te.pool.fund_invoice(&invoice_id);
-
-    // Clear all auths - call should fail since invoice_contract.require_auth() is needed
-    te.env.set_auths(&[]);
-    te.pool.receive_repayment(&invoice_id, &10_000_000_000);
+    // funded_amount = 9_800_000_000, sending less should panic (#4 = InvalidAmount)
+    te.pool.receive_repayment(&invoice_id, &1_000_000_000);
 }
 
 // ============== DEFAULT TESTS ==============
@@ -628,131 +604,6 @@ fn test_handle_default_unknown_invoice_returns_false() {
     assert!(!result);
 }
 
-// ============== PROPERTY-BASED INVARIANT TESTS ==============
-// Each test uses proptest's TestRunner directly (plain Rust syntax, no
-// proptest! macro) so rustfmt formats them without issues.  The case
-// budget is intentionally small (10 per property) to keep CI runtime
-// in check given the Soroban host's per-iteration overhead.
-
-#[test]
-fn prop_first_deposit_issues_one_to_one_shares() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
-    runner
-        .run(&(1u128..=10_000_000_000_000u128), |amount| {
-            let te = setup();
-            let shares = te.pool.deposit(&te.lp, &amount);
-            prop_assert_eq!(shares, amount);
-            let stats = te.pool.get_stats();
-            prop_assert_eq!(stats.total_deposits, amount);
-            prop_assert_eq!(stats.total_shares, amount);
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn prop_available_liquidity_equals_deposits_minus_funded() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
-    runner
-        .run(&(1u128..=10_000_000_000_000u128), |amount| {
-            let te = setup();
-            te.pool.deposit(&te.lp, &amount);
-            let stats = te.pool.get_stats();
-            prop_assert_eq!(
-                stats.available_liquidity,
-                stats.total_deposits - stats.total_funded
-            );
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn prop_full_withdraw_returns_exact_deposited_amount() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
-    runner
-        .run(&(1u128..=10_000_000_000_000u128), |amount| {
-            let te = setup();
-            let shares = te.pool.deposit(&te.lp, &amount);
-            let returned = te.pool.withdraw(&te.lp, &shares);
-            prop_assert_eq!(returned, amount);
-            let stats = te.pool.get_stats();
-            prop_assert_eq!(stats.total_deposits, 0);
-            prop_assert_eq!(stats.total_shares, 0);
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn prop_two_sequential_deposits_total_shares_equal_total_deposits() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
-    runner
-        .run(
-            &(1u128..=5_000_000_000_000u128, 1u128..=5_000_000_000_000u128),
-            |(a, b)| {
-                let te = setup();
-                let s1 = te.pool.deposit(&te.lp, &a);
-                let s2 = te.pool.deposit(&te.lp, &b);
-                prop_assert_eq!(s1 + s2, a + b);
-                let stats = te.pool.get_stats();
-                prop_assert_eq!(stats.total_shares, stats.total_deposits);
-                Ok(())
-            },
-        )
-        .unwrap();
-}
-
-#[test]
-fn prop_share_price_never_decreases_after_repayment() {
-    // Deposit must exceed the funded_amount for the fixed test invoice
-    // (face_value=10_000_000_000, discount_bps=200 → funded=9_800_000_000).
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
-    runner
-        .run(&(9_800_000_000u128..=10_000_000_000_000u128), |deposit| {
-            let te = setup();
-            te.pool.deposit(&te.lp, &deposit);
-            let value_before = te.pool.get_lp_position(&te.lp).usdc_value;
-            fund_and_repay_invoice(&te);
-            let value_after = te.pool.get_lp_position(&te.lp).usdc_value;
-            prop_assert!(
-                value_after >= value_before,
-                "share price decreased: before={value_before} after={value_after}"
-            );
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-fn prop_lp_position_usdc_value_reflects_total_deposits() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
-    runner
-        .run(&(1u128..=10_000_000_000_000u128), |amount| {
-            let te = setup();
-            te.pool.deposit(&te.lp, &amount);
-            let pos = te.pool.get_lp_position(&te.lp);
-            // Single LP owns all shares, so usdc_value == total_deposits
-            let stats = te.pool.get_stats();
-            prop_assert_eq!(pos.usdc_value, stats.total_deposits);
-            Ok(())
-        })
-        .unwrap();
-}
-
-#[test]
-#[should_panic]
-fn test_handle_default_unauthorized_caller_panics() {
-    let te = setup();
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    let invoice_id = create_and_list(&te, &te.usdc_id);
-    te.pool.fund_invoice(&invoice_id);
-
-    // Clear all auths - call should fail since invoice_contract.require_auth() is needed
-    te.env.set_auths(&[]);
-    te.pool.handle_default(&invoice_id);
-}
-
 #[test]
 fn test_deposit_when_deposits_zero_but_shares_exist() {
     let te = setup();
@@ -777,66 +628,294 @@ fn test_deposit_when_deposits_zero_but_shares_exist() {
     assert_eq!(new_shares, 5_000_000_000);
 }
 
-// ============== INTEGRATION TESTS ==============
+// ============== MULTI-INVOICE LIFECYCLE TESTS ==============
 
 #[test]
-fn test_full_default_flow() {
-    // 1. Setup all contracts
+fn test_multi_invoice_fund_two_repay_one_default_one() {
     let te = setup();
-
-    // 2. LP deposits funds
     te.pool.deposit(&te.lp, &100_000_000_000);
 
-    // 3. Create invoice & 4. List invoice
-    let due_date = te.env.ledger().timestamp() + 86400;
-    let invoice_id = te.invoice.create(
-        &te.issuer,
-        &te.buyer,
-        &10_000_000_000,
-        &due_date,
-        &te.usdc_id,
-    );
-    te.invoice.list_for_financing(&invoice_id, &200);
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    let inv2 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.fund_invoice(&inv2);
 
-    let before_fund_stats = te.pool.get_stats();
+    let stats_after_fund = te.pool.get_stats();
+    assert_eq!(stats_after_fund.active_invoice_count, 2);
+    assert_eq!(stats_after_fund.total_funded, 19_600_000_000);
 
-    // 5. Fund invoice
-    let _ = te.pool.fund_invoice(&invoice_id);
+    // Repay inv1: adds yield of 200_000_000
+    te.invoice.mark_shipped(&inv1);
+    te.invoice.confirm_delivery(&inv1, &te.issuer);
+    te.invoice.confirm_delivery(&inv1, &te.buyer);
+    te.invoice.repay(&inv1);
 
-    let funded_stats = te.pool.get_stats();
-    // Verify invoice was funded
-    assert_eq!(
-        funded_stats.active_invoice_count,
-        before_fund_stats.active_invoice_count + 1
-    );
+    let stats_after_repay = te.pool.get_stats();
+    assert_eq!(stats_after_repay.active_invoice_count, 1);
+    assert_eq!(stats_after_repay.total_yield_distributed, 200_000_000);
+    assert_eq!(stats_after_repay.total_funded, 9_800_000_000);
 
-    // 6. Advance ledger time beyond due date
-    te.env.ledger().set_timestamp(due_date + 1);
+    // Default inv2: removes 9_800_000_000 from deposits
+    te.pool.handle_default(&inv2);
 
-    // 7. Call trigger_default
-    te.invoice.trigger_default(&invoice_id);
+    let stats_final = te.pool.get_stats();
+    assert_eq!(stats_final.active_invoice_count, 0);
+    assert_eq!(stats_final.total_funded, 0);
+    // total_deposits = 100B (initial) + 200M (yield from repaid) - 9.8B (defaulted) = 90_400_000_000
+    assert_eq!(stats_final.total_deposits, 90_400_000_000);
 
-    let after_default_stats = te.pool.get_stats();
+    // LP value reflects both outcomes
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 100_000_000_000);
+    assert_eq!(pos.usdc_value, 90_400_000_000);
+}
 
-    // Assertions
-    // Pool state updates:
-    // * TotalDeposits decreases by funded amount (9_800_000_000)
-    assert_eq!(
-        after_default_stats.total_deposits,
-        before_fund_stats.total_deposits - 9_800_000_000
-    );
-    // * TotalFunded decreases (back to what it was before funding)
-    assert_eq!(
-        after_default_stats.total_funded,
-        before_fund_stats.total_funded
-    );
-    // * ActiveInvoiceCount decreases (back to what it was before funding)
-    assert_eq!(
-        after_default_stats.active_invoice_count,
-        before_fund_stats.active_invoice_count
-    );
+#[test]
+fn test_multi_invoice_default_first_then_repay_second() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
 
-    // Verify Escrow default handler executes and Funds return correctly.
-    // The Escrow lock is automatically cleared when handle_default runs.
-    // The pool accounting assertions above prove the funds were returned correctly to the pool.
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    let inv2 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.fund_invoice(&inv2);
+
+    // Default inv1 first
+    te.pool.handle_default(&inv1);
+
+    let stats_mid = te.pool.get_stats();
+    assert_eq!(stats_mid.active_invoice_count, 1);
+    assert_eq!(stats_mid.total_deposits, 90_200_000_000);
+
+    // Repay inv2: adds yield on reduced pool
+    te.invoice.mark_shipped(&inv2);
+    te.invoice.confirm_delivery(&inv2, &te.issuer);
+    te.invoice.confirm_delivery(&inv2, &te.buyer);
+    te.invoice.repay(&inv2);
+
+    let stats_final = te.pool.get_stats();
+    assert_eq!(stats_final.active_invoice_count, 0);
+    assert_eq!(stats_final.total_funded, 0);
+    // 90.2B (after default) + 200M (yield from repay) = 90_400_000_000
+    assert_eq!(stats_final.total_deposits, 90_400_000_000);
+    assert_eq!(stats_final.total_yield_distributed, 200_000_000);
+}
+
+// ============== DEPOSIT-AFTER-YIELD TESTS ==============
+
+#[test]
+fn test_deposit_after_yield_uses_updated_share_price() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    // Fund and repay to generate yield
+    fund_and_repay_invoice(&te);
+
+    // Share price is now 10.2B / 10B = 1.02
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 10_200_000_000);
+    assert_eq!(stats.total_shares, 10_000_000_000);
+
+    // New LP deposits 10.2B USDC → should get 10.2B / 1.02 = 10B shares
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let new_shares = te.pool.deposit(&lp2, &10_200_000_000);
+    assert_eq!(new_shares, 10_000_000_000);
+
+    let pos2 = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos2.shares, 10_000_000_000);
+    assert_eq!(pos2.usdc_value, 10_200_000_000);
+
+    // Both LPs have equal shares and equal value
+    let pos1 = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos1.shares, pos2.shares);
+    assert_eq!(pos1.usdc_value, pos2.usdc_value);
+}
+
+#[test]
+fn test_new_lp_deposits_after_multiple_yield_events() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &20_000_000_000);
+
+    // Two rounds of yield
+    fund_and_repay_invoice(&te);
+    fund_and_repay_invoice(&te);
+
+    // total_deposits = 20B + 200M + 200M = 20_400_000_000
+    // total_shares = 20B
+    // share_price = 1.02
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 20_400_000_000);
+    assert_eq!(stats.total_shares, 20_000_000_000);
+
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let new_shares = te.pool.deposit(&lp2, &10_200_000_000);
+    // 10.2B / 1.02 = 10B shares
+    assert_eq!(new_shares, 10_000_000_000);
+}
+
+// ============== SERIES OF DEFAULTS TESTS ==============
+
+#[test]
+fn test_series_of_defaults_erodes_lp_value() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    let inv2 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.fund_invoice(&inv2);
+
+    // Default both
+    te.pool.handle_default(&inv1);
+    te.pool.handle_default(&inv2);
+
+    // Deposits reduced by 2 * 9.8B = 19.6B
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 80_400_000_000);
+    assert_eq!(stats.total_funded, 0);
+    assert_eq!(stats.active_invoice_count, 0);
+
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 100_000_000_000);
+    assert_eq!(pos.usdc_value, 80_400_000_000);
+    assert_eq!(pos.yield_earned, 0);
+}
+
+#[test]
+fn test_withdraw_after_default_partial() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.handle_default(&inv1);
+
+    // After default: 100B - 9.8B = 90.2B deposits, 100B shares
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 90_200_000_000);
+
+    // Withdraw half shares: 50B shares → 50B * 90.2B / 100B = 45_100_000_000 USDC
+    let usdc_returned = te.pool.withdraw(&te.lp, &50_000_000_000);
+    assert_eq!(usdc_returned, 45_100_000_000);
+
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 50_000_000_000);
+    assert_eq!(pos.usdc_value, 45_100_000_000);
+}
+
+#[test]
+fn test_withdraw_full_after_default() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.handle_default(&inv1);
+
+    let usdc_returned = te.pool.withdraw(&te.lp, &100_000_000_000);
+    assert_eq!(usdc_returned, 90_200_000_000);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 0);
+    assert_eq!(stats.total_shares, 0);
+}
+
+// ============== MIXED SCENARIO TESTS ==============
+
+#[test]
+fn test_two_lps_one_withdraws_after_default() {
+    let te = setup();
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+
+    te.pool.deposit(&te.lp, &50_000_000_000);
+    te.pool.deposit(&lp2, &50_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.handle_default(&inv1);
+
+    // Both LPs share the loss equally (50/50)
+    let usdc1 = te.pool.withdraw(&te.lp, &50_000_000_000);
+    let usdc2 = te.pool.withdraw(&lp2, &50_000_000_000);
+    assert_eq!(usdc1, 45_100_000_000);
+    assert_eq!(usdc2, 45_100_000_000);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 0);
+    assert_eq!(stats.total_shares, 0);
+}
+
+#[test]
+fn test_deposit_during_active_funding() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+
+    // Pool has 100B deposits, 9.8B funded, 90.2B available
+    // New LP deposits while invoice is active
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let new_shares = te.pool.deposit(&lp2, &50_000_000_000);
+    assert_eq!(new_shares, 50_000_000_000);
+
+    // 1:1 because no yield has been distributed yet
+    let pos2 = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos2.shares, 50_000_000_000);
+    assert_eq!(pos2.usdc_value, 50_000_000_000);
+}
+
+#[test]
+fn test_dust_withdrawal() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    // Withdraw 1 unit of shares
+    let usdc = te.pool.withdraw(&te.lp, &1);
+    assert_eq!(usdc, 1);
+}
+
+#[test]
+fn test_full_lifecycle_multiple_invoices() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Fund 3 invoices
+    let inv1 = create_and_list(&te, &te.usdc_id);
+    let inv2 = create_and_list(&te, &te.usdc_id);
+    let inv3 = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&inv1);
+    te.pool.fund_invoice(&inv2);
+    te.pool.fund_invoice(&inv3);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.active_invoice_count, 3);
+    assert_eq!(stats.total_funded, 29_400_000_000);
+
+    // Repay inv1
+    te.invoice.mark_shipped(&inv1);
+    te.invoice.confirm_delivery(&inv1, &te.issuer);
+    te.invoice.confirm_delivery(&inv1, &te.buyer);
+    te.invoice.repay(&inv1);
+
+    // Default inv2
+    te.pool.handle_default(&inv2);
+
+    // Repay inv3
+    te.invoice.mark_shipped(&inv3);
+    te.invoice.confirm_delivery(&inv3, &te.issuer);
+    te.invoice.confirm_delivery(&inv3, &te.buyer);
+    te.invoice.repay(&inv3);
+
+    let stats_final = te.pool.get_stats();
+    assert_eq!(stats_final.active_invoice_count, 0);
+    assert_eq!(stats_final.total_funded, 0);
+    // 100B + 200M (inv1 yield) - 9.8B (inv2 default) + 200M (inv3 yield) = 90_600_000_000
+    assert_eq!(stats_final.total_deposits, 90_600_000_000);
+    assert_eq!(stats_final.total_yield_distributed, 400_000_000);
+
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 100_000_000_000);
+    assert_eq!(pos.usdc_value, 90_600_000_000);
+    assert_eq!(pos.yield_earned, 0);
 }

@@ -4,6 +4,7 @@ use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, xdr::ToXdr, Address, Bytes, BytesN, Env,
     IntoVal, Symbol, Vec,
 };
+use trusttrove_common::persistent_set;
 
 mod errors;
 mod events;
@@ -45,7 +46,6 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::RegistryContract, &registry_contract);
         env.storage().instance().set(&DataKey::Counter, &0u64);
-        Self::extend_instance_ttl(&env);
     }
 
     pub fn set_pool_contract(env: Env, pool_contract: Address) {
@@ -75,7 +75,67 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
         events::pool_contract_set(&env, &pool_contract);
-        Self::extend_instance_ttl(&env);
+    }
+
+    pub fn add_supported_asset(env: Env, asset: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+
+        let key = DataKey::SupportedAsset(asset.clone());
+        if env.storage().persistent().has(&key) {
+            return;
+        }
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SupportedAssetCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::SupportedAssetCount, &(count + 1));
+        env.storage().persistent().set(&key, &true);
+    }
+
+    pub fn remove_supported_asset(env: Env, asset: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+
+        let key = DataKey::SupportedAsset(asset.clone());
+        if !env.storage().persistent().has(&key) {
+            return;
+        }
+
+        let count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::SupportedAssetCount)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::SupportedAssetCount, &(count - 1));
+        env.storage().persistent().remove(&key);
+    }
+
+    pub fn is_supported_asset(env: Env, asset: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::SupportedAsset(asset))
+    }
+
+    pub fn get_supported_asset_count(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::SupportedAssetCount)
+            .unwrap_or(0)
     }
 
     pub fn create(
@@ -133,6 +193,14 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::BuyerNotVerified);
         }
 
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::SupportedAsset(funding_asset.clone()))
+        {
+            panic_with_error!(&env, InvoiceError::UnsupportedAsset);
+        }
+
         if face_value == 0 {
             panic_with_error!(&env, InvoiceError::InvalidFaceValue);
         }
@@ -150,13 +218,10 @@ impl InvoiceContract {
         let mut hash_input = Bytes::new(&env);
         let issuer_xdr = issuer.clone().to_xdr(&env);
         let buyer_xdr = buyer.clone().to_xdr(&env);
-        let asset_xdr = funding_asset.clone().to_xdr(&env);
-        // Use full XDR bytes — prior code only took first 32 bytes which risks
-        // collisions when addresses share an XDR prefix (#65).
-        for i in 0..issuer_xdr.len() {
+        for i in 0..32 {
             hash_input.push_back(issuer_xdr.get(i).unwrap());
         }
-        for i in 0..buyer_xdr.len() {
+        for i in 0..32 {
             hash_input.push_back(buyer_xdr.get(i).unwrap());
         }
         for b in face_value.to_be_bytes() {
@@ -168,8 +233,11 @@ impl InvoiceContract {
         for b in counter.to_be_bytes() {
             hash_input.push_back(b);
         }
-        for i in 0..asset_xdr.len() {
-            hash_input.push_back(asset_xdr.get(i).unwrap());
+        {
+            let asset_xdr = funding_asset.clone().to_xdr(&env);
+            for i in 0..32 {
+                hash_input.push_back(asset_xdr.get(i).unwrap());
+            }
         }
         let invoice_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
 
@@ -188,28 +256,17 @@ impl InvoiceContract {
             shipped_at: None,
             issuer_confirmed: false,
             buyer_confirmed: false,
-            repaid_amount: 0,
             repaid_at: None,
             funding_asset: funding_asset.clone(),
             funding_pool: None,
         };
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-
-        // Per-field keys for gas-efficient cross-contract reads (#62)
-        write_field_status(&env, &invoice_id, InvoiceStatus::Created);
-        write_field_face_value(&env, &invoice_id, face_value);
-        write_field_discount_bps(&env, &invoice_id, 0u32);
-        write_field_funding_asset(&env, &invoice_id, &funding_asset);
+        persistent_set(&env, &inv_key, &invoice);
 
         self::extend_issuer_index(&env, &issuer, &invoice_id);
         self::extend_buyer_index(&env, &buyer, &invoice_id);
         self::extend_status_index(&env, InvoiceStatus::Created, &invoice_id);
-        Self::extend_instance_ttl(&env);
 
         events::invoice_created(
             &env,
@@ -258,13 +315,7 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Listed;
         invoice.discount_bps = discount_bps;
         invoice.listed_at = Some(env.ledger().timestamp());
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        write_field_status(&env, &invoice_id, InvoiceStatus::Listed);
-        write_field_discount_bps(&env, &invoice_id, discount_bps);
-        Self::extend_instance_ttl(&env);
+        persistent_set(&env, &inv_key, &invoice);
 
         self::move_status_index(
             &env,
@@ -323,12 +374,7 @@ impl InvoiceContract {
         invoice.funded_amount = funded_amount;
         invoice.funded_at = Some(env.ledger().timestamp());
         invoice.funding_pool = Some(pool_address);
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        write_field_status(&env, &invoice_id, InvoiceStatus::Funded);
-        Self::extend_instance_ttl(&env);
+        persistent_set(&env, &inv_key, &invoice);
 
         self::move_status_index(
             &env,
@@ -370,12 +416,7 @@ impl InvoiceContract {
         }
         invoice.status = InvoiceStatus::Active;
         invoice.shipped_at = Some(env.ledger().timestamp());
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        write_field_status(&env, &invoice_id, InvoiceStatus::Active);
-        Self::extend_instance_ttl(&env);
+        persistent_set(&env, &inv_key, &invoice);
 
         self::move_status_index(
             &env,
@@ -438,7 +479,6 @@ impl InvoiceContract {
 
         if invoice.issuer_confirmed && invoice.buyer_confirmed {
             invoice.status = InvoiceStatus::Confirmed;
-            write_field_status(&env, &invoice_id, InvoiceStatus::Confirmed);
             self::move_status_index(
                 &env,
                 &invoice_id,
@@ -448,107 +488,17 @@ impl InvoiceContract {
             events::both_confirmed(&env, &invoice_id);
         }
 
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        Self::extend_instance_ttl(&env);
+        persistent_set(&env, &inv_key, &invoice);
         events::delivery_confirmed(&env, &invoice_id, &confirmer);
         true
     }
 
-    pub fn unconfirm_delivery(env: Env, invoice_id: BytesN<32>) -> bool {
-        // Reverts a Confirmed invoice back to Active, clearing both confirmation flags.
-        // Requires authorisation from BOTH the issuer and the buyer, OR from the admin.
-        // This guards against either party unilaterally undoing the other's confirmation.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to revert.
-        //
-        // # Returns
-        // * `bool` - `true` when the reversion succeeds.
-        //
-        // # Panics
-        // * `NotFound` if the invoice or admin cannot be found.
-        // * `InvalidStatusTransition` if invoice status is not `Confirmed`.
-        // * `NotAuthorized` if neither the dual-party nor admin authorisation is satisfied.
-        //
-        // # Example
-        // ```ignore
-        // client.unconfirm_delivery(&invoice_id);
-        // ```
-        let inv_key = DataKey::Invoice(invoice_id.clone());
-        let mut invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&inv_key)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        if invoice.status != InvoiceStatus::Confirmed {
-            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
-        }
-
-        // Accept dual-party auth (both issuer AND buyer must sign) or admin auth.
-        // We use try_invoke_contract to test issuer+buyer auth without aborting on failure,
-        // then fall back to the admin key as an emergency escape hatch.
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        let issuer_auth_ok = env
-            .try_invoke_contract::<(), soroban_sdk::Error>(
-                &env.current_contract_address(),
-                &Symbol::new(&env, "check_auth"),
-                (invoice.issuer.clone(),).into_val(&env),
-            )
-            .is_ok();
-        let buyer_auth_ok = env
-            .try_invoke_contract::<(), soroban_sdk::Error>(
-                &env.current_contract_address(),
-                &Symbol::new(&env, "check_auth"),
-                (invoice.buyer.clone(),).into_val(&env),
-            )
-            .is_ok();
-
-        if issuer_auth_ok && buyer_auth_ok {
-            // Both parties consented — no additional require_auth needed.
-        } else {
-            // Fall back to admin auth.
-            admin.require_auth();
-        }
-
-        invoice.issuer_confirmed = false;
-        invoice.buyer_confirmed = false;
-        invoice.status = InvoiceStatus::Active;
-
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        write_field_status(&env, &invoice_id, InvoiceStatus::Active);
-
-        self::move_status_index(
-            &env,
-            &invoice_id,
-            InvoiceStatus::Confirmed,
-            InvoiceStatus::Active,
-        );
-
-        Self::extend_instance_ttl(&env);
-        events::delivery_unconfirmed(&env, &invoice_id);
-        true
-    }
-
-    pub fn repay(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
+    pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
         // Repays a confirmed invoice, transferring funds to the pool.
         //
         // # Arguments
         // * `env` - The Soroban environment.
         // * `invoice_id` - The invoice being repaid.
-        // * `amount` - The amount to repay.
         //
         // # Returns
         // * `bool` - `true` when repayment is completed.
@@ -559,7 +509,7 @@ impl InvoiceContract {
         //
         // # Example
         // ```ignore
-        // client.repay(&invoice_id, 500);
+        // client.repay(&invoice_id);
         // ```
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
@@ -576,45 +526,30 @@ impl InvoiceContract {
             .funding_pool
             .clone()
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        let face_value = invoice.face_value;
         let buyer = invoice.buyer.clone();
         let funding_asset = invoice.funding_asset.clone();
 
         let token = token::Client::new(&env, &funding_asset);
-        token.transfer(&buyer, &pool, &(amount as i128));
+        token.transfer(&buyer, &pool, &(face_value as i128));
 
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(amount.into_val(&env));
+        args.push_back(face_value.into_val(&env));
         let _: bool = env.invoke_contract(&pool, &Symbol::new(&env, "receive_repayment"), args);
 
         let mut updated = invoice;
-        updated.repaid_amount += amount;
+        updated.status = InvoiceStatus::Repaid;
+        updated.repaid_at = Some(env.ledger().timestamp());
+        persistent_set(&env, &inv_key, &updated);
 
-        if updated.repaid_amount >= updated.face_value {
-            updated.status = InvoiceStatus::Repaid;
-            updated.repaid_at = Some(env.ledger().timestamp());
-            env.storage().persistent().set(&inv_key, &updated);
-            env.storage()
-                .persistent()
-                .extend_ttl(&inv_key, 100, 2_000_000);
-            write_field_status(&env, &invoice_id, InvoiceStatus::Repaid);
-
-            self::move_status_index(
-                &env,
-                &invoice_id,
-                InvoiceStatus::Confirmed,
-                InvoiceStatus::Repaid,
-            );
-        } else {
-            env.storage().persistent().set(&inv_key, &updated);
-            env.storage()
-                .persistent()
-                .extend_ttl(&inv_key, 100, 2_000_000);
-        }
-
-        Self::extend_instance_ttl(&env);
-
-        events::invoice_repaid(&env, &invoice_id, amount);
+        self::move_status_index(
+            &env,
+            &invoice_id,
+            InvoiceStatus::Confirmed,
+            InvoiceStatus::Repaid,
+        );
+        events::invoice_repaid(&env, &invoice_id, updated.face_value);
         true
     }
 
@@ -663,12 +598,7 @@ impl InvoiceContract {
 
         let prev_status = invoice.status;
         invoice.status = InvoiceStatus::Defaulted;
-        env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        write_field_status(&env, &invoice_id, InvoiceStatus::Defaulted);
-        Self::extend_instance_ttl(&env);
+        persistent_set(&env, &inv_key, &invoice);
 
         self::move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Defaulted);
 
@@ -683,35 +613,103 @@ impl InvoiceContract {
     }
 
     pub fn get_status(env: Env, invoice_id: BytesN<32>) -> u32 {
-        // Returns the status code of an invoice from its dedicated per-field key (#62).
-        env.storage()
+        // Returns the status code of an invoice.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `invoice_id` - The invoice to query.
+        //
+        // # Returns
+        // * `u32` - The invoice status as a numeric code.
+        //
+        // # Panics
+        // * `NotFound` if the invoice cannot be found.
+        //
+        // # Example
+        // ```ignore
+        // let status = client.get_status(&invoice_id);
+        // ```
+        let invoice: Invoice = env
+            .storage()
             .persistent()
-            .get::<_, InvoiceStatus>(&DataKey::FieldStatus(invoice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound)) as u32
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.status as u32
     }
 
     pub fn get_face_value(env: Env, invoice_id: BytesN<32>) -> u128 {
-        // Returns the face value of an invoice from its dedicated per-field key (#62).
-        env.storage()
+        // Returns the face value of an invoice.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `invoice_id` - The invoice to query.
+        //
+        // # Returns
+        // * `u128` - The invoice face value.
+        //
+        // # Panics
+        // * `NotFound` if the invoice cannot be found.
+        //
+        // # Example
+        // ```ignore
+        // let face_value = client.get_face_value(&invoice_id);
+        // ```
+        let invoice: Invoice = env
+            .storage()
             .persistent()
-            .get::<_, u128>(&DataKey::FieldFaceValue(invoice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.face_value
     }
 
     pub fn get_discount_bps(env: Env, invoice_id: BytesN<32>) -> u32 {
-        // Returns the discount basis points from its dedicated per-field key (#62).
-        env.storage()
+        // Returns the discount basis points for an invoice.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `invoice_id` - The invoice to query.
+        //
+        // # Returns
+        // * `u32` - The discount rate in basis points.
+        //
+        // # Panics
+        // * `NotFound` if the invoice cannot be found.
+        //
+        // # Example
+        // ```ignore
+        // let discount = client.get_discount_bps(&invoice_id);
+        // ```
+        let invoice: Invoice = env
+            .storage()
             .persistent()
-            .get::<_, u32>(&DataKey::FieldDiscountBps(invoice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.discount_bps
     }
 
     pub fn get_funding_asset(env: Env, invoice_id: BytesN<32>) -> Address {
-        // Returns the funding asset address from its dedicated per-field key (#62).
-        env.storage()
+        // Returns the funding asset for an invoice.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `invoice_id` - The invoice to query.
+        //
+        // # Returns
+        // * `Address` - The funding asset address.
+        //
+        // # Panics
+        // * `NotFound` if the invoice cannot be found.
+        //
+        // # Example
+        // ```ignore
+        // let asset = client.get_funding_asset(&invoice_id);
+        // ```
+        let invoice: Invoice = env
+            .storage()
             .persistent()
-            .get::<_, Address>(&DataKey::FieldFundingAsset(invoice_id))
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.funding_asset
     }
 
     pub fn get(env: Env, invoice_id: BytesN<32>) -> Invoice {
@@ -856,7 +854,6 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::ExpiryWindow, &window);
         events::expiry_window_set(&env, window);
-        Self::extend_instance_ttl(&env);
     }
 
     pub fn get_expiry_window(env: Env) -> u64 {
@@ -870,12 +867,7 @@ impl InvoiceContract {
         address.require_auth();
     }
 
-    // `caller` must be either the invoice issuer or the contract admin (#63).
-    // Replaces the fragile try_invoke_contract pattern that silently swallowed
-    // non-auth errors and exposed `check_auth` as an unintended public entry point.
-    pub fn expire_listing(env: Env, invoice_id: BytesN<32>, caller: Address) -> bool {
-        caller.require_auth();
-
+    pub fn expire_listing(env: Env, invoice_id: BytesN<32>) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let mut invoice: Invoice = env
             .storage()
@@ -893,35 +885,37 @@ impl InvoiceContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
-        if caller != invoice.issuer && caller != admin {
-            panic_with_error!(&env, InvoiceError::NotAuthorized);
+        let is_issuer = env
+            .try_invoke_contract::<(), soroban_sdk::Error>(
+                &env.current_contract_address(),
+                &Symbol::new(&env, "check_auth"),
+                (invoice.issuer.clone(),).into_val(&env),
+            )
+            .is_ok();
+
+        if is_issuer {
+            // Already authorized by issuer
+        } else {
+            admin.require_auth();
         }
 
         let listed_at = invoice.listed_at.unwrap_or(0);
-        let expiry_window: u64 = env
+        let expiry_window = env
             .storage()
             .instance()
             .get(&DataKey::ExpiryWindow)
             .unwrap_or(7 * 24 * 60 * 60);
 
-        if env.ledger().timestamp() <= listed_at + expiry_window {
+        let current_time = env.ledger().timestamp();
+        if current_time <= listed_at + expiry_window {
             panic_with_error!(&env, InvoiceError::ListingNotExpired);
         }
 
+        let prev_status = invoice.status;
         invoice.status = InvoiceStatus::Expired;
         env.storage().persistent().set(&inv_key, &invoice);
-        env.storage()
-            .persistent()
-            .extend_ttl(&inv_key, 100, 2_000_000);
-        write_field_status(&env, &invoice_id, InvoiceStatus::Expired);
-        Self::extend_instance_ttl(&env);
 
-        self::move_status_index(
-            &env,
-            &invoice_id,
-            InvoiceStatus::Listed,
-            InvoiceStatus::Expired,
-        );
+        self::move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Expired);
         events::invoice_expired(&env, &invoice_id);
         true
     }
@@ -931,28 +925,16 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
     let count_key = DataKey::IssuerIndexCount(issuer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
     let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), count);
-    env.storage().persistent().set(&entry_key, invoice_id);
-    env.storage().persistent().set(&count_key, &(count + 1));
-    env.storage()
-        .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
-    env.storage()
-        .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+    persistent_set(env, &entry_key, invoice_id);
+    persistent_set(env, &count_key, &(count + 1));
 }
 
 fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     let count_key = DataKey::BuyerIndexCount(buyer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
     let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), count);
-    env.storage().persistent().set(&entry_key, invoice_id);
-    env.storage().persistent().set(&count_key, &(count + 1));
-    env.storage()
-        .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
-    env.storage()
-        .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+    persistent_set(env, &entry_key, invoice_id);
+    persistent_set(env, &count_key, &(count + 1));
 }
 
 fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
@@ -960,47 +942,10 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
     let count_key = DataKey::StatusIndexCount(status_u32);
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
     let entry_key = DataKey::StatusIndexEntry(status_u32, count);
-    env.storage().persistent().set(&entry_key, invoice_id);
-    env.storage().persistent().set(&count_key, &(count + 1));
-    env.storage()
-        .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
-    env.storage()
-        .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+    persistent_set(env, &entry_key, invoice_id);
+    persistent_set(env, &count_key, &(count + 1));
 }
 
 fn move_status_index(env: &Env, invoice_id: &BytesN<32>, _from: InvoiceStatus, to: InvoiceStatus) {
     extend_status_index(env, to, invoice_id);
-}
-
-// Per-field write helpers — keep field keys in sync with the main Invoice struct (#62).
-fn write_field_status(env: &Env, invoice_id: &BytesN<32>, status: InvoiceStatus) {
-    let key = DataKey::FieldStatus(invoice_id.clone());
-    env.storage().persistent().set(&key, &status);
-    env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
-}
-
-fn write_field_face_value(env: &Env, invoice_id: &BytesN<32>, value: u128) {
-    let key = DataKey::FieldFaceValue(invoice_id.clone());
-    env.storage().persistent().set(&key, &value);
-    env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
-}
-
-fn write_field_discount_bps(env: &Env, invoice_id: &BytesN<32>, bps: u32) {
-    let key = DataKey::FieldDiscountBps(invoice_id.clone());
-    env.storage().persistent().set(&key, &bps);
-    env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
-}
-
-fn write_field_funding_asset(env: &Env, invoice_id: &BytesN<32>, asset: &Address) {
-    let key = DataKey::FieldFundingAsset(invoice_id.clone());
-    env.storage().persistent().set(&key, asset);
-    env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
-}
-
-impl InvoiceContract {
-    fn extend_instance_ttl(env: &Env) {
-        env.storage().instance().extend_ttl(100, 2_000_000);
-    }
 }
