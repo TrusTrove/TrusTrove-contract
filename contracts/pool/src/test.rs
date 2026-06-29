@@ -919,3 +919,131 @@ fn test_full_lifecycle_multiple_invoices() {
     assert_eq!(pos.usdc_value, 90_600_000_000);
     assert_eq!(pos.yield_earned, 0);
 }
+
+// ============== PRECISION TESTS ==============
+
+#[test]
+fn test_precision_withdraw_ceil_recovers_value() {
+    let te = setup();
+
+    // Deposit 10B → share price 1:1
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    // Fund & repay → 200M yield → share_price = 10.2B / 10B = 1.02
+    fund_and_repay_invoice(&te);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_shares, 10_000_000_000);
+    assert_eq!(stats.total_deposits, 10_200_000_000);
+
+    // LP2 deposits 1000 USDC at share_price 1.02
+    // Floor: 1000 * 10B / 10.2B = 980 shares (0.39 lost to floor)
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let shares = te.pool.deposit(&lp2, &1000);
+    assert_eq!(shares, 980);
+
+    // Withdraw all shares — ceiling rounding adds 1
+    // Floor: 980 * 10_200_001_000 / 10_000_000_980 = 999
+    // Ceiling: 1000 (full deposit recovered)
+    let usdc = te.pool.withdraw(&lp2, &shares);
+    assert!(usdc > 999, "ceiling returns more than floor");
+    assert_eq!(usdc, 1000, "ceiling rounding recovers full 1000 USDC deposit");
+
+    let pos = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos.shares, 0);
+}
+
+#[test]
+fn test_precision_ceiling_gt_floor_when_remainder() {
+    let te = setup();
+
+    // Create pool with non-1:1 share price
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    // LP2 deposits to create a remainder scenario
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let shares = te.pool.deposit(&lp2, &1000);
+    assert_eq!(shares, 980);
+
+    // Simulate floor calculation to confirm ceiling beats it
+    let stats = te.pool.get_stats();
+    let product = shares as u128 * stats.total_deposits;
+    let floor = product / stats.total_shares;
+    let has_remainder = product % stats.total_shares != 0;
+
+    let usdc = te.pool.withdraw(&lp2, &shares);
+
+    if has_remainder {
+        assert_eq!(usdc, floor + 1, "ceiling = floor + 1 when remainder exists");
+    } else {
+        assert_eq!(usdc, floor, "ceiling = floor when exact division");
+    }
+}
+
+#[test]
+fn test_precision_exact_division_unchanged() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    // When division is exact, ceiling == floor — no extra rounding
+    let usdc = te.pool.withdraw(&te.lp, &5_000_000_000);
+    assert_eq!(usdc, 5_000_000_000);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 5_000_000_000);
+    assert_eq!(stats.total_shares, 5_000_000_000);
+}
+
+#[test]
+fn test_precision_dust_share_gets_1_usdc() {
+    let te = setup();
+
+    // Create a non-1:1 share price
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    // LP2 deposits 1 USDC to get a tiny fractional share
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let shares = te.pool.deposit(&lp2, &1);
+    // 1 * 10B / 10.2B = floor(0.98) = 0 shares!
+    assert_eq!(shares, 0, "sub-1-share deposit rounds to 0 shares");
+
+    // LP2 deposits enough to get a single share at the elevated price
+    // Need deposit > 10.2B / 10B = 1.02 → deposit 2 USDC
+    let shares = te.pool.deposit(&lp2, &2);
+    assert_eq!(shares, 1, "2 USDC at share_price 1.02 gives 1 share");
+
+    // Withdraw that 1 share — ceiling rounding prevents value loss
+    // 1 * total_deposits / total_shares = floor ≈ 0 or 1 depending on state
+    let usdc = te.pool.withdraw(&lp2, &shares);
+    assert!(usdc >= 1, "ceiling rounding ensures dust share returns >= 1 USDC");
+
+    let pos = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos.shares, 0);
+}
+
+#[test]
+fn test_precision_multiple_withdrawals_accumulate() {
+    let te = setup();
+
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000_000i128);
+    let shares = te.pool.deposit(&lp2, &1000);
+    assert_eq!(shares, 980);
+
+    // withdraw in two chunks: both should benefit from ceiling rounding
+    let usdc1 = te.pool.withdraw(&lp2, &490);
+    let usdc2 = te.pool.withdraw(&lp2, &490);
+
+    let total = usdc1 + usdc2;
+    // Each withdrawal with ceiling rounding could add 1
+    // Without ceiling: floor would give total = floor(490 * total_dep / total_shares) * 2
+    let stats = te.pool.get_stats();
+    let floor_per_490 = 490 * stats.total_deposits / stats.total_shares;
+    let floor_total = floor_per_490 * 2;
+    assert!(total >= floor_total, "ceiling rounding recovers value on each partial withdrawal");
+    assert!(total <= floor_total + 2, "at most 2 extra from ceiling on two withdrawals");
+}

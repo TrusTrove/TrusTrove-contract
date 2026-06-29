@@ -205,10 +205,22 @@ impl PoolContract {
         let total_funded: u128 = env.storage().instance().get(&DataKey::TotalFunded).unwrap();
         let available = total_deposits - total_funded;
 
-        let usdc_to_return = shares
+        let product = shares
             .checked_mul(total_deposits)
-            .and_then(|v| v.checked_div(total_shares))
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+        let (floor, remainder) = (
+            product
+                .checked_div(total_shares)
+                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow)),
+            product % total_shares,
+        );
+        let usdc_to_return = if remainder > 0 {
+            floor
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))
+        } else {
+            floor
+        };
         if usdc_to_return > available {
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
         }
