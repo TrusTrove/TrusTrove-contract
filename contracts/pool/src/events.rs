@@ -21,10 +21,10 @@ pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     );
 }
 
-pub fn repayment_received(env: &Env, invoice_id: &BytesN<32>, amount: u128, yield_amount: u128) {
+pub fn repayment_received(env: &Env, invoice_id: &BytesN<32>, amount: u128, funded_amount: u128, yield_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "repayment_received"), invoice_id.clone()),
-        (amount, yield_amount),
+        (amount, funded_amount, yield_amount),
     );
 }
 

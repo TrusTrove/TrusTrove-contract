@@ -433,7 +433,7 @@ impl PoolContract {
 
         env.storage().persistent().remove(&funded_key);
 
-        events::repayment_received(&env, &invoice_id, amount, yield_amount);
+        events::repayment_received(&env, &invoice_id, amount, funded_amount, yield_amount);
         true
     }
 
