@@ -5,7 +5,9 @@ use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
-    vec, Address, BytesN, Env, IntoVal, Symbol,
+    vec,
+    xdr::ToXdr,
+    Address, BytesN, Env, IntoVal, Symbol,
 };
 
 use crate::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
@@ -1120,4 +1122,67 @@ fn test_initialized_invoice_create_succeeds() {
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.issuer, issuer);
     assert_eq!(invoice.buyer, buyer);
+}
+
+#[test]
+fn test_invoice_id_generation_safe_xdr_lengths() {
+    let (env, client, issuer, buyer, registry_client, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    // Contract address generated via Address::generate(&env)
+    let contract_xdr = issuer.clone().to_xdr(&env);
+    assert_eq!(contract_xdr.len(), 40);
+
+    // Account address
+    let account_addr = Address::from_string(&soroban_sdk::String::from_str(
+        &env,
+        "GD3BFFX7DTNJAGDVVM5RYGGQQNURZTH4VSBLWF55YXY3L6T2WWZK57EI",
+    ));
+    let account_xdr = account_addr.clone().to_xdr(&env);
+    assert_eq!(account_xdr.len(), 44);
+
+    // Register account address in mock registry
+    registry_client.register(&account_addr);
+
+    // Create an invoice using the account address as issuer
+    let id_account_issuer = client.create(&account_addr, &buyer, &1000, &due_date, &usdc);
+    let invoice_account_issuer = client.get(&id_account_issuer);
+    assert_eq!(invoice_account_issuer.issuer, account_addr);
+
+    // Create an invoice using contract address as issuer
+    let id_contract_issuer = client.create(&issuer, &buyer, &1000, &due_date, &usdc);
+    let invoice_contract_issuer = client.get(&id_contract_issuer);
+    assert_eq!(invoice_contract_issuer.issuer, issuer);
+
+    // The two IDs must be different and generated without panic
+    assert_ne!(id_account_issuer, id_contract_issuer);
+}
+
+#[test]
+fn test_invoice_id_generation_uniqueness() {
+    let (env, client, issuer, buyer, registry_client, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    let other_buyer = Address::generate(&env);
+    registry_client.register(&other_buyer);
+
+    let other_issuer = Address::generate(&env);
+    registry_client.register(&other_issuer);
+
+    // ID 1: issuer & buyer
+    let id1 = client.create(&issuer, &buyer, &1000, &due_date, &usdc);
+    // ID 2: issuer & other_buyer
+    let id2 = client.create(&issuer, &other_buyer, &1000, &due_date, &usdc);
+    // ID 3: other_issuer & buyer
+    let id3 = client.create(&other_issuer, &buyer, &1000, &due_date, &usdc);
+    // ID 4: other_issuer & other_buyer
+    let id4 = client.create(&other_issuer, &other_buyer, &1000, &due_date, &usdc);
+
+    // All must be unique
+    assert_ne!(id1, id2);
+    assert_ne!(id1, id3);
+    assert_ne!(id1, id4);
+    assert_ne!(id2, id3);
+    assert_ne!(id2, id4);
+    assert_ne!(id3, id4);
 }
