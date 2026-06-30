@@ -39,3 +39,10 @@ pub fn default_resolved(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amou
         amount,
     );
 }
+
+pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "ownership_transferred"), old_admin.clone()),
+        new_admin.clone(),
+    );
+}

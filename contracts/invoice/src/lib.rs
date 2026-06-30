@@ -170,12 +170,15 @@ impl InvoiceContract {
         // let invoice_id = client.create(&issuer, &buyer, 1_000, 1_000_000, &asset);
         // ```
         issuer.require_auth();
+        if issuer == buyer {
+            panic_with_error!(&env, InvoiceError::IssuerIsBuyer);
+        }
 
         let registry_id: Address = env
             .storage()
             .instance()
             .get(&DataKey::RegistryContract)
-            .unwrap();
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
 
         let mut args = Vec::new(&env);
         args.push_back(issuer.clone().into_val(&env));
@@ -208,7 +211,11 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
-        let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Counter)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
         let next_counter = counter + 1;
         env.storage()
             .instance()
@@ -762,7 +769,7 @@ impl InvoiceContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::StatusIndexEntry(status_u32, i))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
             // O(1) membership check instead of loading full invoice
             let is_member: bool = env
                 .storage()
@@ -774,7 +781,7 @@ impl InvoiceContract {
                     .storage()
                     .persistent()
                     .get(&DataKey::Invoice(id))
-                    .unwrap();
+                    .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
                 if invoice.status == status {
                     result.push_back(invoice);
                 }
@@ -796,12 +803,12 @@ impl InvoiceContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::IssuerIndexEntry(address.clone(), i))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
             let invoice: Invoice = env
                 .storage()
                 .persistent()
                 .get(&DataKey::Invoice(id))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
             result.push_back(invoice);
         }
         result
@@ -820,12 +827,12 @@ impl InvoiceContract {
                 .storage()
                 .persistent()
                 .get(&DataKey::BuyerIndexEntry(address.clone(), i))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
             let invoice: Invoice = env
                 .storage()
                 .persistent()
                 .get(&DataKey::Invoice(id))
-                .unwrap();
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
             result.push_back(invoice);
         }
         result
@@ -853,6 +860,60 @@ impl InvoiceContract {
 
     pub fn check_auth(_env: Env, address: Address) {
         address.require_auth();
+    }
+
+    pub fn get_issuer(env: Env, invoice_id: BytesN<32>) -> Address {
+        // Returns the issuer address for an invoice.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `invoice_id` - The invoice to query.
+        //
+        // # Returns
+        // * `Address` - The issuer address.
+        //
+        // # Panics
+        // * `NotFound` if the invoice cannot be found.
+        //
+        // # Example
+        // ```ignore
+        // let issuer = client.get_issuer(&invoice_id);
+        // ```
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.issuer
+    }
+
+    pub fn transfer_ownership(env: Env, new_admin: Address) {
+        // Transfers admin ownership to a new address.
+        //
+        // Requires authentication from BOTH the current admin and the incoming
+        // new admin, preventing accidental transfers to wrong addresses.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `new_admin` - The address that will become the new admin.
+        //
+        // # Panics
+        // * `NotFound` if the admin is not set.
+        //
+        // # Example
+        // ```ignore
+        // client.transfer_ownership(&new_admin);
+        // ```
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::ownership_transferred(&env, &admin, &new_admin);
+        Self::extend_instance_ttl(&env);
     }
 
     pub fn expire_listing(env: Env, invoice_id: BytesN<32>) -> bool {
@@ -907,6 +968,10 @@ impl InvoiceContract {
         events::invoice_expired(&env, &invoice_id);
         true
     }
+
+    fn extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(100, 2_000_000);
+    }
 }
 
 fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
@@ -939,8 +1004,14 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
     let count_key = DataKey::StatusIndexCount(status_u32);
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
     let entry_key = DataKey::StatusIndexEntry(status_u32, count);
-    persistent_set(env, &entry_key, invoice_id);
-    persistent_set(env, &count_key, &(count + 1));
+    env.storage().persistent().set(&entry_key, invoice_id);
+    env.storage()
+        .persistent()
+        .extend_ttl(&entry_key, 100, 2_000_000);
+    env.storage().persistent().set(&count_key, &(count + 1));
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, 100, 2_000_000);
 }
 
 fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to: InvoiceStatus) {

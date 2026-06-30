@@ -19,4 +19,6 @@ pub enum InvoiceError {
     ListingNotExpired = 14,
     UnauthorizedPool = 15,
     RepaymentFailed = 16,
+    NotInitialized = 17,
+    IssuerIsBuyer = 18,
 }

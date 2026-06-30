@@ -16,4 +16,5 @@ pub enum PoolError {
     AssetMismatch = 11,
     UtilizationCapExceeded = 12,
     Overflow = 13,
+    NotInitialized = 14,
 }
