@@ -326,7 +326,7 @@ impl PoolContract {
 
         let funded_amount = face_value * (10000 - discount_bps as u128) / 10000;
         if funded_amount == 0 {
-            panic_with_error!(&env, PoolError::InvalidAmount);
+            panic_with_error!(&env, PoolError::ZeroFundedAmount);
         }
 
         let total_deposits: u128 = env

@@ -1224,3 +1224,58 @@ fn test_initialized_pool_get_usdc_asset_succeeds() {
     let asset = te.pool.get_usdc_asset();
     assert_eq!(asset, te.usdc_id);
 }
+
+// ============== ZERO FUNDED AMOUNT TESTS ==============
+
+fn create_and_list_with_face_value(
+    te: &TestEnv,
+    face_value: u128,
+    discount_bps: u32,
+    funding_asset: &Address,
+) -> BytesN<32> {
+    let due_date = te.env.ledger().timestamp() + 86400;
+    let invoice_id =
+        te.invoice
+            .create(&te.issuer, &te.buyer, &face_value, &due_date, funding_asset);
+    te.invoice.list_for_financing(&invoice_id, &discount_bps);
+    invoice_id
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_fund_invoice_rejects_zero_funded_amount() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // face_value=1 with discount_bps=5000: funded = 1 * (10000 - 5000) / 10000 = 0
+    let invoice_id = create_and_list_with_face_value(&te, 1, 5000, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+}
+
+#[test]
+fn test_fund_invoice_succeeds_with_funded_amount_one() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // face_value=2 with discount_bps=5000: funded = 2 * (10000 - 5000) / 10000 = 1
+    let invoice_id = create_and_list_with_face_value(&te, 2, 5000, &te.usdc_id);
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+}
+
+#[test]
+fn test_fund_invoice_normal_flow_unaffected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Standard: face_value=10_000_000_000, discount_bps=200
+    // funded = 10_000_000_000 * 9800 / 10000 = 9_800_000_000
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, 9_800_000_000);
+    assert_eq!(stats.active_invoice_count, 1);
+}
+
