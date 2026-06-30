@@ -8,4 +8,5 @@ pub enum EscrowError {
     NotAuthorized = 3,
     AlreadyLocked = 4,
     InvalidAmount = 5,
+    NotInitialized = 6,
 }

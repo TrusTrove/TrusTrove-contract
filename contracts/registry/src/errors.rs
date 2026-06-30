@@ -7,4 +7,5 @@ pub enum RegistryError {
     AlreadyRegistered = 2,
     NotFound = 3,
     NotAuthorized = 4,
+    BatchSizeExceeded = 5,
 }

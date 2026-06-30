@@ -187,12 +187,12 @@ impl PoolContract {
         }
 
         let lp_shares_key = DataKey::LPShares(lp.clone());
-        let lp_shares: u128 = env
+        let original_lp_shares: u128 = env
             .storage()
             .persistent()
             .get(&lp_shares_key)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::NoShares));
-        if shares > lp_shares {
+        if shares > original_lp_shares {
             panic_with_error!(&env, PoolError::InsufficientShares);
         }
 
@@ -228,13 +228,13 @@ impl PoolContract {
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
 
-        persistent_set(&env, &lp_shares_key, &(lp_shares - shares));
+        persistent_set(&env, &lp_shares_key, &(original_lp_shares - shares));
 
         let init_dep_key = DataKey::LPInitialDeposit(lp.clone());
         let init_dep: u128 = env.storage().persistent().get(&init_dep_key).unwrap_or(0);
         let principal_portion = shares
             .checked_mul(init_dep)
-            .and_then(|v| v.checked_div(lp_shares))
+            .and_then(|v| v.checked_div(original_lp_shares))
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         let yield_earned = usdc_to_return.saturating_sub(principal_portion);
 
@@ -338,10 +338,25 @@ impl PoolContract {
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
         args.push_back(pool_address.into_val(&env));
-        args.push_back(usdc_id.into_val(&env));
+        args.push_back(usdc_id.clone().into_val(&env));
         args.push_back(funded_amount.into_val(&env));
         let _: bool =
             env.invoke_contract(&invoice_contract, &Symbol::new(&env, "mark_funded"), args);
+
+        // Issue #56: fetch the actual invoice issuer and immediately release the locked
+        // funds from escrow to the issuer so they receive payment at funding time.
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        let issuer: Address =
+            env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_issuer"), args);
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        args.push_back(issuer.into_val(&env));
+        let _: bool = env.invoke_contract(
+            &escrow_contract,
+            &Symbol::new(&env, "release_to_issuer"),
+            args,
+        );
 
         env.storage()
             .instance()
@@ -477,18 +492,13 @@ impl PoolContract {
             env.invoke_contract(&escrow_contract, &Symbol::new(&env, "handle_default"), args);
 
         let total_funded: u128 = env.storage().instance().get(&DataKey::TotalFunded).unwrap();
-        let total_deposits: u128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalDeposits)
-            .unwrap();
 
+        // Issue #55: only unwind TotalFunded when a default occurs.
+        // The escrow already returned the locked funds to the pool, so TotalDeposits
+        // correctly reflects the pool balance and must not be deducted a second time.
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits - funded_amount));
 
         let active_count: u32 = env
             .storage()
@@ -652,6 +662,35 @@ impl PoolContract {
         (total_funded * 10000 / total_deposits) as u32
     }
 
+    pub fn transfer_ownership(env: Env, new_admin: Address) {
+        // Transfers admin ownership to a new address.
+        //
+        // Requires authentication from BOTH the current admin and the incoming
+        // new admin, preventing accidental transfers to wrong addresses.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `new_admin` - The address that will become the new admin.
+        //
+        // # Panics
+        // * `NotFound` if the admin is not set.
+        //
+        // # Example
+        // ```ignore
+        // client.transfer_ownership(&new_admin);
+        // ```
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotFound));
+        admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::ownership_transferred(&env, &admin, &new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
     pub fn set_max_utilization(env: Env, admin: Address, new_cap_bps: u32) -> bool {
         admin.require_auth();
         if new_cap_bps > 10000 {
@@ -661,5 +700,9 @@ impl PoolContract {
             .instance()
             .set(&DataKey::MaxUtilizationBps, &new_cap_bps);
         true
+    }
+
+    fn extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(100, 2_000_000);
     }
 }

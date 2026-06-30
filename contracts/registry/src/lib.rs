@@ -85,6 +85,10 @@ impl RegistryContract {
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
     ) -> Vec<Address> {
+        if entries.len() > 50 {
+            panic_with_error!(&env, RegistryError::BatchSizeExceeded);
+        }
+
         let admin: Address = env
             .storage()
             .instance()
@@ -114,6 +118,8 @@ impl RegistryContract {
             events::issuer_registered(&env, &address);
             registered += 1;
         }
+
+        events::batch_registered(&env, registered, skipped.len());
 
         if registered > 0 {
             Self::extend_instance_ttl(&env);
@@ -300,6 +306,35 @@ impl RegistryContract {
     /// ```ignore
     /// let admin = client.get_admin();
     /// ```
+    pub fn transfer_ownership(env: Env, new_admin: Address) {
+        // Transfers admin ownership to a new address.
+        //
+        // Requires authentication from BOTH the current admin and the incoming
+        // new admin, preventing accidental transfers to wrong addresses.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `new_admin` - The address that will become the new admin.
+        //
+        // # Panics
+        // * `NotFound` if the admin is not set.
+        //
+        // # Example
+        // ```ignore
+        // client.transfer_ownership(&new_admin);
+        // ```
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::ownership_transferred(&env, &admin, &new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()

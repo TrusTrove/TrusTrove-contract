@@ -6,7 +6,10 @@
 
 <p align="center">
   Four Soroban smart contracts powering the TrusTrove trade finance protocol on Stellar.
-</p>
+</p> 
+
+
+
 
 <p align="center">
   <a href="https://github.com/TrusTrove/TrusTrove-contract/actions/workflows/ci.yml">

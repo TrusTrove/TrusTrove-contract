@@ -434,6 +434,29 @@ fn test_get_verification_status_re_verified_returns_verified() {
     );
 }
 
+// ============== ISSUE #61: TRANSFER OWNERSHIP ==============
+
+#[test]
+fn test_registry_transfer_ownership_changes_admin() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.initialize(&admin);
+    client.transfer_ownership(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
+#[should_panic]
+fn test_registry_transfer_ownership_requires_both_auths() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+    client.initialize(&admin);
+    env.set_auths(&[]);
+    client.transfer_ownership(&new_admin);
+}
+
 // ============== PROPERTY-BASED INVARIANT TESTS ==============
 
 #[test]
@@ -519,4 +542,18 @@ fn prop_re_verify_after_revoke_restores_verified_state() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_batch_register_issuers_exceeds_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+    client.batch_register_issuers(&entries);
 }
