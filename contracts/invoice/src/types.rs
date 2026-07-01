@@ -48,8 +48,6 @@ pub enum DataKey {
     IssuerIndexEntry(Address, u32),
     BuyerIndexEntry(Address, u32),
     StatusIndexEntry(u32, u32),
-    // O(1) status index using invoice_id as part of key
-    StatusMembership(u32, BytesN<32>),
     InvoicesByIssuer(Address),
     InvoicesByBuyer(Address),
     InvoicesByStatus(u32),
