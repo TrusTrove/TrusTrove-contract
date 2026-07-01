@@ -4,7 +4,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env,
 };
 
-use crate::{PoolContract, PoolContractClient};
+use crate::{DataKey, PoolContract, PoolContractClient};
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
 use trusttrove_invoice::{
@@ -67,6 +67,7 @@ pub struct TKey(Address);
 struct TestEnv {
     env: Env,
     pool: PoolContractClient<'static>,
+    pool_id: Address,
     invoice: RealInvoiceClient<'static>,
     usdc_id: Address,
     xlm_id: Address,
@@ -139,6 +140,7 @@ fn setup() -> TestEnv {
     TestEnv {
         env,
         pool,
+        pool_id,
         invoice,
         usdc_id,
         xlm_id,
@@ -217,6 +219,24 @@ fn test_second_deposit_scales_by_share_price() {
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.shares, 15_000_000_000);
     assert_eq!(pos.deposit_count, 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_deposit_dust_amount_panics() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &1_000_000_000);
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &100_000_000_000_000u128);
+    });
+
+    // With total_shares=1_000_000_000 and total_deposits=100_000_000_000_000,
+    // a deposit of 1 USDC yields 1 * 1_000_000_000 / 100_000_000_000_000 = 0 shares
+    te.pool.deposit(&te.lp, &1);
 }
 
 // ============== WITHDRAW TESTS ==============
