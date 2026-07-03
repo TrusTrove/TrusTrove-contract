@@ -2,9 +2,8 @@
 
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, xdr::ToXdr, Address, Bytes, BytesN, Env,
-    IntoVal, Symbol, Vec,
+    IntoVal, Map, String, Symbol, Vec,
 };
-use trusttrove_common::persistent_set;
 
 mod errors;
 mod events;
@@ -46,6 +45,7 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::RegistryContract, &registry_contract);
         env.storage().instance().set(&DataKey::Counter, &0u64);
+        Self::extend_instance_ttl(&env);
     }
 
     pub fn set_pool_contract(env: Env, pool_contract: Address) {
@@ -75,67 +75,6 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
         events::pool_contract_set(&env, &pool_contract);
-    }
-
-    pub fn add_supported_asset(env: Env, asset: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        admin.require_auth();
-
-        let key = DataKey::SupportedAsset(asset.clone());
-        if env.storage().persistent().has(&key) {
-            return;
-        }
-
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::SupportedAssetCount)
-            .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::SupportedAssetCount, &(count + 1));
-        env.storage().persistent().set(&key, &true);
-    }
-
-    pub fn remove_supported_asset(env: Env, asset: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        admin.require_auth();
-
-        let key = DataKey::SupportedAsset(asset.clone());
-        if !env.storage().persistent().has(&key) {
-            return;
-        }
-
-        let count: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::SupportedAssetCount)
-            .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::SupportedAssetCount, &(count - 1));
-        env.storage().persistent().remove(&key);
-    }
-
-    pub fn is_supported_asset(env: Env, asset: Address) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::SupportedAsset(asset))
-    }
-
-    pub fn get_supported_asset_count(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::SupportedAssetCount)
-            .unwrap_or(0)
     }
 
     pub fn create(
@@ -170,15 +109,12 @@ impl InvoiceContract {
         // let invoice_id = client.create(&issuer, &buyer, 1_000, 1_000_000, &asset);
         // ```
         issuer.require_auth();
-        if issuer == buyer {
-            panic_with_error!(&env, InvoiceError::IssuerIsBuyer);
-        }
 
         let registry_id: Address = env
             .storage()
             .instance()
             .get(&DataKey::RegistryContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
+            .unwrap();
 
         let mut args = Vec::new(&env);
         args.push_back(issuer.clone().into_val(&env));
@@ -196,14 +132,6 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::BuyerNotVerified);
         }
 
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::SupportedAsset(funding_asset.clone()))
-        {
-            panic_with_error!(&env, InvoiceError::UnsupportedAsset);
-        }
-
         if face_value == 0 {
             panic_with_error!(&env, InvoiceError::InvalidFaceValue);
         }
@@ -211,11 +139,7 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
-        let counter: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::Counter)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
+        let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
         let next_counter = counter + 1;
         env.storage()
             .instance()
@@ -258,11 +182,16 @@ impl InvoiceContract {
         };
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
-        persistent_set(&env, &inv_key, &invoice);
+        env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
 
-        self::push_issuer_index(&env, &issuer, &invoice_id);
-        self::push_buyer_index(&env, &buyer, &invoice_id);
-        self::push_status_index(&env, InvoiceStatus::Created, &invoice_id);
+        self::extend_issuer_index(&env, &issuer, &invoice_id);
+        self::extend_buyer_index(&env, &buyer, &invoice_id);
+        self::extend_status_index(&env, InvoiceStatus::Created, &invoice_id);
+        increment_status_count(&env, InvoiceStatus::Created);
+        Self::extend_instance_ttl(&env);
 
         events::invoice_created(
             &env,
@@ -311,9 +240,13 @@ impl InvoiceContract {
         invoice.status = InvoiceStatus::Listed;
         invoice.discount_bps = discount_bps;
         invoice.listed_at = Some(env.ledger().timestamp());
-        persistent_set(&env, &inv_key, &invoice);
+        env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
 
-        self::move_status_index(
+        move_status_index(
             &env,
             &invoice_id,
             InvoiceStatus::Created,
@@ -353,15 +286,6 @@ impl InvoiceContract {
         // ```
         pool_address.require_auth();
 
-        let expected_pool: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PoolContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        if pool_address != expected_pool {
-            panic_with_error!(&env, InvoiceError::UnauthorizedPool);
-        }
-
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let mut invoice: Invoice = env
             .storage()
@@ -379,9 +303,13 @@ impl InvoiceContract {
         invoice.funded_amount = funded_amount;
         invoice.funded_at = Some(env.ledger().timestamp());
         invoice.funding_pool = Some(pool_address);
-        persistent_set(&env, &inv_key, &invoice);
+        env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
 
-        self::move_status_index(
+        move_status_index(
             &env,
             &invoice_id,
             InvoiceStatus::Listed,
@@ -421,9 +349,13 @@ impl InvoiceContract {
         }
         invoice.status = InvoiceStatus::Active;
         invoice.shipped_at = Some(env.ledger().timestamp());
-        persistent_set(&env, &inv_key, &invoice);
+        env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
 
-        self::move_status_index(
+        move_status_index(
             &env,
             &invoice_id,
             InvoiceStatus::Funded,
@@ -484,7 +416,7 @@ impl InvoiceContract {
 
         if invoice.issuer_confirmed && invoice.buyer_confirmed {
             invoice.status = InvoiceStatus::Confirmed;
-            self::move_status_index(
+            move_status_index(
                 &env,
                 &invoice_id,
                 InvoiceStatus::Active,
@@ -493,7 +425,11 @@ impl InvoiceContract {
             events::both_confirmed(&env, &invoice_id);
         }
 
-        persistent_set(&env, &inv_key, &invoice);
+        env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
         events::delivery_confirmed(&env, &invoice_id, &confirmer);
         true
     }
@@ -541,18 +477,18 @@ impl InvoiceContract {
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
         args.push_back(face_value.into_val(&env));
-        let repayment_ok: bool =
-            env.invoke_contract(&pool, &Symbol::new(&env, "receive_repayment"), args);
-        if !repayment_ok {
-            panic_with_error!(&env, InvoiceError::RepaymentFailed);
-        }
+        let _: bool = env.invoke_contract(&pool, &Symbol::new(&env, "receive_repayment"), args);
 
         let mut updated = invoice;
         updated.status = InvoiceStatus::Repaid;
         updated.repaid_at = Some(env.ledger().timestamp());
-        persistent_set(&env, &inv_key, &updated);
+        env.storage().persistent().set(&inv_key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
 
-        self::move_status_index(
+        move_status_index(
             &env,
             &invoice_id,
             InvoiceStatus::Confirmed,
@@ -607,9 +543,13 @@ impl InvoiceContract {
 
         let prev_status = invoice.status;
         invoice.status = InvoiceStatus::Defaulted;
-        persistent_set(&env, &inv_key, &invoice);
+        env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
 
-        self::move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Defaulted);
+        move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Defaulted);
 
         let pool: Address = invoice
             .funding_pool
@@ -618,6 +558,81 @@ impl InvoiceContract {
         args.push_back(invoice_id.clone().into_val(&env));
         let _: bool = env.invoke_contract(&pool, &Symbol::new(&env, "handle_default"), args);
         events::invoice_defaulted(&env, &invoice_id);
+        true
+    }
+
+    pub fn set_expiry_window(env: Env, window: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::ExpiryWindow, &window);
+        events::expiry_window_set(&env, window);
+        Self::extend_instance_ttl(&env);
+    }
+
+    pub fn get_expiry_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ExpiryWindow)
+            .unwrap_or(7 * 24 * 60 * 60)
+    }
+
+    pub fn check_auth(_env: Env, address: Address) {
+        address.require_auth();
+    }
+
+    pub fn expire_listing(env: Env, invoice_id: BytesN<32>) -> bool {
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        if invoice.status != InvoiceStatus::Listed {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        let is_issuer = env
+            .try_invoke_contract::<(), soroban_sdk::Error>(
+                &env.current_contract_address(),
+                &Symbol::new(&env, "check_auth"),
+                (invoice.issuer.clone(),).into_val(&env),
+            )
+            .is_ok();
+
+        if !is_issuer {
+            admin.require_auth();
+        }
+
+        let listed_at = invoice.listed_at.unwrap_or(0);
+        let expiry_window = env
+            .storage()
+            .instance()
+            .get(&DataKey::ExpiryWindow)
+            .unwrap_or(7 * 24 * 60 * 60);
+        let current_time = env.ledger().timestamp();
+        if current_time <= listed_at + expiry_window {
+            panic_with_error!(&env, InvoiceError::ListingNotExpired);
+        }
+
+        let prev_status = invoice.status;
+        invoice.status = InvoiceStatus::Expired;
+        env.storage().persistent().set(&inv_key, &invoice);
+
+        move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Expired);
+        events::invoice_expired(&env, &invoice_id);
         true
     }
 
@@ -744,22 +759,37 @@ impl InvoiceContract {
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound))
     }
 
-    pub fn get_by_status(env: Env, status: InvoiceStatus, offset: u32, limit: u32) -> Vec<Invoice> {
-        let key = DataKey::InvoicesByStatus(status as u32);
-        let vec: Vec<BytesN<32>> = env
+    /// Lists invoices for a given status.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `status` - The invoice status filter.
+    ///
+    /// # Returns
+    /// * `Vec<Invoice>` - The invoices matching the status.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoices = client.get_by_status(InvoiceStatus::Created);
+    /// ```
+    pub fn get_by_status(env: Env, status: InvoiceStatus) -> Vec<Invoice> {
+        let count: u32 = env
             .storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+            .get(&DataKey::StatusIndexCount(status as u32))
+            .unwrap_or(0);
         let mut result: Vec<Invoice> = Vec::new(&env);
-        let end = core::cmp::min(offset.saturating_add(limit), vec.len());
-        for i in offset..end {
-            let id = vec.get(i).unwrap();
+        for i in 0..count {
+            let id: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::StatusIndexEntry(status as u32, i))
+                .unwrap();
             let invoice: Invoice = env
                 .storage()
                 .persistent()
                 .get(&DataKey::Invoice(id))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+                .unwrap();
             if invoice.status == status {
                 result.push_back(invoice);
             }
@@ -767,70 +797,96 @@ impl InvoiceContract {
         result
     }
 
-    pub fn get_by_issuer(env: Env, address: Address, offset: u32, limit: u32) -> Vec<Invoice> {
-        let key = DataKey::InvoicesByIssuer(address);
-        let vec: Vec<BytesN<32>> = env
+    /// Lists invoices created by a given issuer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The issuer address.
+    ///
+    /// # Returns
+    /// * `Vec<Invoice>` - The invoices for the issuer.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoices = client.get_by_issuer(&issuer);
+    /// ```
+    pub fn get_by_issuer(env: Env, address: Address) -> Vec<Invoice> {
+        let count: u32 = env
             .storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+            .get(&DataKey::IssuerIndexCount(address.clone()))
+            .unwrap_or(0);
         let mut result: Vec<Invoice> = Vec::new(&env);
-        let end = core::cmp::min(offset.saturating_add(limit), vec.len());
-        for i in offset..end {
-            let id = vec.get(i).unwrap();
+        for i in 0..count {
+            let id: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::IssuerIndexEntry(address.clone(), i))
+                .unwrap();
             let invoice: Invoice = env
                 .storage()
                 .persistent()
                 .get(&DataKey::Invoice(id))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+                .unwrap();
             result.push_back(invoice);
         }
         result
     }
 
-    pub fn get_by_buyer(env: Env, address: Address, offset: u32, limit: u32) -> Vec<Invoice> {
-        let key = DataKey::InvoicesByBuyer(address);
-        let vec: Vec<BytesN<32>> = env
+    /// Lists invoices associated with a given buyer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The buyer address.
+    ///
+    /// # Returns
+    /// * `Vec<Invoice>` - The invoices for the buyer.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoices = client.get_by_buyer(&buyer);
+    /// ```
+    pub fn get_by_buyer(env: Env, address: Address) -> Vec<Invoice> {
+        let count: u32 = env
             .storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+            .get(&DataKey::BuyerIndexCount(address.clone()))
+            .unwrap_or(0);
         let mut result: Vec<Invoice> = Vec::new(&env);
-        let end = core::cmp::min(offset.saturating_add(limit), vec.len());
-        for i in offset..end {
-            let id = vec.get(i).unwrap();
+        for i in 0..count {
+            let id: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::BuyerIndexEntry(address.clone(), i))
+                .unwrap();
             let invoice: Invoice = env
                 .storage()
                 .persistent()
                 .get(&DataKey::Invoice(id))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+                .unwrap();
             result.push_back(invoice);
         }
         result
     }
 
-    pub fn set_expiry_window(env: Env, window: u64) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::ExpiryWindow, &window);
-        events::expiry_window_set(&env, window);
-    }
-
-    pub fn get_expiry_window(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&DataKey::ExpiryWindow)
-            .unwrap_or(7 * 24 * 60 * 60)
-    }
-
-    pub fn check_auth(_env: Env, address: Address) {
-        address.require_auth();
+    pub fn get_counts(env: Env) -> Map<String, u64> {
+        let mut counts: Map<String, u64> = Map::new(&env);
+        let statuses = [
+            InvoiceStatus::Created,
+            InvoiceStatus::Listed,
+            InvoiceStatus::Funded,
+            InvoiceStatus::Active,
+            InvoiceStatus::Confirmed,
+            InvoiceStatus::Repaid,
+            InvoiceStatus::Defaulted,
+            InvoiceStatus::Expired,
+        ];
+        for status in statuses {
+            let key = String::from_str(&env, status.as_str());
+            let value = read_status_count(&env, status);
+            counts.set(key, value);
+        }
+        counts
     }
 
     pub fn get_issuer(env: Env, invoice_id: BytesN<32>) -> Address {
@@ -859,22 +915,6 @@ impl InvoiceContract {
     }
 
     pub fn transfer_ownership(env: Env, new_admin: Address) {
-        // Transfers admin ownership to a new address.
-        //
-        // Requires authentication from BOTH the current admin and the incoming
-        // new admin, preventing accidental transfers to wrong addresses.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `new_admin` - The address that will become the new admin.
-        //
-        // # Panics
-        // * `NotFound` if the admin is not set.
-        //
-        // # Example
-        // ```ignore
-        // client.transfer_ownership(&new_admin);
-        // ```
         let admin: Address = env
             .storage()
             .instance()
@@ -887,127 +927,78 @@ impl InvoiceContract {
         Self::extend_instance_ttl(&env);
     }
 
-    pub fn expire_listing(env: Env, invoice_id: BytesN<32>) -> bool {
-        let inv_key = DataKey::Invoice(invoice_id.clone());
-        let mut invoice: Invoice = env
-            .storage()
-            .persistent()
-            .get(&inv_key)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        if invoice.status != InvoiceStatus::Listed {
-            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
-        }
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        let is_issuer = env
-            .try_invoke_contract::<(), soroban_sdk::Error>(
-                &env.current_contract_address(),
-                &Symbol::new(&env, "check_auth"),
-                (invoice.issuer.clone(),).into_val(&env),
-            )
-            .is_ok();
-
-        if is_issuer {
-            // Already authorized by issuer
-        } else {
-            admin.require_auth();
-        }
-
-        let listed_at = invoice.listed_at.unwrap_or(0);
-        let expiry_window = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExpiryWindow)
-            .unwrap_or(7 * 24 * 60 * 60);
-
-        let current_time = env.ledger().timestamp();
-        if current_time <= listed_at + expiry_window {
-            panic_with_error!(&env, InvoiceError::ListingNotExpired);
-        }
-
-        let prev_status = invoice.status;
-        invoice.status = InvoiceStatus::Expired;
-        env.storage().persistent().set(&inv_key, &invoice);
-
-        self::move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Expired);
-        events::invoice_expired(&env, &invoice_id);
-        true
-    }
-
     fn extend_instance_ttl(env: &Env) {
         env.storage().instance().extend_ttl(100, 2_000_000);
     }
 }
 
-// ---------------------------------------------------------------------------
-// Storage-write optimisation: consolidated index storage (Vec-based)
-//
-// Previously each index stored entries as individual key-value pairs
-// (IssuerIndexEntry, IssuerIndexCount, etc.), requiring 2 persistent_set
-// calls per index per create — one for the entry and one for the updated
-// count.  Each persistent_set issues a storage set + extend_ttl, so the
-// three indices together added 6 set + 6 extend_ttl = 12 writes.
-//
-// The optimised approach uses a single Vec<BytesN<32>> keyed under the
-// already-defined InvoicesByIssuer / InvoicesByBuyer / InvoicesByStatus
-// variants.  Pushing a new invoice_id is a single read-modify-write:
-// 1 get + 1 persistent_set (set + extend_ttl).  This eliminates the
-// separate count and per-entry writes entirely.
-//
-//   Before (per index): 1 get + 2 persistent_set = 1 read + 4 writes
-//   After  (per index): 1 get + 1 persistent_set = 1 read + 2 writes
-//
-// Total writes for create():
-//   Before: 1 instance set (Counter) + 7 persistent_set = 1 + 14 = 15 writes
-//   After:  1 instance set (Counter) + 4 persistent_set = 1 + 8  =  9 writes
-//   Savings: 6 writes (40 % reduction)
-//
-// Query functions read the same Vec and paginate with offset/limit, so
-// observable behaviour is unchanged.
-// ---------------------------------------------------------------------------
-
-fn push_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
-    let key = DataKey::InvoicesByIssuer(issuer.clone());
-    let mut vec: Vec<BytesN<32>> = env
-        .storage()
+fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
+    let count_key = DataKey::IssuerIndexCount(issuer.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), count);
+    env.storage().persistent().set(&entry_key, invoice_id);
+    env.storage().persistent().set(&count_key, &(count + 1));
+    env.storage()
         .persistent()
-        .get(&key)
-        .unwrap_or(Vec::new(env));
-    vec.push_back(invoice_id.clone());
-    persistent_set(env, &key, &vec);
+        .extend_ttl(&entry_key, 100, 2_000_000);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, 100, 2_000_000);
 }
 
-fn push_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
-    let key = DataKey::InvoicesByBuyer(buyer.clone());
-    let mut vec: Vec<BytesN<32>> = env
-        .storage()
+fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
+    let count_key = DataKey::BuyerIndexCount(buyer.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), count);
+    env.storage().persistent().set(&entry_key, invoice_id);
+    env.storage().persistent().set(&count_key, &(count + 1));
+    env.storage()
         .persistent()
-        .get(&key)
-        .unwrap_or(Vec::new(env));
-    vec.push_back(invoice_id.clone());
-    persistent_set(env, &key, &vec);
+        .extend_ttl(&entry_key, 100, 2_000_000);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, 100, 2_000_000);
 }
 
-fn push_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
-    let key = DataKey::InvoicesByStatus(status as u32);
-    let mut vec: Vec<BytesN<32>> = env
-        .storage()
+fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
+    let status_u32 = status as u32;
+    let count_key = DataKey::StatusIndexCount(status_u32);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+    let entry_key = DataKey::StatusIndexEntry(status_u32, count);
+    env.storage().persistent().set(&entry_key, invoice_id);
+    env.storage().persistent().set(&count_key, &(count + 1));
+    env.storage()
         .persistent()
-        .get(&key)
-        .unwrap_or(Vec::new(env));
-    vec.push_back(invoice_id.clone());
-    persistent_set(env, &key, &vec);
+        .extend_ttl(&entry_key, 100, 2_000_000);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, 100, 2_000_000);
 }
 
-fn move_status_index(env: &Env, invoice_id: &BytesN<32>, _from: InvoiceStatus, to: InvoiceStatus) {
-    // Append to new status.  get_by_status filters by checking
-    // invoice.status directly, so stale entries in the old status Vec
-    // are harmless — they will not appear in query results.
-    push_status_index(env, to, invoice_id);
+fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to: InvoiceStatus) {
+    decrement_status_count(env, from);
+    increment_status_count(env, to);
+    extend_status_index(env, to, invoice_id);
+}
+
+fn increment_status_count(env: &Env, status: InvoiceStatus) {
+    let key = DataKey::StatusCount(status as u32);
+    let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
+    env.storage().persistent().set(&key, &(current + 1));
+}
+
+fn decrement_status_count(env: &Env, status: InvoiceStatus) {
+    let key = DataKey::StatusCount(status as u32);
+    let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
+    let next = current
+        .checked_sub(1)
+        .unwrap_or_else(|| panic_with_error!(env, InvoiceError::InvalidStatusTransition));
+    env.storage().persistent().set(&key, &next);
+}
+
+fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {
+    env.storage()
+        .persistent()
+        .get(&DataKey::StatusCount(status as u32))
+        .unwrap_or(0u64)
 }

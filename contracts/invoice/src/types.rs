@@ -45,13 +45,24 @@ pub enum DataKey {
     IssuerIndexCount(Address),
     BuyerIndexCount(Address),
     StatusIndexCount(u32),
+    StatusCount(u32),
     IssuerIndexEntry(Address, u32),
     BuyerIndexEntry(Address, u32),
     StatusIndexEntry(u32, u32),
-    InvoicesByIssuer(Address),
-    InvoicesByBuyer(Address),
-    InvoicesByStatus(u32),
     ExpiryWindow,
-    SupportedAsset(Address),
-    SupportedAssetCount,
+}
+
+impl InvoiceStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            InvoiceStatus::Created => "Created",
+            InvoiceStatus::Listed => "Listed",
+            InvoiceStatus::Funded => "Funded",
+            InvoiceStatus::Active => "Active",
+            InvoiceStatus::Confirmed => "Confirmed",
+            InvoiceStatus::Repaid => "Repaid",
+            InvoiceStatus::Defaulted => "Defaulted",
+            InvoiceStatus::Expired => "Expired",
+        }
+    }
 }

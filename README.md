@@ -72,7 +72,7 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 ```
 
 ```
-create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
+create(issuer, buyer, face_value, due_date) → invoice_id
 list_for_financing(invoice_id, discount_bps) → bool
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
@@ -83,17 +83,6 @@ get(invoice_id) → Invoice
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
 ```
-
-**Supported Assets:** The invoice contract maintains a whitelist of supported funding assets. Only assets registered via `add_supported_asset` can be used when creating invoices. This prevents issuers from creating invoices with unsupported tokens that no pool can fund. The admin manages the supported asset list:
-
-```
-add_supported_asset(asset)    ← admin only
-remove_supported_asset(asset) ← admin only
-is_supported_asset(asset) → bool
-get_supported_asset_count() → u32
-```
-
-Currently supported assets: USDC (Stellar testnet), XLM (Stellar testnet).
 
 ### escrow_contract
 
@@ -172,31 +161,23 @@ No fund movement. Invoice status: Created → Listed.
 #### Step 3 — Fund Invoice (Pool → Escrow)
 Anyone can call `pool.fund_invoice(invoice_id)`. The pool computes the funded amount, locks it in escrow, and marks the invoice as funded.
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant pool_contract
-    participant escrow_contract
-    participant invoice_contract
+```
+funded_amount = face_value × (10000 − discount_bps) / 10000
 
-    Caller->>pool_contract: fund_invoice(invoice_id)
-    Note over pool_contract: funded_amount = face_value × (10000 − discount_bps) / 10000
-    pool_contract->>escrow_contract: lock(invoice_id, funded_amount)
-    Note over pool_contract,escrow_contract: Transfers funded_amount USDC to Escrow
-    pool_contract->>invoice_contract: mark_funded(invoice_id, funded_amount)
-    Note over invoice_contract: Status: Listed → Funded
+Pool ──[funded_amount USDC]──► Escrow  (locked per invoice_id)
+Invoice status: Listed → Funded
 ```
 
 The pool retains `face_value − funded_amount` (the discount) as accrued yield, collectible when the buyer repays.
 
-#### Step 4 — Release to Issuer (Escrow → Issuer)
+#### Step 4 — Release to Issuer (Escrow → Issuer) ⚠️ Known Gap
 The pool contract is expected to call `escrow.release_to_issuer(invoice_id, issuer)` so that the locked USDC reaches the issuer who can then ship goods.
 
 ```
 Escrow ──[funded_amount USDC]──► Issuer
 ```
 
-> **Note:** This transfer is not yet wired into `fund_invoice`. See [Issue #56](https://github.com/TrusTrove/TrusTrove-contract/issues/56) for tracking status and implementation details.
+**⚠️ This call is not yet wired into `fund_invoice` (see [Issue #56](https://github.com/TrusTrove/TrusTrove-contract/issues/56)).** In the current deployment, issuers do not automatically receive USDC after an invoice is funded. This is the highest-priority gap before mainnet.
 
 #### Step 5 — Ship & Confirm (no funds move)
 The issuer calls `mark_shipped`. Then **both** the issuer and the buyer must independently call `confirm_delivery`. Only when both confirmations are recorded does the invoice advance to `Confirmed`.
@@ -208,17 +189,11 @@ No fund movement. Invoice status: Funded → Active → Confirmed.
 #### Step 6 — Repay (Buyer → Pool, bypassing Escrow)
 The buyer calls `invoice.repay(invoice_id)`, which transfers `face_value` USDC **directly from the buyer to the pool**, then calls `pool.receive_repayment` to account for the yield.
 
-```mermaid
-sequenceDiagram
-    participant Buyer
-    participant invoice_contract
-    participant pool_contract
-
-    Buyer->>invoice_contract: repay(invoice_id)
-    Note over Buyer,pool_contract: Buyer transfers face_value USDC to Pool
-    invoice_contract->>pool_contract: receive_repayment(invoice_id, amount)
-    Note over pool_contract: Books yield: face_value − funded_amount<br/>TotalDeposits += yield_amount
-    Note over invoice_contract: Status: Confirmed → Repaid
+```
+Buyer ──[face_value USDC]──► Pool
+  Pool books yield: face_value − funded_amount = discount earned
+  TotalDeposits += yield_amount  (share price rises for all LPs)
+Invoice status: Confirmed → Repaid
 ```
 
 Repayment does **not** flow through escrow. The escrow contract is only involved in funding (Step 3), the missing issuer release (Step 4), and default recovery (Step 7).
@@ -226,19 +201,13 @@ Repayment does **not** flow through escrow. The escrow contract is only involved
 #### Step 7 — Default (Escrow → Pool)
 If the invoice passes its `due_date` without reaching `Repaid`, any caller triggers `invoice.trigger_default`. The invoice contract calls `pool.handle_default`, which in turn calls `escrow.handle_default` — returning the still-locked `funded_amount` to the pool.
 
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant invoice_contract
-    participant pool_contract
-    participant escrow_contract
-
-    Caller->>invoice_contract: trigger_default(invoice_id)
-    invoice_contract->>pool_contract: handle_default(invoice_id)
-    pool_contract->>escrow_contract: handle_default(invoice_id, caller)
-    Note over escrow_contract,pool_contract: Escrow transfers funded_amount USDC back to Pool
-    Note over pool_contract: TotalFunded -= funded_amount (liquidity freed)
-    Note over invoice_contract: Status: → Defaulted
+```
+invoice.trigger_default()
+  └─► pool.handle_default()
+        └─► escrow.handle_default()
+              └─► Escrow ──[funded_amount USDC]──► Pool
+Invoice status: → Defaulted
+  TotalFunded -= funded_amount  (liquidity freed)
 ```
 
 ### Summary Table
@@ -248,7 +217,7 @@ sequenceDiagram
 | LP deposit | LP wallet | Pool | `usdc_amount` | No |
 | LP withdraw | Pool | LP wallet | `shares × price` | No |
 | Fund invoice | Pool | Escrow | `face_value × (1 − discount)` | Yes — locks |
-| Release to issuer ([#56](https://github.com/TrusTrove/TrusTrove-contract/issues/56)) | Escrow | Issuer | `funded_amount` | Yes — releases |
+| Release to issuer *(gap)* | Escrow | Issuer | `funded_amount` | Yes — releases |
 | Repay | Buyer wallet | Pool | `face_value` | No |
 | Default recovery | Escrow | Pool | `funded_amount` | Yes — releases |
 
@@ -319,46 +288,6 @@ The deploy script prints all four contract IDs at the end. Paste them into `Trus
 
 ---
 
-## Configuration Guide
-
-After deploying, two on-chain parameters control economic behaviour. Both are set via admin-only calls and take effect immediately without redeployment.
-
-### `max_utilization_bps` — Pool (default: 8500)
-
-Controls what fraction of pooled USDC can be locked in active invoices at any time. Expressed in basis points (1 bp = 0.01%).
-
-```
-pool_contract.set_max_utilization(&admin, new_cap_bps)
-```
-
-| Value | Meaning | Trade-off |
-|-------|---------|-----------|
-| `8500` (default) | 85 % of deposits may be deployed | Leaves a 15 % liquidity buffer for withdrawals |
-| `10000` | 100 % utilization allowed | Maximum yield but LPs cannot withdraw while fully deployed |
-| `5000` | 50 % cap | Conservative — large buffer, lower capital efficiency |
-
-**Risk of setting too high:** LPs may be unable to withdraw if all capital is locked in open invoices.  
-**Risk of setting too low:** Eligible invoices are rejected even when the pool has ample deposits, reducing yield for LPs and funding access for issuers.
-
-### `expiry_window` — Invoice (default: 604800 seconds / 7 days)
-
-How long a `Listed` invoice can remain unfunded before it is eligible to be expired. Expired listings are removed from the active pool, preventing stagnant invoices from cluttering the book.
-
-```
-invoice_contract.set_expiry_window(&admin, window_seconds)
-```
-
-| Value | Meaning | Trade-off |
-|-------|---------|-----------|
-| `604800` (default) | 7 days | Reasonable time for LPs to discover and fund an invoice |
-| `259200` | 3 days | Faster cleanup; may expire genuine invoices in low-activity periods |
-| `1209600` | 14 days | More time for funding discovery; stale listings linger longer |
-
-**Risk of setting too short:** Legitimate invoices expire before they can be funded during periods of low protocol activity.  
-**Risk of setting too long:** The listed-invoice queue fills with unfundable or abandoned listings, degrading signal quality for LPs.
-
----
-
 ## Known Centralization Risks & Roadmap
 
 TrusTrove is in active development on Stellar testnet. Several centralization trade-offs were made deliberately to ship a working protocol quickly. They are documented here so contributors and users understand the current trust model and can help drive the path to a more decentralized design.
@@ -402,18 +331,6 @@ If you want to contribute to governance design, open an issue tagged `complexity
 There is currently no circuit breaker. If a critical bug is found post-deployment the only recourse is to stop directing traffic to the affected contracts via the frontend.
 
 **Roadmap:** Add an `admin_pause() / admin_unpause()` function pair to each contract, guarded behind multi-sig, that blocks state-changing calls while reads remain live.
-
----
-
-## Known Gaps
-
-The following gaps are tracked as open GitHub issues. Do not rely on the README as the source of truth — check the issue tracker for current status.
-
-| Gap | Issue | Priority |
-|-----|-------|----------|
-| `escrow.release_to_issuer` not called from `fund_invoice` — issuers do not receive USDC after funding | [#56](https://github.com/TrusTrove/TrusTrove-contract/issues/56) | Highest — blocks mainnet |
-| No emergency pause mechanism across contracts | [Roadmap](#no-emergency-pause-mechanism) | High |
-| Admin key is a single EOA with no multi-sig | [Roadmap](#admin-key-controls-critical-operations) | High |
 
 ---
 

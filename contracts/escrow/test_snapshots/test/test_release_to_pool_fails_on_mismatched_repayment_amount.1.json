@@ -710,6 +710,7 @@
     {
       "event": {
         "ext": "v0",
+<<<<<<<< HEAD:contracts/escrow/test_snapshots/test/test_release_to_pool_fails_on_overpayment.1.json
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000005",
         "type_": "contract",
         "body": {
@@ -737,6 +738,9 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000005",
+========
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000004",
+>>>>>>>> LPInitialDeposit:contracts/escrow/test_snapshots/test/test_release_to_pool_fails_on_mismatched_repayment_amount.1.json
         "type_": "diagnostic",
         "body": {
           "v0": {
