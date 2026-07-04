@@ -241,7 +241,7 @@ fn test_release_to_pool_partial_repayment() {
 
     client.lock(&invoice_id, &amount);
     let partial_repayment: u128 = 400_000_000;
-    let result = client.release_to_pool(&invoice_id, &partial_repayment);
+    let result = client.release_to_pool(&invoice_id, &partial_repayment, &pool);
     assert!(result);
 
     let locked = client.get_locked(&invoice_id);
