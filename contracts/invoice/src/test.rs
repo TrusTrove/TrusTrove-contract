@@ -48,6 +48,33 @@ impl MockPool {
         let key = Symbol::new(&env, "asset");
         env.storage().instance().get(&key).unwrap()
     }
+
+    pub fn receive_repayment_with_refund(
+        env: Env,
+        _invoice_id: BytesN<32>,
+        _amount: u128,
+        refund: u128,
+        _buyer: Address,
+    ) -> bool {
+        let key = Symbol::new(&env, "last_refund");
+        env.storage().instance().set(&key, &refund);
+        true
+    }
+
+    pub fn get_last_refund(env: Env) -> u128 {
+        let key = Symbol::new(&env, "last_refund");
+        env.storage().instance().get(&key).unwrap_or(0)
+    }
+}
+
+#[contract]
+pub struct MockToken;
+
+#[contractimpl]
+impl MockToken {
+    pub fn transfer(_env: Env, _from: Address, _to: Address, _amount: i128) {
+        // no-op for tests (auth is mocked)
+    }
 }
 
 type Setup = (
@@ -77,7 +104,8 @@ fn setup() -> Setup {
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = Address::generate(&env);
+    let token_id = env.register_contract(None, MockToken);
+    let usdc_asset = token_id;
 
     (env, client, issuer, buyer, registry_client, usdc_asset)
 }

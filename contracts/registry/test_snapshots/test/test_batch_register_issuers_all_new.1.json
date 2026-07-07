@@ -181,30 +181,18 @@
                     },
                     {
                       "key": {
+                        "symbol": "packed_flags"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
                         "u64": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "role"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "symbol": "Issuer"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "verified"
-                      },
-                      "val": {
-                        "bool": true
                       }
                     }
                   ]
@@ -280,30 +268,18 @@
                     },
                     {
                       "key": {
+                        "symbol": "packed_flags"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
                         "u64": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "role"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "symbol": "Issuer"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "verified"
-                      },
-                      "val": {
-                        "bool": true
                       }
                     }
                   ]
@@ -379,30 +355,18 @@
                     },
                     {
                       "key": {
+                        "symbol": "packed_flags"
+                      },
+                      "val": {
+                        "u32": 2
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "registered_at"
                       },
                       "val": {
                         "u64": 0
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "role"
-                      },
-                      "val": {
-                        "vec": [
-                          {
-                            "symbol": "Issuer"
-                          }
-                        ]
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "verified"
-                      },
-                      "val": {
-                        "bool": true
                       }
                     }
                   ]
@@ -786,7 +750,7 @@
               }
             ],
             "data": {
-              "u32": 3
+              "vec": []
             }
           }
         }
@@ -1010,30 +974,18 @@
                 },
                 {
                   "key": {
+                    "symbol": "packed_flags"
+                  },
+                  "val": {
+                    "u32": 2
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
                     "u64": 0
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "role"
-                  },
-                  "val": {
-                    "vec": [
-                      {
-                        "symbol": "Issuer"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "verified"
-                  },
-                  "val": {
-                    "bool": true
                   }
                 }
               ]
@@ -1113,30 +1065,18 @@
                 },
                 {
                   "key": {
+                    "symbol": "packed_flags"
+                  },
+                  "val": {
+                    "u32": 2
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
                     "u64": 0
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "role"
-                  },
-                  "val": {
-                    "vec": [
-                      {
-                        "symbol": "Issuer"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "verified"
-                  },
-                  "val": {
-                    "bool": true
                   }
                 }
               ]
@@ -1216,30 +1156,18 @@
                 },
                 {
                   "key": {
+                    "symbol": "packed_flags"
+                  },
+                  "val": {
+                    "u32": 2
+                  }
+                },
+                {
+                  "key": {
                     "symbol": "registered_at"
                   },
                   "val": {
                     "u64": 0
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "role"
-                  },
-                  "val": {
-                    "vec": [
-                      {
-                        "symbol": "Issuer"
-                      }
-                    ]
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "verified"
-                  },
-                  "val": {
-                    "bool": true
                   }
                 }
               ]

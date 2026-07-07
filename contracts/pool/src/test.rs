@@ -1,7 +1,9 @@
 #![cfg(test)]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env,
+    contract, contractimpl, contracttype,
+    testutils::{Address as _, Ledger},
+    Address, BytesN, Env,
 };
 
 use crate::{DataKey, PoolContract, PoolContractClient};
@@ -168,6 +170,9 @@ fn fund_and_repay_invoice(te: &TestEnv) -> BytesN<32> {
     te.invoice.mark_shipped(&invoice_id);
     te.invoice.confirm_delivery(&invoice_id, &te.issuer);
     te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
     te.invoice.repay(&invoice_id);
     invoice_id
 }
@@ -217,6 +222,110 @@ fn test_second_deposit_scales_by_share_price() {
     let pos = te.pool.get_lp_position(&te.lp);
     assert_eq!(pos.shares, 15_000_000_000);
     assert_eq!(pos.deposit_count, 2);
+}
+
+// ============== DUST ATTACK / 0-SHARE TESTS (issue #129) ==============
+
+// After the pool accrues yield the share price rises above 1.0. A deposit
+// small enough that `usdc_amount * total_shares < total_deposits` would round
+// down to 0 shares. Such a deposit must be rejected with `MinimumDeposit` (#14)
+// rather than silently absorbing the depositor's funds.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_deposit_rejects_dust_when_zero_shares_after_yield() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    // Share price is now 10.2B / 10B = 1.02
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 10_200_000_000);
+    assert_eq!(stats.total_shares, 10_000_000_000);
+
+    // 1 * 10B / 10.2B = 0 shares -> must be rejected, not absorbed.
+    let lp2 = create_lp_with_balance(&te, 10_000_000_000);
+    te.pool.deposit(&lp2, &1);
+}
+
+// A rejected dust deposit must not change pool accounting and must not take the
+// depositor's USDC: the whole transaction reverts. This proves no funds are lost.
+#[test]
+fn test_dust_deposit_rejection_preserves_state_and_funds() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    let before = te.pool.get_stats();
+    let lp2 = create_lp_with_balance(&te, 10_000_000_000);
+
+    // try_* returns Err on contract panic instead of unwinding the test.
+    let res = te.pool.try_deposit(&lp2, &1);
+    assert!(res.is_err(), "dust deposit should be rejected");
+
+    // Pool deposits/shares are unchanged: the 1 unit was never absorbed.
+    let after = te.pool.get_stats();
+    assert_eq!(after.total_deposits, before.total_deposits);
+    assert_eq!(after.total_shares, before.total_shares);
+
+    // The rejected depositor holds no shares.
+    let pos = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos.shares, 0);
+}
+
+// The guard must not over-reject: a small deposit that still mints >= 1 share at
+// the elevated price succeeds normally.
+#[test]
+fn test_smallest_valid_deposit_after_yield_issues_at_least_one_share() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    // Share price 1.02: 2 * 10B / 10.2B = 1 share (floored), the minimum > 0.
+    let lp2 = create_lp_with_balance(&te, 10_000_000_000);
+    let shares = te.pool.deposit(&lp2, &2);
+    assert_eq!(shares, 1);
+
+    let pos = te.pool.get_lp_position(&lp2);
+    assert_eq!(pos.shares, 1);
+    assert_eq!(pos.deposit_count, 1);
+}
+
+// Core acceptance guarantee: across a sweep of deposit sizes against a pool with
+// an inflated share price, every deposit either mints >= 1 share or is rejected.
+// No deposit is ever accepted for 0 shares.
+#[test]
+fn test_no_deposit_ever_receives_zero_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+    // Share price is 1.02; amounts of 1 round to 0 shares, >= 2 round to >= 1.
+
+    let amounts = [1u128, 2, 3, 5, 10, 102, 1_000, 1_000_000];
+    for amount in amounts {
+        let lp = create_lp_with_balance(&te, 100_000_000_000i128);
+        match te.pool.try_deposit(&lp, &amount) {
+            Ok(Ok(shares)) => {
+                // Accepted deposits must always mint at least one share.
+                assert!(shares >= 1, "amount {amount} accepted for 0 shares");
+                let pos = te.pool.get_lp_position(&lp);
+                assert_eq!(pos.shares, shares);
+            }
+            _ => {
+                // Rejected deposits must leave the depositor with no shares.
+                let pos = te.pool.get_lp_position(&lp);
+                assert_eq!(pos.shares, 0, "amount {amount} rejected but minted shares");
+            }
+        }
+    }
+}
+
+// The first deposit (total_shares == 0) is always 1:1 and never hits the guard,
+// even for the smallest possible amount.
+#[test]
+fn test_first_deposit_of_one_unit_succeeds() {
+    let te = setup();
+    let shares = te.pool.deposit(&te.lp, &1);
+    assert_eq!(shares, 1);
 }
 
 // ============== WITHDRAW TESTS ==============
@@ -536,6 +645,9 @@ fn test_lp_position_reflects_current_share_price() {
     te.invoice.mark_shipped(&invoice_id);
     te.invoice.confirm_delivery(&invoice_id, &te.issuer);
     te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
     te.invoice.repay(&invoice_id);
 
     let pos = te.pool.get_lp_position(&te.lp);

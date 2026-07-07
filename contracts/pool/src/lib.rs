@@ -103,6 +103,8 @@ impl PoolContract {
         //
         // # Panics
         // * `InvalidAmount` if `usdc_amount` is zero.
+        // * `MinimumDeposit` if the deposit is too small to mint at least 1 share
+        //   at the current share price (prevents 0-share dust deposits).
         //
         // # Example
         // ```ignore
@@ -112,10 +114,6 @@ impl PoolContract {
         if usdc_amount == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
-
-        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
-        let usdc = token::Client::new(&env, &usdc_id);
-        usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
 
         let total_shares: u128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
         let total_deposits: u128 = env
@@ -129,6 +127,21 @@ impl PoolContract {
         } else {
             usdc_amount * total_shares / total_deposits
         };
+
+        // Dust-attack guard: once the pool accrues yield, the share price
+        // (total_deposits / total_shares) rises above 1.0, so a sufficiently
+        // small deposit can round down to 0 shares while its USDC is still
+        // pulled into total_deposits, silently donating the deposit to existing
+        // LPs. Reject any deposit that would mint 0 shares so the caller keeps
+        // their funds. This check runs before the token transfer, so no USDC
+        // leaves the depositor on the rejection path.
+        if shares_to_issue == 0 {
+            panic_with_error!(&env, PoolError::MinimumDeposit);
+        }
+
+        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
+        let usdc = token::Client::new(&env, &usdc_id);
+        usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
 
         env.storage()
             .instance()
@@ -484,6 +497,82 @@ impl PoolContract {
             .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
 
         env.storage().persistent().remove(&funded_key);
+
+        events::repayment_received(&env, &invoice_id, amount, yield_amount);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    pub fn receive_repayment_with_refund(
+        env: Env,
+        invoice_id: BytesN<32>,
+        amount: u128,
+        refund: u128,
+        buyer: Address,
+    ) -> bool {
+        let invoice_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceContract)
+            .unwrap();
+        invoice_contract.require_auth();
+
+        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+        let funded_amount: u128 = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
+        if amount < funded_amount {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let max_refund = amount.saturating_sub(funded_amount);
+        if refund > max_refund {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let yield_amount = amount - funded_amount - refund;
+        let total_deposits: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalDeposits)
+            .unwrap();
+        let total_funded: u128 = env.storage().instance().get(&DataKey::TotalFunded).unwrap();
+        let total_yield: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalYieldDistributed)
+            .unwrap();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
+        env.storage().instance().set(
+            &DataKey::TotalYieldDistributed,
+            &(total_yield + yield_amount),
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+
+        let active_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveInvoiceCount)
+            .unwrap();
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
+
+        env.storage().persistent().remove(&funded_key);
+
+        // transfer refund back to buyer from pool's USDC balance
+        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
+        let usdc = token::Client::new(&env, &usdc_id);
+        if refund > 0 {
+            usdc.transfer(&env.current_contract_address(), &buyer, &(refund as i128));
+        }
 
         events::repayment_received(&env, &invoice_id, amount, yield_amount);
         Self::extend_instance_ttl(&env);

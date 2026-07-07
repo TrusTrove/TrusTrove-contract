@@ -66,13 +66,13 @@ impl RegistryContract {
         {
             panic_with_error!(&env, RegistryError::AlreadyRegistered);
         }
-        let profile = Profile {
-            address: address.clone(),
-            role: Role::Issuer,
-            verified: true,
-            registered_at: env.ledger().timestamp(),
+        let profile = Profile::new(
+            address.clone(),
+            Role::Issuer,
+            true,
+            env.ledger().timestamp(),
             metadata,
-        };
+        );
         let key = DataKey::Profile(address.clone());
         env.storage().persistent().set(&key, &profile);
         env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
@@ -81,23 +81,16 @@ impl RegistryContract {
         true
     }
 
-    /// Batch registers multiple issuer profiles (admin only).
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `entries` - A list of (address, metadata) pairs for each issuer.
-    ///
-    /// # Returns
-    /// * `u32` - The number of newly registered issuers.
-    ///
-    /// # Panics
-    /// * `NotFound` if the admin address is not set.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let count = client.batch_register_issuers(&entries);
-    /// ```
-    pub fn batch_register_issuers(env: Env, entries: Vec<(Address, Map<String, String>)>) -> u32 {
+    // Returns the list of addresses that were skipped (already registered) so
+    // the caller knows exactly which entries were not processed (#66).
+    pub fn batch_register_issuers(
+        env: Env,
+        entries: Vec<(Address, Map<String, String>)>,
+    ) -> Vec<Address> {
+        if entries.len() > 50 {
+            panic_with_error!(&env, RegistryError::BatchSizeExceeded);
+        }
+
         let admin: Address = env
             .storage()
             .instance()
@@ -105,32 +98,36 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         admin.require_auth();
 
-        let mut count: u32 = 0;
+        let mut skipped: Vec<Address> = Vec::new(&env);
+        let mut registered: u32 = 0;
         for entry in entries.iter() {
             let (address, metadata) = entry;
             let key = DataKey::Profile(address.clone());
             if env.storage().persistent().has(&key) {
+                skipped.push_back(address.clone());
                 continue;
             }
 
-            let profile = Profile {
-                address: address.clone(),
-                role: Role::Issuer,
-                verified: true,
-                registered_at: env.ledger().timestamp(),
+            let profile = Profile::new(
+                address.clone(),
+                Role::Issuer,
+                true,
+                env.ledger().timestamp(),
                 metadata,
-            };
+            );
 
             env.storage().persistent().set(&key, &profile);
             env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
             events::issuer_registered(&env, &address);
-            count += 1;
+            registered += 1;
         }
 
-        if count > 0 {
+        events::batch_registered(&env, registered, skipped.len());
+
+        if registered > 0 {
             Self::extend_instance_ttl(&env);
         }
-        count
+        skipped
     }
 
     /// Registers a new buyer profile with initial metadata.
@@ -159,13 +156,13 @@ impl RegistryContract {
         {
             panic_with_error!(&env, RegistryError::AlreadyRegistered);
         }
-        let profile = Profile {
-            address: address.clone(),
-            role: Role::Buyer,
-            verified: true,
-            registered_at: env.ledger().timestamp(),
+        let profile = Profile::new(
+            address.clone(),
+            Role::Buyer,
+            true,
+            env.ledger().timestamp(),
             metadata,
-        };
+        );
         let key = DataKey::Profile(address.clone());
         env.storage().persistent().set(&key, &profile);
         env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
@@ -246,26 +243,22 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .get::<_, Profile>(&DataKey::Profile(address))
-            .map(|p| p.verified)
+            .map(|p| p.verified())
             .unwrap_or(false)
     }
 
-    /// Revokes verification for a registered profile.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `address` - The address to revoke.
-    ///
-    /// # Returns
-    /// * `bool` - `true` when revocation succeeds.
-    ///
-    /// # Panics
-    /// * `NotFound` if the admin or the profile address is missing.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let result = client.revoke(&address);
-    /// ```
+    pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, Profile>(&DataKey::Profile(address))
+        {
+            None => VerificationStatus::Unregistered,
+            Some(p) if p.verified() => VerificationStatus::Verified,
+            Some(_) => VerificationStatus::Revoked,
+        }
+    }
+
     pub fn revoke(env: Env, address: Address) -> bool {
         let admin: Address = env
             .storage()
@@ -279,7 +272,7 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        profile.verified = false;
+        profile.set_verified(false);
         env.storage().persistent().set(&key, &profile);
         env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
         events::address_revoked(&env, &address);
@@ -287,24 +280,6 @@ impl RegistryContract {
         true
     }
 
-    /// Verifies or unverifies a profile (admin only).
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `address` - The address whose profile to verify.
-    /// * `verify` - `true` to verify, `false` to unverify.
-    ///
-    /// # Returns
-    /// * `bool` - `true` when the profile is updated.
-    ///
-    /// # Panics
-    /// * `NotFound` if the profile does not exist.
-    /// * `NotAuthorized` if caller is not the admin.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let result = client.verify_profile(&address, true);
-    /// ```
     pub fn verify_profile(env: Env, address: Address, verify: bool) -> bool {
         let admin: Address = env
             .storage()
@@ -318,7 +293,7 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        profile.verified = verify;
+        profile.set_verified(verify);
         env.storage().persistent().set(&key, &profile);
         env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
         events::profile_verified(&env, &address, verify);
@@ -341,13 +316,44 @@ impl RegistryContract {
     /// ```ignore
     /// let admin = client.get_admin();
     /// ```
+    pub fn transfer_ownership(env: Env, new_admin: Address) {
+        // Transfers admin ownership to a new address.
+        //
+        // Requires authentication from BOTH the current admin and the incoming
+        // new admin, preventing accidental transfers to wrong addresses.
+        //
+        // # Arguments
+        // * `env` - The Soroban environment.
+        // * `new_admin` - The address that will become the new admin.
+        //
+        // # Panics
+        // * `NotFound` if the admin is not set.
+        //
+        // # Example
+        // ```ignore
+        // client.transfer_ownership(&new_admin);
+        // ```
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::ownership_transferred(&env, &admin, &new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound))
     }
+}
 
+impl RegistryContract {
     fn extend_instance_ttl(env: &Env) {
         env.storage().instance().extend_ttl(100, 2_000_000);
     }

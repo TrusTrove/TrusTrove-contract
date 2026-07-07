@@ -14,4 +14,6 @@ pub enum PoolError {
     InvoiceNotFound = 10,
     AssetMismatch = 11,
     UtilizationCapExceeded = 12,
+    Overflow = 13,
+    MinimumDeposit = 14,
 }
