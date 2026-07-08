@@ -3,7 +3,9 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
-    vec, Address, BytesN, Env, IntoVal, Symbol,
+    vec,
+    xdr::ToXdr,
+    Address, BytesN, Env, IntoVal, Symbol,
 };
 
 use crate::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
