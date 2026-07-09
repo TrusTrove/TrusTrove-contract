@@ -470,6 +470,53 @@ fn test_create_invoice_with_xlm_asset() {
 }
 
 #[test]
+fn test_create_handles_various_xdr_lengths_and_address_types() {
+    let (env, client, issuer, buyer, _, _usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    // Use a generated address (typical account XDR)
+    let invoice_id1 = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &_usdc);
+    let invoice1 = client.get(&invoice_id1);
+    assert_eq!(invoice1.status, InvoiceStatus::Created);
+
+    // Use a contract address (returned from registering a contract) to vary XDR shape
+    let contract_asset = env.register_contract(None, MockToken);
+    let invoice_id2 = client.create(&issuer, &buyer, &2_000_000_000, &due_date, &contract_asset);
+    let invoice2 = client.get(&invoice_id2);
+    assert_eq!(invoice2.status, InvoiceStatus::Created);
+
+    // Ensure creation did not panic and produced valid invoice IDs
+    assert_ne!(invoice_id1, invoice_id2);
+}
+
+#[test]
+fn test_invoice_ids_unique_for_different_parties_and_assets() {
+    let (env, client, issuer, buyer, registry, _usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    let other_issuer = Address::generate(&env);
+    registry.register(&other_issuer);
+    let other_buyer = Address::generate(&env);
+    registry.register(&other_buyer);
+
+    let asset1 = _usdc;
+    let asset2 = env.register_contract(None, MockToken);
+
+    let id_a = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &asset1);
+    let id_b = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &asset2);
+    let id_c = client.create(&other_issuer, &buyer, &1_000_000_000, &due_date, &asset1);
+    let id_d = client.create(&issuer, &other_buyer, &1_000_000_000, &due_date, &asset1);
+
+    // All combinations should yield distinct deterministic IDs
+    assert_ne!(id_a, id_b);
+    assert_ne!(id_a, id_c);
+    assert_ne!(id_a, id_d);
+    assert_ne!(id_b, id_c);
+    assert_ne!(id_b, id_d);
+    assert_ne!(id_c, id_d);
+}
+
+#[test]
 fn test_get_funding_asset_returns_correct_asset() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + 86400;
