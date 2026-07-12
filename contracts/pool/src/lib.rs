@@ -17,6 +17,28 @@ pub struct PoolContract;
 
 #[contractimpl]
 impl PoolContract {
+    /// Initializes the pool contract with admin and external contract references.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The admin address for this contract.
+    /// * `invoice_contract` - The invoice contract address.
+    /// * `escrow_contract` - The escrow contract address.
+    /// * `usdc_asset` - The USDC asset address.
+    ///
+    /// # Auth
+    /// Requires authorization from `admin`.
+    ///
+    /// # Panics
+    /// * `AlreadyInitialized` if the contract has already been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.initialize(&admin, &invoice, &escrow, &usdc);
+    /// ```
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -24,25 +46,6 @@ impl PoolContract {
         escrow_contract: Address,
         usdc_asset: Address,
     ) {
-        // Initializes the pool contract with admin and external contract references.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `admin` - The admin address for this contract.
-        // * `invoice_contract` - The invoice contract address.
-        // * `escrow_contract` - The escrow contract address.
-        // * `usdc_asset` - The USDC asset address.
-        //
-        // # Returns
-        // * `()` - No value is returned.
-        //
-        // # Panics
-        // * `AlreadyInitialized` if the contract has already been initialized.
-        //
-        // # Example
-        // ```ignore
-        // client.initialize(&admin, &invoice, &escrow, &usdc);
-        // ```
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, PoolError::AlreadyInitialized);
         }
@@ -74,42 +77,51 @@ impl PoolContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Returns the USDC asset used by the pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `UsdcAsset`).
+    ///
+    /// # Returns
+    /// * `Address` - The USDC asset address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let asset = client.get_usdc_asset();
+    /// ```
     pub fn get_usdc_asset(env: Env) -> Address {
-        // Returns the USDC asset used by the pool.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        //
-        // # Returns
-        // * `Address` - The USDC asset address.
-        //
-        // # Example
-        // ```ignore
-        // let asset = client.get_usdc_asset();
-        // ```
         env.storage().instance().get(&DataKey::UsdcAsset).unwrap()
     }
 
+    /// Deposits USDC from an LP and issues pool shares.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    /// * `usdc_amount` - The amount of USDC to deposit.
+    ///
+    /// # Auth
+    /// Requires self-authorization from `lp` (via `lp.require_auth()`).
+    ///
+    /// # Panics
+    /// * `InvalidAmount` if `usdc_amount` is zero.
+    /// * `MinimumDeposit` if the deposit is too small to mint at least 1 share
+    ///   at the current share price (prevents 0-share dust deposits).
+    ///
+    /// # Returns
+    /// * `u128` - The number of shares issued.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let shares = client.deposit(&lp, 1_000);
+    /// ```
     pub fn deposit(env: Env, lp: Address, usdc_amount: u128) -> u128 {
-        // Deposits USDC from an LP and issues pool shares.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `lp` - The liquidity provider address.
-        // * `usdc_amount` - The amount of USDC to deposit.
-        //
-        // # Returns
-        // * `u128` - The number of shares issued.
-        //
-        // # Panics
-        // * `InvalidAmount` if `usdc_amount` is zero.
-        // * `MinimumDeposit` if the deposit is too small to mint at least 1 share
-        //   at the current share price (prevents 0-share dust deposits).
-        //
-        // # Example
-        // ```ignore
-        // let shares = client.deposit(&lp, 1_000);
-        // ```
         lp.require_auth();
         if usdc_amount == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
@@ -186,27 +198,30 @@ impl PoolContract {
         shares_to_issue
     }
 
+    /// Withdraws shares from the pool and transfers USDC to the LP.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    /// * `shares` - The number of shares to withdraw.
+    ///
+    /// # Auth
+    /// Requires self-authorization from `lp` (via `lp.require_auth()`).
+    ///
+    /// # Panics
+    /// * `InvalidAmount` if `shares` is zero.
+    /// * `NoShares` if the LP has no shares.
+    /// * `InsufficientShares` if the LP does not own enough shares.
+    /// * `InsufficientLiquidity` if the pool lacks enough available USDC.
+    ///
+    /// # Returns
+    /// * `u128` - The amount of USDC returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let returned = client.withdraw(&lp, 500);
+    /// ```
     pub fn withdraw(env: Env, lp: Address, shares: u128) -> u128 {
-        // Withdraws shares from the pool and transfers USDC to the LP.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `lp` - The liquidity provider address.
-        // * `shares` - The number of shares to withdraw.
-        //
-        // # Returns
-        // * `u128` - The amount of USDC returned.
-        //
-        // # Panics
-        // * `InvalidAmount` if `shares` is zero.
-        // * `NoShares` if the LP has no shares.
-        // * `InsufficientShares` if the LP does not own enough shares.
-        // * `InsufficientLiquidity` if the pool lacks enough available USDC.
-        //
-        // # Example
-        // ```ignore
-        // let returned = client.withdraw(&lp, 500);
-        // ```
         lp.require_auth();
         if shares == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
@@ -293,26 +308,29 @@ impl PoolContract {
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice to fund.
     ///
-    /// # Returns
-    /// * `bool` - `true` when the invoice is funded.
+    /// # Auth
+    /// Requires authorization from the pool `admin` (via `admin.require_auth()`).
+    /// The additional eligibility checks below (invoice must be in Listed status,
+    /// asset must match the pool's asset, and the pool must have sufficient
+    /// liquidity) further constrain what admin-approved calls succeed.
+    ///
+    /// See README §"Known Centralization Risks & Roadmap" for the longer-term
+    /// governance design that will let LPs signal approval on funding decisions.
     ///
     /// # Panics
     /// * `InvoiceNotListed` if the invoice is not in listed status.
     /// * `AssetMismatch` if the invoice funding asset does not match pool USDC.
+    /// * `InvalidAmount` if the computed funded amount is zero.
     /// * `InsufficientLiquidity` if the pool does not have enough funds.
+    /// * `UtilizationCapExceeded` if funding would push utilization above the cap.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the invoice is funded.
     ///
     /// # Example
     /// ```ignore
     /// client.fund_invoice(&invoice_id);
     /// ```
-    // Permissionless: any caller may trigger funding for an eligible invoice.
-    // Access control is enforced entirely through eligibility checks below
-    // (invoice must be in Listed status, asset must match the pool's asset,
-    // and the pool must have sufficient liquidity).  There is no admin gate
-    // so that capital allocation cannot be censored or selectively withheld.
-    //
-    // See README §"Known Centralization Risks & Roadmap" for the longer-term
-    // governance design that will let LPs signal approval on funding decisions.
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -430,25 +448,30 @@ impl PoolContract {
         true
     }
 
+    /// Receives invoice repayment and updates pool liquidity metrics.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being repaid.
+    /// * `amount` - The amount repaid.
+    ///
+    /// # Auth
+    /// Requires authorization from the configured `invoice_contract`
+    /// (via `invoice_contract.require_auth()`); only the invoice contract may
+    /// invoke this entry point.
+    ///
+    /// # Panics
+    /// * `InvoiceNotFound` if the invoice is not funded.
+    /// * `InvalidAmount` if the repayment amount is less than the funded amount.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when repayment is processed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.receive_repayment(&invoice_id, 1_050);
+    /// ```
     pub fn receive_repayment(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
-        // Receives invoice repayment and updates pool liquidity metrics.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice being repaid.
-        // * `amount` - The amount repaid.
-        //
-        // # Returns
-        // * `bool` - `true` when repayment is processed.
-        //
-        // # Panics
-        // * `InvoiceNotFound` if the invoice is not funded.
-        // * `InvalidAmount` if the repayment amount is less than the funded amount.
-        //
-        // # Example
-        // ```ignore
-        // client.receive_repayment(&invoice_id, 1_050);
-        // ```
         let invoice_contract: Address = env
             .storage()
             .instance()
@@ -582,20 +605,30 @@ impl PoolContract {
         true
     }
 
+    /// Forwards a defaulted invoice to escrow default handling.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The defaulted invoice.
+    ///
+    /// # Auth
+    /// Requires authorization from the configured `invoice_contract`
+    /// (via `invoice_contract.require_auth()`); only the invoice contract may
+    /// invoke this entry point.
+    ///
+    /// # Panics
+    /// This function does not intentionally panic; it returns `false` when the
+    /// invoice is not funded. Arithmetic on internal counters is expected not
+    /// to underflow given the funded-invoice invariant.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when default handling completes, `false` if invoice is not funded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.handle_default(&invoice_id);
+    /// ```
     pub fn handle_default(env: Env, invoice_id: BytesN<32>) -> bool {
-        // Forwards a defaulted invoice to escrow default handling.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The defaulted invoice.
-        //
-        // # Returns
-        // * `bool` - `true` when default handling completes, `false` if invoice is not funded.
-        //
-        // # Example
-        // ```ignore
-        // client.handle_default(&invoice_id);
-        // ```
         let invoice_contract: Address = env
             .storage()
             .instance()
@@ -651,19 +684,26 @@ impl PoolContract {
         true
     }
 
+    /// Returns current pool statistics and utilization metrics.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// This function does not panic; all storage reads default to `0` (or the
+    /// initialization default of `8500` for `max_utilization_bps`).
+    ///
+    /// # Returns
+    /// * `PoolStats` - The current pool statistics.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stats = client.get_stats();
+    /// ```
     pub fn get_stats(env: Env) -> PoolStats {
-        // Returns current pool statistics and utilization metrics.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        //
-        // # Returns
-        // * `PoolStats` - The current pool statistics.
-        //
-        // # Example
-        // ```ignore
-        // let stats = client.get_stats();
-        // ```
         let total_deposits: u128 = env
             .storage()
             .instance()
@@ -711,20 +751,27 @@ impl PoolContract {
         }
     }
 
+    /// Returns the LP's position, including shares, value, yield, and deposits.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// This function does not panic; all storage reads default to `0` when the
+    /// LP has no recorded position.
+    ///
+    /// # Returns
+    /// * `LPPosition` - The LP position details.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let position = client.get_lp_position(&lp);
+    /// ```
     pub fn get_lp_position(env: Env, lp: Address) -> LPPosition {
-        // Returns the LP's position, including shares, value, yield, and deposits.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `lp` - The liquidity provider address.
-        //
-        // # Returns
-        // * `LPPosition` - The LP position details.
-        //
-        // # Example
-        // ```ignore
-        // let position = client.get_lp_position(&lp);
-        // ```
         let lp_shares: u128 = env
             .storage()
             .persistent()
@@ -766,19 +813,25 @@ impl PoolContract {
         }
     }
 
+    /// Returns the pool utilization rate as basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// This function does not panic; returns `0` when `total_deposits` is zero.
+    ///
+    /// # Returns
+    /// * `u32` - The utilization rate in basis points (`total_funded * 10_000 / total_deposits`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let utilization = client.get_utilization_rate();
+    /// ```
     pub fn get_utilization_rate(env: Env) -> u32 {
-        // Returns the pool utilization rate as basis points.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        //
-        // # Returns
-        // * `u32` - The utilization rate in basis points.
-        //
-        // # Example
-        // ```ignore
-        // let utilization = client.get_utilization_rate();
-        // ```
         let total_deposits: u128 = env
             .storage()
             .instance()
