@@ -158,6 +158,29 @@ fn test_initialize() {
     assert_eq!(client.get_locked(&generate_invoice_id(&env, 1)), 0);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_initialize_twice_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let invoice = Address::generate(&env);
+    let usdc = env.register_contract(None, MockToken);
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // First initialize succeeds
+    client.initialize(&admin, &pool, &invoice, &usdc);
+
+    // Second initialize must panic with AlreadyInitialized (Error #1)
+    let admin2 = Address::generate(&env);
+    let pool2 = Address::generate(&env);
+    let invoice2 = Address::generate(&env);
+    let usdc2 = env.register_contract(None, MockToken);
+    client.initialize(&admin2, &pool2, &invoice2, &usdc2);
+}
+
 // ============================================================================
 // Lock Tests
 // ============================================================================
