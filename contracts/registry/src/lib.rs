@@ -21,11 +21,17 @@ impl RegistryContract {
     /// * `env` - The Soroban environment.
     /// * `admin` - The address that will be authorized as contract admin.
     ///
-    /// # Returns
-    /// * `()` - No value is returned.
+    /// # Auth
+    /// * Requires `admin.require_auth()` — the incoming admin must sign the
+    ///   initialization call so ownership cannot be assigned to an address
+    ///   the caller does not control.
     ///
     /// # Panics
-    /// * `AlreadyInitialized` if the contract has already been initialized.
+    /// * `RegistryError::AlreadyInitialized` if the contract has already been
+    ///   initialized (an admin is already stored under `DataKey::Admin`).
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
@@ -42,16 +48,25 @@ impl RegistryContract {
 
     /// Registers a new issuer profile with initial metadata.
     ///
+    /// The profile is stored under `DataKey::Profile(address)` in persistent
+    /// storage with its TTL extended, and an `issuer_registered` event is
+    /// emitted on success.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `address` - The issuer address to register.
     /// * `metadata` - Profile metadata for the issuer.
     ///
-    /// # Returns
-    /// * `bool` - `true` when registration succeeds.
+    /// # Auth
+    /// * Requires `address.require_auth()` — the issuer being registered
+    ///   must sign the call, so accounts cannot be enrolled without consent.
     ///
     /// # Panics
-    /// * `AlreadyRegistered` if the address is already registered.
+    /// * `RegistryError::AlreadyRegistered` if a profile is already stored
+    ///   for `address`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when registration succeeds.
     ///
     /// # Example
     /// ```ignore
@@ -132,16 +147,25 @@ impl RegistryContract {
 
     /// Registers a new buyer profile with initial metadata.
     ///
+    /// The profile is stored under `DataKey::Profile(address)` in persistent
+    /// storage with its TTL extended, and a `buyer_registered` event is
+    /// emitted on success.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `address` - The buyer address to register.
     /// * `metadata` - Profile metadata for the buyer.
     ///
-    /// # Returns
-    /// * `bool` - `true` when registration succeeds.
+    /// # Auth
+    /// * Requires `address.require_auth()` — the buyer being registered must
+    ///   sign the call, so accounts cannot be enrolled without consent.
     ///
     /// # Panics
-    /// * `AlreadyRegistered` if the address is already registered.
+    /// * `RegistryError::AlreadyRegistered` if a profile is already stored
+    ///   for `address`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when registration succeeds.
     ///
     /// # Example
     /// ```ignore
@@ -209,11 +233,14 @@ impl RegistryContract {
     /// * `env` - The Soroban environment.
     /// * `address` - The address of the profile to retrieve.
     ///
-    /// # Returns
-    /// * `Profile` - The stored profile for the address.
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
     ///
     /// # Panics
-    /// * `NotFound` if the address is not registered.
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    ///
+    /// # Returns
+    /// * `Profile` - The stored profile for the address.
     ///
     /// # Example
     /// ```ignore
@@ -228,9 +255,19 @@ impl RegistryContract {
 
     /// Checks whether a registered profile is verified.
     ///
+    /// Returns `false` for addresses that have never been registered as well
+    /// as for addresses whose profile has had verification revoked.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `address` - The address to check.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * This function does not panic; missing profiles are reported as
+    ///   `false` rather than as an error.
     ///
     /// # Returns
     /// * `bool` - `true` if the address is registered and verified.
@@ -259,6 +296,33 @@ impl RegistryContract {
         }
     }
 
+    /// Revokes verification for a registered profile.
+    ///
+    /// Loads the profile, flips its verified flag to `false`, persists the
+    /// change (extending the profile's TTL), and emits an `address_revoked`
+    /// event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The registered address whose verification should be
+    ///   revoked.
+    ///
+    /// # Auth
+    /// * Requires `admin.require_auth()` — only the stored contract admin
+    ///   (read from `DataKey::Admin`) may revoke a profile.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if the contract admin is not set (contract
+    ///   was never initialized).
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the profile is successfully marked as revoked.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ok = client.revoke(&issuer);
+    /// ```
     pub fn revoke(env: Env, address: Address) -> bool {
         let admin: Address = env
             .storage()
@@ -301,21 +365,6 @@ impl RegistryContract {
         true
     }
 
-    /// Returns the stored contract admin address.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    ///
-    /// # Returns
-    /// * `Address` - The stored admin address.
-    ///
-    /// # Panics
-    /// * `NotFound` if the admin address is not set.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let admin = client.get_admin();
-    /// ```
     pub fn transfer_ownership(env: Env, new_admin: Address) {
         // Transfers admin ownership to a new address.
         //
@@ -345,6 +394,25 @@ impl RegistryContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Returns the stored contract admin address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if the admin address is not set (contract
+    ///   was never initialized).
+    ///
+    /// # Returns
+    /// * `Address` - The stored admin address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let admin = client.get_admin();
+    /// ```
     pub fn get_admin(env: Env) -> Address {
         env.storage()
             .instance()
