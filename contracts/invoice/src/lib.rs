@@ -25,11 +25,14 @@ impl InvoiceContract {
     /// * `admin` - The admin address for this contract.
     /// * `registry_contract` - The deployed registry contract address.
     ///
-    /// # Returns
-    /// * `()` - No value is returned.
+    /// # Auth
+    /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `AlreadyInitialized` if the contract has already been initialized.
+    /// * `InvoiceError::AlreadyInitialized` if the contract has already been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
@@ -48,23 +51,26 @@ impl InvoiceContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Sets the pool contract address used by this invoice contract.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `pool_contract` - The pool contract address.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin is not initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_pool_contract(&pool_address);
+    /// ```
     pub fn set_pool_contract(env: Env, pool_contract: Address) {
-        // Sets the pool contract address used by this invoice contract.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `pool_contract` - The pool contract address.
-        //
-        // # Returns
-        // * `()` - No value is returned.
-        //
-        // # Panics
-        // * `NotFound` if the admin is not initialized.
-        //
-        // # Example
-        // ```ignore
-        // client.set_pool_contract(&pool_address);
-        // ```
         let admin: Address = env
             .storage()
             .instance()
@@ -77,6 +83,32 @@ impl InvoiceContract {
         events::pool_contract_set(&env, &pool_contract);
     }
 
+    /// Creates a new invoice with the given issuer, buyer, and terms.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer address creating the invoice.
+    /// * `buyer` - The buyer address receiving the invoice.
+    /// * `face_value` - The full invoice value.
+    /// * `due_date` - The invoice due date timestamp.
+    /// * `funding_asset` - The asset to be used for financing.
+    ///
+    /// # Auth
+    /// Requires authorization from `issuer`.
+    ///
+    /// # Panics
+    /// * `InvoiceError::IssuerNotVerified` if the issuer is not verified in the registry.
+    /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
+    /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
+    /// * `InvoiceError::InvalidDueDate` if `due_date` is not in the future.
+    ///
+    /// # Returns
+    /// * `BytesN<32>` - The generated invoice ID.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoice_id = client.create(&issuer, &buyer, 1_000, 1_000_000, &asset);
+    /// ```
     pub fn create(
         env: Env,
         issuer: Address,
@@ -85,29 +117,6 @@ impl InvoiceContract {
         due_date: u64,
         funding_asset: Address,
     ) -> BytesN<32> {
-        // Creates a new invoice with the given issuer, buyer, and terms.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `issuer` - The issuer address creating the invoice.
-        // * `buyer` - The buyer address receiving the invoice.
-        // * `face_value` - The full invoice value.
-        // * `due_date` - The invoice due date timestamp.
-        // * `funding_asset` - The asset to be used for financing.
-        //
-        // # Returns
-        // * `BytesN<32>` - The generated invoice ID.
-        //
-        // # Panics
-        // * `IssuerNotVerified` if the issuer is not verified in the registry.
-        // * `BuyerNotVerified` if the buyer is not verified in the registry.
-        // * `InvalidFaceValue` if `face_value` is zero.
-        // * `InvalidDueDate` if `due_date` is not in the future.
-        //
-        // # Example
-        // ```ignore
-        // let invoice_id = client.create(&issuer, &buyer, 1_000, 1_000_000, &asset);
-        // ```
         issuer.require_auth();
 
         let registry_id: Address = env
@@ -217,26 +226,29 @@ impl InvoiceContract {
         invoice_id
     }
 
+    /// Lists a created invoice for financing with a discount.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to list.
+    /// * `discount_bps` - The discount rate in basis points.
+    ///
+    /// # Auth
+    /// Requires authorization from the invoice's issuer.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Created`.
+    /// * `InvoiceError::DiscountTooHigh` if `discount_bps` is greater than 5000.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when listing succeeds.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.list_for_financing(&invoice_id, 250);
+    /// ```
     pub fn list_for_financing(env: Env, invoice_id: BytesN<32>, discount_bps: u32) -> bool {
-        // Lists a created invoice for financing with a discount.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to list.
-        // * `discount_bps` - The discount rate in basis points.
-        //
-        // # Returns
-        // * `bool` - `true` when listing succeeds.
-        //
-        // # Panics
-        // * `NotFound` if the invoice does not exist.
-        // * `InvalidStatusTransition` if invoice status is not `Created`.
-        // * `DiscountTooHigh` if `discount_bps` is greater than 5000.
-        //
-        // # Example
-        // ```ignore
-        // client.list_for_financing(&invoice_id, 250);
-        // ```
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let mut invoice: Invoice = env
             .storage()
@@ -269,6 +281,30 @@ impl InvoiceContract {
         true
     }
 
+    /// Marks a listed invoice as funded by a pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being funded.
+    /// * `pool_address` - The pool address authorizing funding.
+    /// * `asset_address` - The asset used to fund the invoice.
+    /// * `funded_amount` - The amount funded.
+    ///
+    /// # Auth
+    /// Requires authorization from `pool_address`.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Listed`.
+    /// * `InvoiceError::UnsupportedAsset` if the asset does not match the invoice funding asset.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when funding is recorded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.mark_funded(&invoice_id, &pool, &asset, 950);
+    /// ```
     pub fn mark_funded(
         env: Env,
         invoice_id: BytesN<32>,
@@ -276,27 +312,6 @@ impl InvoiceContract {
         asset_address: Address,
         funded_amount: u128,
     ) -> bool {
-        // Marks a listed invoice as funded by a pool.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice being funded.
-        // * `pool_address` - The pool address authorizing funding.
-        // * `asset_address` - The asset used to fund the invoice.
-        // * `funded_amount` - The amount funded.
-        //
-        // # Returns
-        // * `bool` - `true` when funding is recorded.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        // * `InvalidStatusTransition` if invoice status is not `Listed`.
-        // * `UnsupportedAsset` if the asset does not match the invoice funding asset.
-        //
-        // # Example
-        // ```ignore
-        // client.mark_funded(&invoice_id, &pool, &asset, 950);
-        // ```
         pool_address.require_auth();
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -332,24 +347,27 @@ impl InvoiceContract {
         true
     }
 
+    /// Marks a funded invoice as shipped.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to mark as shipped.
+    ///
+    /// # Auth
+    /// Requires authorization from the invoice's issuer.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Funded`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when shipment is recorded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.mark_shipped(&invoice_id);
+    /// ```
     pub fn mark_shipped(env: Env, invoice_id: BytesN<32>) -> bool {
-        // Marks a funded invoice as shipped.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to mark as shipped.
-        //
-        // # Returns
-        // * `bool` - `true` when shipment is recorded.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        // * `InvalidStatusTransition` if invoice status is not `Funded`.
-        //
-        // # Example
-        // ```ignore
-        // client.mark_shipped(&invoice_id);
-        // ```
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let mut invoice: Invoice = env
             .storage()
@@ -378,27 +396,30 @@ impl InvoiceContract {
         true
     }
 
+    /// Confirms delivery for an active invoice by issuer or buyer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being confirmed.
+    /// * `confirmer` - The address confirming delivery.
+    ///
+    /// # Auth
+    /// Requires authorization from `confirmer`.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Active`.
+    /// * `InvoiceError::NotAuthorized` if the confirmer is neither issuer nor buyer.
+    /// * `InvoiceError::AlreadyConfirmed` if the confirmer already confirmed.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when confirmation is processed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.confirm_delivery(&invoice_id, &buyer);
+    /// ```
     pub fn confirm_delivery(env: Env, invoice_id: BytesN<32>, confirmer: Address) -> bool {
-        // Confirms delivery for an active invoice by issuer or buyer.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice being confirmed.
-        // * `confirmer` - The address confirming delivery.
-        //
-        // # Returns
-        // * `bool` - `true` when confirmation is processed.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        // * `InvalidStatusTransition` if invoice status is not `Active`.
-        // * `NotAuthorized` if the confirmer is neither issuer nor buyer.
-        // * `AlreadyConfirmed` if the confirmer already confirmed.
-        //
-        // # Example
-        // ```ignore
-        // client.confirm_delivery(&invoice_id, &buyer);
-        // ```
         confirmer.require_auth();
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -447,24 +468,28 @@ impl InvoiceContract {
         true
     }
 
+    /// Repays a confirmed invoice, transferring funds to the pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being repaid.
+    ///
+    /// # Auth
+    /// Requires authorization from the invoice's buyer.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the invoice has no
+    ///   recorded funding pool or funding timestamp.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Confirmed`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when repayment is completed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.repay(&invoice_id);
+    /// ```
     pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
-        // Repays a confirmed invoice, transferring funds to the pool.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice being repaid.
-        //
-        // # Returns
-        // * `bool` - `true` when repayment is completed.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        // * `InvalidStatusTransition` if invoice status is not `Confirmed`.
-        //
-        // # Example
-        // ```ignore
-        // client.repay(&invoice_id);
-        // ```
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
             .storage()
@@ -609,25 +634,28 @@ impl InvoiceContract {
         true
     }
 
+    /// Triggers default on a past-due invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to default.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin, invoice, or funding pool cannot be found.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
+    /// * `InvoiceError::DueDateNotPassed` if the invoice due date has not yet passed.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when default processing succeeds.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.trigger_default(&invoice_id);
+    /// ```
     pub fn trigger_default(env: Env, invoice_id: BytesN<32>) -> bool {
-        // Triggers default on a past-due invoice.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to default.
-        //
-        // # Returns
-        // * `bool` - `true` when default processing succeeds.
-        //
-        // # Panics
-        // * `NotFound` if the admin or invoice cannot be found.
-        // * `InvalidStatusTransition` if invoice is not Funded, Active, or Confirmed.
-        // * `DueDateNotPassed` if the invoice due date has not yet passed.
-        //
-        // # Example
-        // ```ignore
-        // client.trigger_default(&invoice_id);
-        // ```
         let admin: Address = env
             .storage()
             .instance()
@@ -686,6 +714,24 @@ impl InvoiceContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Returns the current listing expiry window in seconds.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u64` - The expiry window in seconds. Defaults to 7 days (`7 * 24 * 60 * 60`) if unset.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let window = client.get_expiry_window();
+    /// ```
     pub fn get_expiry_window(env: Env) -> u64 {
         env.storage()
             .instance()
@@ -747,23 +793,26 @@ impl InvoiceContract {
         true
     }
 
+    /// Returns the status code of an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `u32` - The invoice status as a numeric code.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let status = client.get_status(&invoice_id);
+    /// ```
     pub fn get_status(env: Env, invoice_id: BytesN<32>) -> u32 {
-        // Returns the status code of an invoice.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to query.
-        //
-        // # Returns
-        // * `u32` - The invoice status as a numeric code.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        //
-        // # Example
-        // ```ignore
-        // let status = client.get_status(&invoice_id);
-        // ```
         let invoice: Invoice = env
             .storage()
             .persistent()
@@ -772,23 +821,26 @@ impl InvoiceContract {
         invoice.status as u32
     }
 
+    /// Returns the face value of an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `u128` - The invoice face value.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let face_value = client.get_face_value(&invoice_id);
+    /// ```
     pub fn get_face_value(env: Env, invoice_id: BytesN<32>) -> u128 {
-        // Returns the face value of an invoice.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to query.
-        //
-        // # Returns
-        // * `u128` - The invoice face value.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        //
-        // # Example
-        // ```ignore
-        // let face_value = client.get_face_value(&invoice_id);
-        // ```
         let invoice: Invoice = env
             .storage()
             .persistent()
@@ -797,23 +849,26 @@ impl InvoiceContract {
         invoice.face_value
     }
 
+    /// Returns the discount basis points for an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `u32` - The discount rate in basis points.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let discount = client.get_discount_bps(&invoice_id);
+    /// ```
     pub fn get_discount_bps(env: Env, invoice_id: BytesN<32>) -> u32 {
-        // Returns the discount basis points for an invoice.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to query.
-        //
-        // # Returns
-        // * `u32` - The discount rate in basis points.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        //
-        // # Example
-        // ```ignore
-        // let discount = client.get_discount_bps(&invoice_id);
-        // ```
         let invoice: Invoice = env
             .storage()
             .persistent()
@@ -822,23 +877,26 @@ impl InvoiceContract {
         invoice.discount_bps
     }
 
+    /// Returns the funding asset for an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `Address` - The funding asset address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let asset = client.get_funding_asset(&invoice_id);
+    /// ```
     pub fn get_funding_asset(env: Env, invoice_id: BytesN<32>) -> Address {
-        // Returns the funding asset for an invoice.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to query.
-        //
-        // # Returns
-        // * `Address` - The funding asset address.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        //
-        // # Example
-        // ```ignore
-        // let asset = client.get_funding_asset(&invoice_id);
-        // ```
         let invoice: Invoice = env
             .storage()
             .persistent()
@@ -847,23 +905,26 @@ impl InvoiceContract {
         invoice.funding_asset
     }
 
+    /// Retrieves the full invoice record by ID.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to retrieve.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `Invoice` - The full invoice object.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoice = client.get(&invoice_id);
+    /// ```
     pub fn get(env: Env, invoice_id: BytesN<32>) -> Invoice {
-        // Retrieves the full invoice record by ID.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to retrieve.
-        //
-        // # Returns
-        // * `Invoice` - The full invoice object.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        //
-        // # Example
-        // ```ignore
-        // let invoice = client.get(&invoice_id);
-        // ```
         env.storage()
             .persistent()
             .get(&DataKey::Invoice(invoice_id))
@@ -875,6 +936,12 @@ impl InvoiceContract {
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `status` - The invoice status filter.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
     ///
     /// # Returns
     /// * `Vec<Invoice>` - The invoices matching the status.
@@ -914,6 +981,12 @@ impl InvoiceContract {
     /// * `env` - The Soroban environment.
     /// * `address` - The issuer address.
     ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
     /// # Returns
     /// * `Vec<Invoice>` - The invoices for the issuer.
     ///
@@ -950,6 +1023,12 @@ impl InvoiceContract {
     /// * `env` - The Soroban environment.
     /// * `address` - The buyer address.
     ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
     /// # Returns
     /// * `Vec<Invoice>` - The invoices for the buyer.
     ///
@@ -980,6 +1059,24 @@ impl InvoiceContract {
         result
     }
 
+    /// Returns a map of invoice counts keyed by status name.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Map<String, u64>` - Counts for each `InvoiceStatus` variant.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let counts = client.get_counts();
+    /// ```
     pub fn get_counts(env: Env) -> Map<String, u64> {
         let mut counts: Map<String, u64> = Map::new(&env);
         let statuses = [
@@ -1000,23 +1097,26 @@ impl InvoiceContract {
         counts
     }
 
+    /// Returns the issuer address for an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `Address` - The issuer address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let issuer = client.get_issuer(&invoice_id);
+    /// ```
     pub fn get_issuer(env: Env, invoice_id: BytesN<32>) -> Address {
-        // Returns the issuer address for an invoice.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice to query.
-        //
-        // # Returns
-        // * `Address` - The issuer address.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        //
-        // # Example
-        // ```ignore
-        // let issuer = client.get_issuer(&invoice_id);
-        // ```
         let invoice: Invoice = env
             .storage()
             .persistent()
