@@ -88,6 +88,16 @@ fn test_revoke_sets_verified_false() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_revoke_unregistered_panics() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let unknown = Address::generate(&env);
+    client.revoke(&unknown);
+}
+
+#[test]
 fn test_update_metadata_self_succeeds() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
