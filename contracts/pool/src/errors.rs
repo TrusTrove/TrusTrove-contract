@@ -4,8 +4,6 @@ use soroban_sdk::contracterror;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PoolError {
     AlreadyInitialized = 1,
-    NotFound = 2,
-    NotAuthorized = 3,
     InvalidAmount = 4,
     InsufficientLiquidity = 5,
     NoShares = 6,
