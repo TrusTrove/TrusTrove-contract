@@ -14,11 +14,6 @@ pub enum InvoiceError {
     DiscountTooHigh = 9,
     AlreadyConfirmed = 10,
     DueDateNotPassed = 11,
-    InsufficientRepayment = 12,
     UnsupportedAsset = 13,
     ListingNotExpired = 14,
-    UnauthorizedPool = 15,
-    RepaymentFailed = 16,
-    NotInitialized = 17,
-    IssuerIsBuyer = 18,
 }

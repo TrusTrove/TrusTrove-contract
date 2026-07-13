@@ -35,6 +35,7 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
     );
 }
 
+#[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ownership_transferred"), old_admin.clone()),

@@ -8,13 +8,11 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
-trusttrove-common = { path = "../common" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 trusttrove-invoice = { path = "../invoice" }
 trusttrove-escrow = { path = "../escrow" }
-proptest = { workspace = true }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
