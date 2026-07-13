@@ -1507,37 +1507,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "trusttrove-common"
-version = "0.1.0"
-dependencies = [
- "soroban-sdk",
-]
-
-[[package]]
 name = "trusttrove-escrow"
 version = "0.1.0"
 dependencies = [
- "proptest",
  "soroban-sdk",
- "trusttrove-common",
 ]
 
 [[package]]
 name = "trusttrove-invoice"
 version = "0.1.0"
 dependencies = [
- "proptest",
  "soroban-sdk",
- "trusttrove-common",
 ]
 
 [[package]]
 name = "trusttrove-pool"
 version = "0.1.0"
 dependencies = [
- "proptest",
  "soroban-sdk",
- "trusttrove-common",
  "trusttrove-escrow",
  "trusttrove-invoice",
 ]
@@ -1548,7 +1535,6 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "soroban-sdk",
- "trusttrove-common",
 ]
 
 [[package]]
