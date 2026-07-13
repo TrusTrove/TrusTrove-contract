@@ -253,6 +253,8 @@ Verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet)
 
 ### 1. Install Rust 1.85.0
 
+The repo ships a `rust-toolchain.toml` at the root pinning channel `1.85.0` and target `wasm32v1-none`. `rustup` picks it up automatically when you run any `cargo`/`rustc` command in this directory — you do not have to set a default. If the toolchain isn't installed yet, run:
+
 ```bash
 rustup toolchain install 1.85.0
 rustup target add wasm32v1-none --toolchain 1.85.0
