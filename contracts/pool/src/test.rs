@@ -529,10 +529,10 @@ fn test_get_stats_rejects_utilization_overflow() {
             .storage()
             .instance()
             .set(&DataKey::TotalDeposits, &u128::MAX);
-        te.env.storage().instance().set(
-            &DataKey::TotalFunded,
-            &(u128::MAX / 10_000 + 1),
-        );
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(u128::MAX / 10_000 + 1));
     });
 
     let _ = te.pool.get_stats();
