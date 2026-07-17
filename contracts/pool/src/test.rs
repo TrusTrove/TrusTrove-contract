@@ -520,6 +520,24 @@ fn test_get_stats_after_funding() {
     assert!(stats.utilization_rate_bps > 0);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_get_stats_rejects_utilization_overflow() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &u128::MAX);
+        te.env.storage().instance().set(
+            &DataKey::TotalFunded,
+            &(u128::MAX / 10_000 + 1),
+        );
+    });
+
+    let _ = te.pool.get_stats();
+}
+
 // ============== LP POSITION TESTS ==============
 
 #[test]
