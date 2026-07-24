@@ -276,6 +276,9 @@ cargo test --workspace
 
 ### 4. Deploy to testnet
 
+See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full deployment
+guide including prerequisites, contract wiring order, and rollback.
+
 ```bash
 # Create and fund a deployer account
 bash scripts/setup-testnet.sh
@@ -368,7 +371,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 
 ## License
 
-MIT
+MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 
 ---
 
