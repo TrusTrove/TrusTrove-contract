@@ -6,7 +6,12 @@
 
 <p align="center">
   Four Soroban smart contracts powering the TrusTrove trade finance protocol on Stellar.
-</p>
+</p> 
+
+
+
+
+
 
 <p align="center">
   <a href="https://github.com/TrusTrove/TrusTrove-contract/actions/workflows/ci.yml">
@@ -85,9 +90,9 @@ Holds USDC between pool funding and issuer payout. Only callable by `pool_contra
 
 ```
 lock(invoice_id, amount) → bool
-release_to_issuer(invoice_id) → bool
+release_to_issuer(invoice_id, issuer) → bool
 release_to_pool(invoice_id, repayment_amount) → bool
-handle_default(invoice_id) → bool
+handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 get_locked(invoice_id) → u128
 ```
 
@@ -104,6 +109,125 @@ handle_default(invoice_id) → bool
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 ```
+
+---
+
+## Architecture & Fund Flow
+
+### Contract Interaction Map
+
+```
+                    ┌─────────────────┐
+                    │  registry_contract │
+                    │  (identity oracle) │
+                    └────────┬────────┘
+                             │ is_verified()
+          ┌──────────────────▼──────────────────┐
+          │           invoice_contract            │
+          │  (lifecycle state machine & indexer)  │
+          └──────┬────────────────────┬──────────┘
+                 │ mark_funded()      │ receive_repayment()
+                 │ trigger_default()  │ handle_default()
+          ┌──────▼───────┐    ┌───────▼──────────┐
+          │ pool_contract │    │  pool_contract   │
+          │  fund_invoice │    │  (repayment in)  │
+          └──────┬────────┘    └──────────────────┘
+                 │ lock()
+          ┌──────▼────────────┐
+          │  escrow_contract  │
+          │  (USDC custody)   │
+          └───────────────────┘
+```
+
+### Invoice Lifecycle & Fund Movement
+
+Each step below documents what happens to USDC and which contracts are called.
+
+#### Step 1 — Liquidity Provision (LP → Pool)
+LPs deposit USDC into the pool and receive shares proportional to their contribution. Share price grows as invoices repay.
+
+```
+LP ──[USDC]──► Pool
+Pool ──[shares]──► LP
+```
+
+#### Step 2 — Create & List (no funds move)
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` expressing the yield they will give up in exchange for immediate liquidity.
+
+```
+No fund movement. Invoice status: Created → Listed.
+```
+
+#### Step 3 — Fund Invoice (Pool → Escrow)
+Anyone can call `pool.fund_invoice(invoice_id)`. The pool computes the funded amount, locks it in escrow, and marks the invoice as funded.
+
+```
+funded_amount = face_value × (10000 − discount_bps) / 10000
+
+Pool ──[funded_amount USDC]──► Escrow  (locked per invoice_id)
+Invoice status: Listed → Funded
+```
+
+The pool retains `face_value − funded_amount` (the discount) as accrued yield, collectible when the buyer repays.
+
+#### Step 4 — Release to Issuer (Escrow → Issuer) ⚠️ Known Gap
+The pool contract is expected to call `escrow.release_to_issuer(invoice_id, issuer)` so that the locked USDC reaches the issuer who can then ship goods.
+
+```
+Escrow ──[funded_amount USDC]──► Issuer
+```
+
+**⚠️ This call is not yet wired into `fund_invoice` (see [Issue #56](https://github.com/TrusTrove/TrusTrove-contract/issues/56)).** In the current deployment, issuers do not automatically receive USDC after an invoice is funded. This is the highest-priority gap before mainnet.
+
+#### Step 5 — Ship & Confirm (no funds move)
+The issuer calls `mark_shipped`. Then **both** the issuer and the buyer must independently call `confirm_delivery`. Only when both confirmations are recorded does the invoice advance to `Confirmed`.
+
+```
+No fund movement. Invoice status: Funded → Active → Confirmed.
+```
+
+#### Step 6 — Repay (Buyer → Pool, bypassing Escrow)
+The buyer calls `invoice.repay(invoice_id)`, which transfers `face_value` USDC **directly from the buyer to the pool**, then calls `pool.receive_repayment` to account for the yield.
+
+```
+Buyer ──[face_value USDC]──► Pool
+  Pool books yield: face_value − funded_amount = discount earned
+  TotalDeposits += yield_amount  (share price rises for all LPs)
+Invoice status: Confirmed → Repaid
+```
+
+Repayment does **not** flow through escrow. The escrow contract is only involved in funding (Step 3), the missing issuer release (Step 4), and default recovery (Step 7).
+
+#### Step 7 — Default (Escrow → Pool)
+If the invoice passes its `due_date` without reaching `Repaid`, any caller triggers `invoice.trigger_default`. The invoice contract calls `pool.handle_default`, which in turn calls `escrow.handle_default` — returning the still-locked `funded_amount` to the pool.
+
+```
+invoice.trigger_default()
+  └─► pool.handle_default()
+        └─► escrow.handle_default()
+              └─► Escrow ──[funded_amount USDC]──► Pool
+Invoice status: → Defaulted
+  TotalFunded -= funded_amount  (liquidity freed)
+```
+
+### Summary Table
+
+| Event | Source | Destination | Amount | Escrow involved? |
+|---|---|---|---|---|
+| LP deposit | LP wallet | Pool | `usdc_amount` | No |
+| LP withdraw | Pool | LP wallet | `shares × price` | No |
+| Fund invoice | Pool | Escrow | `face_value × (1 − discount)` | Yes — locks |
+| Release to issuer *(gap)* | Escrow | Issuer | `funded_amount` | Yes — releases |
+| Repay | Buyer wallet | Pool | `face_value` | No |
+| Default recovery | Escrow | Pool | `funded_amount` | Yes — releases |
+
+### Security Invariants
+
+- The escrow contract only accepts `lock()` calls from the registered `pool_contract`.
+- `release_to_issuer` and `release_to_pool` are callable only by `pool_contract`.
+- `handle_default` in escrow accepts the pool or the admin (emergency recovery path).
+- `receive_repayment` in the pool is callable only by the registered `invoice_contract`.
+- Every state transition in `invoice_contract` is guarded by an explicit status check; no skipping steps.
 
 ---
 
@@ -128,6 +252,8 @@ Verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet)
 - [Stellar CLI](https://github.com/stellar/stellar-cli) (latest)
 
 ### 1. Install Rust 1.85.0
+
+The repo ships a `rust-toolchain.toml` at the root pinning channel `1.85.0` and target `wasm32v1-none`. `rustup` picks it up automatically when you run any `cargo`/`rustc` command in this directory — you do not have to set a default. If the toolchain isn't installed yet, run:
 
 ```bash
 rustup toolchain install 1.85.0
@@ -161,6 +287,52 @@ bash scripts/deploy.sh
 ```
 
 The deploy script prints all four contract IDs at the end. Paste them into `TrusTrove-app/.env.local`.
+
+---
+
+## Known Centralization Risks & Roadmap
+
+TrusTrove is in active development on Stellar testnet. Several centralization trade-offs were made deliberately to ship a working protocol quickly. They are documented here so contributors and users understand the current trust model and can help drive the path to a more decentralized design.
+
+### Admin key controls critical operations
+
+The deployer wallet that calls `initialize()` on each contract becomes its `admin`. That single key currently controls:
+
+- Registering and revoking verified issuers/buyers (`registry_contract`)
+- Emergency pausing (not yet implemented — see roadmap below)
+- Triggering `handle_default` as a fallback recovery path (`escrow_contract`)
+
+**Risk:** Loss or compromise of the admin key has a high blast radius. A single actor also introduces censorship risk for issuer onboarding.
+
+**Roadmap:** Migrate admin to a multi-sig (e.g., 3-of-5 Stellar signers) before any mainnet deployment.
+
+### `fund_invoice` was previously admin-gated
+
+Prior to this change, `pool::fund_invoice` required `admin.require_auth()`, meaning capital allocation was entirely at the admin's discretion. This created censorship risk — the admin could favour certain issuers, block competitors, or halt funding entirely with no on-chain accountability.
+
+**Current state (this release):** `fund_invoice` is now **permissionless**. Any caller can trigger funding for any invoice that passes the on-chain eligibility checks:
+1. Invoice status must be `Listed` (status 1)
+2. Invoice funding asset must match the pool's asset
+3. Pool must have sufficient available liquidity
+
+No off-chain approval or admin signature is required.
+
+**Longer-term governance design (not yet implemented):**
+
+The goal is LP-governed capital allocation:
+
+- LPs stake their LP tokens to signal approval for specific invoices ("LP voting")
+- An invoice becomes eligible once a quorum of LP-weighted votes approves it
+- Admin retains only an emergency pause capability (circuit breaker), not funding control
+- Governance parameters (quorum threshold, voting window) are upgradeable by LP vote
+
+If you want to contribute to governance design, open an issue tagged `complexity:high` and link your proposal.
+
+### No emergency pause mechanism
+
+There is currently no circuit breaker. If a critical bug is found post-deployment the only recourse is to stop directing traffic to the affected contracts via the frontend.
+
+**Roadmap:** Add an `admin_pause() / admin_unpause()` function pair to each contract, guarded behind multi-sig, that blocks state-changing calls while reads remain live.
 
 ---
 

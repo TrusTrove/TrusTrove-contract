@@ -70,3 +70,33 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>) {
         (),
     );
 }
+
+pub fn invoice_expired(env: &Env, invoice_id: &BytesN<32>) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_expired"), invoice_id.clone()),
+        (),
+    );
+}
+
+pub fn pool_contract_set(env: &Env, new_pool: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "pool_contract_set"), new_pool.clone()),
+        (),
+    );
+}
+
+pub fn expiry_window_set(env: &Env, window: u64) {
+    env.events()
+        .publish((Symbol::new(env, "expiry_window_set"),), window);
+}
+
+pub fn ownership_transferred(env: &Env, from: &Address, to: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "ownership_transferred"),
+            from.clone(),
+            to.clone(),
+        ),
+        (),
+    );
+}

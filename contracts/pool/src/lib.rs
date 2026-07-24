@@ -17,6 +17,28 @@ pub struct PoolContract;
 
 #[contractimpl]
 impl PoolContract {
+    /// Initializes the pool contract with admin and external contract references.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The admin address for this contract.
+    /// * `invoice_contract` - The invoice contract address.
+    /// * `escrow_contract` - The escrow contract address.
+    /// * `usdc_asset` - The USDC asset address.
+    ///
+    /// # Auth
+    /// Requires authorization from `admin`.
+    ///
+    /// # Panics
+    /// * `AlreadyInitialized` if the contract has already been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.initialize(&admin, &invoice, &escrow, &usdc);
+    /// ```
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -49,21 +71,61 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::ActiveInvoiceCount, &0u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxUtilizationBps, &8500u32);
+        Self::extend_instance_ttl(&env);
     }
 
+    /// Returns the USDC asset used by the pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `UsdcAsset`).
+    ///
+    /// # Returns
+    /// * `Address` - The USDC asset address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let asset = client.get_usdc_asset();
+    /// ```
     pub fn get_usdc_asset(env: Env) -> Address {
         env.storage().instance().get(&DataKey::UsdcAsset).unwrap()
     }
 
+    /// Deposits USDC from an LP and issues pool shares.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    /// * `usdc_amount` - The amount of USDC to deposit.
+    ///
+    /// # Auth
+    /// Requires self-authorization from `lp` (via `lp.require_auth()`).
+    ///
+    /// # Panics
+    /// * `InvalidAmount` if `usdc_amount` is zero.
+    /// * `MinimumDeposit` if the deposit is too small to mint at least 1 share
+    ///   at the current share price (prevents 0-share dust deposits).
+    ///
+    /// # Returns
+    /// * `u128` - The number of shares issued.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let shares = client.deposit(&lp, 1_000);
+    /// ```
     pub fn deposit(env: Env, lp: Address, usdc_amount: u128) -> u128 {
         lp.require_auth();
         if usdc_amount == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
-
-        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
-        let usdc = token::Client::new(&env, &usdc_id);
-        usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
 
         let total_shares: u128 = env.storage().instance().get(&DataKey::TotalShares).unwrap();
         let total_deposits: u128 = env
@@ -72,11 +134,26 @@ impl PoolContract {
             .get(&DataKey::TotalDeposits)
             .unwrap();
 
-        let shares_to_issue = if total_shares == 0 {
+        let shares_to_issue = if total_shares == 0 || total_deposits == 0 {
             usdc_amount
         } else {
             usdc_amount * total_shares / total_deposits
         };
+
+        // Dust-attack guard: once the pool accrues yield, the share price
+        // (total_deposits / total_shares) rises above 1.0, so a sufficiently
+        // small deposit can round down to 0 shares while its USDC is still
+        // pulled into total_deposits, silently donating the deposit to existing
+        // LPs. Reject any deposit that would mint 0 shares so the caller keeps
+        // their funds. This check runs before the token transfer, so no USDC
+        // leaves the depositor on the rejection path.
+        if shares_to_issue == 0 {
+            panic_with_error!(&env, PoolError::MinimumDeposit);
+        }
+
+        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
+        let usdc = token::Client::new(&env, &usdc_id);
+        usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
 
         env.storage()
             .instance()
@@ -117,9 +194,33 @@ impl PoolContract {
             .extend_ttl(&lp_init_key, 100, 2_000_000);
 
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
+        Self::extend_instance_ttl(&env);
         shares_to_issue
     }
 
+    /// Withdraws shares from the pool and transfers USDC to the LP.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    /// * `shares` - The number of shares to withdraw.
+    ///
+    /// # Auth
+    /// Requires self-authorization from `lp` (via `lp.require_auth()`).
+    ///
+    /// # Panics
+    /// * `InvalidAmount` if `shares` is zero.
+    /// * `NoShares` if the LP has no shares.
+    /// * `InsufficientShares` if the LP does not own enough shares.
+    /// * `InsufficientLiquidity` if the pool lacks enough available USDC.
+    ///
+    /// # Returns
+    /// * `u128` - The amount of USDC returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let returned = client.withdraw(&lp, 500);
+    /// ```
     pub fn withdraw(env: Env, lp: Address, shares: u128) -> u128 {
         lp.require_auth();
         if shares == 0 {
@@ -177,6 +278,16 @@ impl PoolContract {
         let principal_portion = shares * init_dep / (lp_shares);
         let yield_earned = usdc_to_return.saturating_sub(principal_portion);
 
+        let new_init_dep = init_dep.saturating_sub(principal_portion);
+        if new_init_dep > 0 {
+            env.storage().persistent().set(&init_dep_key, &new_init_dep);
+            env.storage()
+                .persistent()
+                .extend_ttl(&init_dep_key, 100, 2_000_000);
+        } else {
+            env.storage().persistent().remove(&init_dep_key);
+        }
+
         let yield_key = DataKey::LPYieldEarned(lp.clone());
         let prev_yield: u128 = env.storage().persistent().get(&yield_key).unwrap_or(0);
         env.storage()
@@ -187,9 +298,39 @@ impl PoolContract {
             .extend_ttl(&yield_key, 100, 2_000_000);
 
         events::lp_withdrawn(&env, &lp, usdc_to_return, shares);
+        Self::extend_instance_ttl(&env);
         usdc_to_return
     }
 
+    /// Funds a listed invoice by moving USDC through escrow and invoice contracts.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to fund.
+    ///
+    /// # Auth
+    /// Requires authorization from the pool `admin` (via `admin.require_auth()`).
+    /// The additional eligibility checks below (invoice must be in Listed status,
+    /// asset must match the pool's asset, and the pool must have sufficient
+    /// liquidity) further constrain what admin-approved calls succeed.
+    ///
+    /// See README §"Known Centralization Risks & Roadmap" for the longer-term
+    /// governance design that will let LPs signal approval on funding decisions.
+    ///
+    /// # Panics
+    /// * `InvoiceNotListed` if the invoice is not in listed status.
+    /// * `AssetMismatch` if the invoice funding asset does not match pool USDC.
+    /// * `InvalidAmount` if the computed funded amount is zero.
+    /// * `InsufficientLiquidity` if the pool does not have enough funds.
+    /// * `UtilizationCapExceeded` if funding would push utilization above the cap.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the invoice is funded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.fund_invoice(&invoice_id);
+    /// ```
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
@@ -236,6 +377,9 @@ impl PoolContract {
         );
 
         let funded_amount = face_value * (10000 - discount_bps as u128) / 10000;
+        if funded_amount == 0 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
 
         let total_deposits: u128 = env
             .storage()
@@ -246,6 +390,19 @@ impl PoolContract {
         let available = total_deposits - total_funded;
         if funded_amount > available {
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
+        }
+
+        let max_utilization_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxUtilizationBps)
+            .unwrap();
+        let new_total_funded = total_funded + funded_amount;
+        let utilization_after = (new_total_funded * 10000)
+            .checked_div(total_deposits)
+            .unwrap_or(0) as u32;
+        if utilization_after > max_utilization_bps {
+            panic_with_error!(&env, PoolError::UtilizationCapExceeded);
         }
 
         let escrow_contract: Address = env
@@ -287,9 +444,33 @@ impl PoolContract {
             .extend_ttl(&funded_key, 100, 2_000_000);
 
         events::invoice_funded(&env, &invoice_id, funded_amount);
+        Self::extend_instance_ttl(&env);
         true
     }
 
+    /// Receives invoice repayment and updates pool liquidity metrics.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being repaid.
+    /// * `amount` - The amount repaid.
+    ///
+    /// # Auth
+    /// Requires authorization from the configured `invoice_contract`
+    /// (via `invoice_contract.require_auth()`); only the invoice contract may
+    /// invoke this entry point.
+    ///
+    /// # Panics
+    /// * `InvoiceNotFound` if the invoice is not funded.
+    /// * `InvalidAmount` if the repayment amount is less than the funded amount.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when repayment is processed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.receive_repayment(&invoice_id, 1_050);
+    /// ```
     pub fn receive_repayment(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
         let invoice_contract: Address = env
             .storage()
@@ -344,9 +525,109 @@ impl PoolContract {
         env.storage().persistent().remove(&funded_key);
 
         events::repayment_received(&env, &invoice_id, amount, yield_amount);
+        Self::extend_instance_ttl(&env);
         true
     }
 
+    pub fn receive_repayment_with_refund(
+        env: Env,
+        invoice_id: BytesN<32>,
+        amount: u128,
+        refund: u128,
+        buyer: Address,
+    ) -> bool {
+        let invoice_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceContract)
+            .unwrap();
+        invoice_contract.require_auth();
+
+        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+        let funded_amount: u128 = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
+        if amount < funded_amount {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let max_refund = amount.saturating_sub(funded_amount);
+        if refund > max_refund {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let yield_amount = amount - funded_amount - refund;
+        let total_deposits: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalDeposits)
+            .unwrap();
+        let total_funded: u128 = env.storage().instance().get(&DataKey::TotalFunded).unwrap();
+        let total_yield: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalYieldDistributed)
+            .unwrap();
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
+        env.storage().instance().set(
+            &DataKey::TotalYieldDistributed,
+            &(total_yield + yield_amount),
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+
+        let active_count: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ActiveInvoiceCount)
+            .unwrap();
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveInvoiceCount, &(active_count - 1));
+
+        env.storage().persistent().remove(&funded_key);
+
+        // transfer refund back to buyer from pool's USDC balance
+        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
+        let usdc = token::Client::new(&env, &usdc_id);
+        if refund > 0 {
+            usdc.transfer(&env.current_contract_address(), &buyer, &(refund as i128));
+        }
+
+        events::repayment_received(&env, &invoice_id, amount, yield_amount);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Forwards a defaulted invoice to escrow default handling.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The defaulted invoice.
+    ///
+    /// # Auth
+    /// Requires authorization from the configured `invoice_contract`
+    /// (via `invoice_contract.require_auth()`); only the invoice contract may
+    /// invoke this entry point.
+    ///
+    /// # Panics
+    /// This function does not intentionally panic; it returns `false` when the
+    /// invoice is not funded. Arithmetic on internal counters is expected not
+    /// to underflow given the funded-invoice invariant.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when default handling completes, `false` if invoice is not funded.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.handle_default(&invoice_id);
+    /// ```
     pub fn handle_default(env: Env, invoice_id: BytesN<32>) -> bool {
         let invoice_contract: Address = env
             .storage()
@@ -366,8 +647,10 @@ impl PoolContract {
             .instance()
             .get(&DataKey::EscrowContract)
             .unwrap();
+        let pool_address = env.current_contract_address();
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
+        args.push_back(pool_address.into_val(&env));
         let _: bool =
             env.invoke_contract(&escrow_contract, &Symbol::new(&env, "handle_default"), args);
 
@@ -397,9 +680,29 @@ impl PoolContract {
         env.storage().persistent().remove(&funded_key);
 
         events::invoice_defaulted(&env, &invoice_id, funded_amount);
+        Self::extend_instance_ttl(&env);
         true
     }
 
+    /// Returns current pool statistics and utilization metrics.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// This function does not panic; all storage reads default to `0` (or the
+    /// initialization default of `8500` for `max_utilization_bps`).
+    ///
+    /// # Returns
+    /// * `PoolStats` - The current pool statistics.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let stats = client.get_stats();
+    /// ```
     pub fn get_stats(env: Env) -> PoolStats {
         let total_deposits: u128 = env
             .storage()
@@ -430,6 +733,11 @@ impl PoolContract {
             .instance()
             .get(&DataKey::TotalShares)
             .unwrap_or(0);
+        let max_utilization_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxUtilizationBps)
+            .unwrap_or(8500);
 
         PoolStats {
             total_deposits,
@@ -439,9 +747,30 @@ impl PoolContract {
             total_yield_distributed: total_yield,
             active_invoice_count: active_count,
             total_shares,
+            max_utilization_bps,
         }
     }
 
+    /// Returns the LP's position, including shares, value, yield, and deposits.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// This function does not panic; all storage reads default to `0` when the
+    /// LP has no recorded position.
+    ///
+    /// # Returns
+    /// * `LPPosition` - The LP position details.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let position = client.get_lp_position(&lp);
+    /// ```
     pub fn get_lp_position(env: Env, lp: Address) -> LPPosition {
         let lp_shares: u128 = env
             .storage()
@@ -484,6 +813,24 @@ impl PoolContract {
         }
     }
 
+    /// Returns the pool utilization rate as basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// This function does not panic; returns `0` when `total_deposits` is zero.
+    ///
+    /// # Returns
+    /// * `u32` - The utilization rate in basis points (`total_funded * 10_000 / total_deposits`).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let utilization = client.get_utilization_rate();
+    /// ```
     pub fn get_utilization_rate(env: Env) -> u32 {
         let total_deposits: u128 = env
             .storage()
@@ -499,5 +846,21 @@ impl PoolContract {
             return 0;
         }
         (total_funded * 10000 / total_deposits) as u32
+    }
+
+    pub fn set_max_utilization(env: Env, admin: Address, new_cap_bps: u32) -> bool {
+        admin.require_auth();
+        if new_cap_bps > 10000 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxUtilizationBps, &new_cap_bps);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    fn extend_instance_ttl(env: &Env) {
+        env.storage().instance().extend_ttl(100, 2_000_000);
     }
 }
