@@ -1300,6 +1300,7 @@ fn test_existing_valid_addresses_still_work() {
     assert_eq!(invoice.status, InvoiceStatus::Created);
 }
 
+<<<<<<< HEAD
 // ============================== REPAY TESTS ==============================
 
 #[test]
@@ -1452,4 +1453,17 @@ fn test_repay_from_expired_rejected() {
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 
     client.repay(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_create_fails_counter_overflow() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    env.as_contract(&client.address, || {
+        env.storage().instance().set(&crate::DataKey::Counter, &u64::MAX);
+    });
+
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
 }
