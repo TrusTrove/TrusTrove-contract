@@ -291,6 +291,14 @@ bash scripts/deploy.sh
 
 The deploy script prints all four contract IDs at the end. Paste them into `TrusTrove-app/.env.local`.
 
+#### Stellar CLI Setup (Linux, macOS, Windows)
+
+The deploy script requires the Stellar CLI. Choose one:
+
+- **Linux/macOS:** Install globally per [Stellar docs](https://developers.stellar.org/docs/learn/developing-with-soroban/setup) — the script will find it on `PATH`.
+- **Windows (native):** Install to `Program Files (x86)/Stellar CLI/`, or set `STELLAR_BIN=/path/to/stellar.exe` before running the script.
+- **Windows (WSL):** Install Stellar CLI in your WSL environment, or install on Windows host and set `STELLAR_BIN` to the Windows path (e.g., `/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe`).
+
 ---
 
 ## Known Centralization Risks & Roadmap

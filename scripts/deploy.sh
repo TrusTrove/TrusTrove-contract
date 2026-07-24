@@ -35,13 +35,22 @@ for arg in "$@"; do
   esac
 done
 
-# Prefer a globally available `stellar` on PATH, fall back to a common WSL installation
+# Prefer a globally available `stellar` on PATH, fall back to STELLAR_BIN env var,
+# then fall back to a common WSL installation
 if command -v stellar &> /dev/null; then
   STELLAR="stellar"
+elif [ -n "${STELLAR_BIN:-}" ] && [ -f "$STELLAR_BIN" ]; then
+  STELLAR="$STELLAR_BIN"
 elif [ -f "/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe" ]; then
   STELLAR="/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe"
 else
-  echo "Error: stellar CLI not found on PATH or default Windows path."
+  echo "Error: stellar CLI not found."
+  echo ""
+  echo "Try one of:"
+  echo "  1. Install stellar CLI globally (https://developers.stellar.org/docs/learn/developing-with-soroban/setup)"
+  echo "  2. Set STELLAR_BIN=/path/to/stellar.exe"
+  echo "  3. On WSL, ensure 'Stellar CLI' is installed in Program Files (x86)"
+  echo ""
   exit 1
 fi
 

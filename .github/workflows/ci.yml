@@ -42,3 +42,33 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
+
+      - name: Audit dependencies
+        run: cargo audit
+
+      - name: Check wasm size budget
+        run: |
+          echo "=== WASM Size Report ==="
+          ls -lh target/wasm32v1-none/release/*.wasm 2>/dev/null || true
+          echo ""
+          echo "Checking against budget..."
+          REGISTRY=$(stat -c%s target/wasm32v1-none/release/trusttrove_registry.wasm 2>/dev/null || echo 0)
+          INVOICE=$(stat -c%s target/wasm32v1-none/release/trusttrove_invoice.wasm 2>/dev/null || echo 0)
+          ESCROW=$(stat -c%s target/wasm32v1-none/release/trusttrove_escrow.wasm 2>/dev/null || echo 0)
+          POOL=$(stat -c%s target/wasm32v1-none/release/trusttrove_pool.wasm 2>/dev/null || echo 0)
+
+          # Budget in bytes (adjust as needed; Soroban charges by size)
+          REGISTRY_BUDGET=1048576  # 1 MB
+          INVOICE_BUDGET=2097152   # 2 MB
+          ESCROW_BUDGET=1048576    # 1 MB
+          POOL_BUDGET=2097152      # 2 MB
+
+          echo "registry:    $REGISTRY bytes (budget: $REGISTRY_BUDGET)"
+          echo "invoice:     $INVOICE bytes (budget: $INVOICE_BUDGET)"
+          echo "escrow:      $ESCROW bytes (budget: $ESCROW_BUDGET)"
+          echo "pool:        $POOL bytes (budget: $POOL_BUDGET)"
+
+          [ "$REGISTRY" -le "$REGISTRY_BUDGET" ] || exit 1
+          [ "$INVOICE" -le "$INVOICE_BUDGET" ] || exit 1
+          [ "$ESCROW" -le "$ESCROW_BUDGET" ] || exit 1
+          [ "$POOL" -le "$POOL_BUDGET" ] || exit 1
