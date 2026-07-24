@@ -16,4 +16,5 @@ pub enum InvoiceError {
     DueDateNotPassed = 11,
     UnsupportedAsset = 13,
     ListingNotExpired = 14,
+    CounterOverflow = 15,
 }

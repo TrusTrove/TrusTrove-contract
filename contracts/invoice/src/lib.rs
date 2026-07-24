@@ -101,6 +101,7 @@ impl InvoiceContract {
     /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
     /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
     /// * `InvoiceError::InvalidDueDate` if `due_date` is not in the future.
+    /// * `InvoiceError::CounterOverflow` if the internal invoice counter overflows.
     ///
     /// # Returns
     /// * `BytesN<32>` - The generated invoice ID.
@@ -149,7 +150,9 @@ impl InvoiceContract {
         }
 
         let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
-        let next_counter = counter + 1;
+        let next_counter = counter
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::CounterOverflow));
         env.storage()
             .instance()
             .set(&DataKey::Counter, &next_counter);
