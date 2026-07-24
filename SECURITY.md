@@ -56,8 +56,8 @@ Include in your report:
 TrusTrove follows coordinated disclosure. We ask that you give us reasonable
 time to assess and address a vulnerability before public disclosure.
 
-We will credit researchers who report valid vulnerabilities in our changelog
-unless they prefer to remain anonymous.
+We will credit researchers who report valid vulnerabilities in our
+[CHANGELOG.md](./CHANGELOG.md) unless they prefer to remain anonymous.
 
 ## Audit Status
 
