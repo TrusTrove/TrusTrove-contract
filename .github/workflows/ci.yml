@@ -43,10 +43,11 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
-      - name: Audit dependencies
-        uses: rustsec/audit-check-action@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Check dependencies with cargo-deny
+        run: cargo deny check advisories
 
       - name: Check wasm size budget
         run: |
