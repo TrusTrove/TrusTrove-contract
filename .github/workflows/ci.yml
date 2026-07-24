@@ -28,6 +28,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Audit dependencies (RUSTSEC)
+        run: cargo install cargo-audit && cargo audit
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -42,12 +45,6 @@ jobs:
 
       - name: Test
         run: cargo test --workspace
-
-      - name: Install cargo-deny
-        run: cargo install cargo-deny
-
-      - name: Check dependencies with cargo-deny
-        run: cargo deny check advisories
 
       - name: Check wasm size budget
         run: |
