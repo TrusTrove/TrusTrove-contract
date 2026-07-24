@@ -29,7 +29,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
 
       - name: Audit dependencies (RUSTSEC)
-        run: cargo install cargo-audit && cargo audit
+        run: cargo install cargo-audit@0.22.1 && cargo audit
 
       - name: Check formatting
         run: cargo fmt --all --check
