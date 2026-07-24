@@ -432,3 +432,113 @@ fn test_get_funding_asset_returns_correct_asset() {
     let asset = client.get_funding_asset(&invoice_id);
     assert_eq!(asset, usdc);
 }
+
+use trusttrove_registry::{RegistryContract, RegistryContractClient};
+use trusttrove_escrow::{EscrowContract, EscrowContractClient};
+use trusttrove_pool::{PoolContract, PoolContractClient};
+use soroban_sdk::Map;
+
+#[contract]
+pub struct MockToken;
+
+#[contractimpl]
+impl MockToken {
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        let from_key = TKey(from.clone());
+        let to_key = TKey(to.clone());
+        let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+        let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+        env.storage().persistent().set(&from_key, &(from_bal - amount));
+        env.storage().persistent().set(&to_key, &(to_bal + amount));
+    }
+
+    pub fn balance(env: Env, addr: Address) -> i128 {
+        env.storage().persistent().get(&TKey(addr)).unwrap_or(0)
+    }
+}
+
+#[contracttype]
+pub struct TKey(Address);
+
+#[test]
+fn test_full_integration_lifecycle() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // 1. Deploy registry, invoice, escrow, and pool contracts
+    let admin = Address::generate(&env);
+    
+    let registry_id = env.register_contract(None, RegistryContract);
+    let registry = RegistryContractClient::new(&env, &registry_id);
+    registry.initialize(&admin);
+
+    let invoice_id = env.register_contract(None, InvoiceContract);
+    let invoice = InvoiceContractClient::new(&env, &invoice_id);
+    invoice.initialize(&admin, &registry_id);
+
+    let usdc_id = env.register_contract(None, MockToken);
+    
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+
+    let escrow_id = env.register_contract(None, EscrowContract);
+    let escrow = EscrowContractClient::new(&env, &escrow_id);
+    
+    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id);
+    escrow.initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    invoice.set_pool_contract(&pool_id);
+
+    // 2. Register issuer and buyer
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry.register_issuer(&issuer, &Map::new(&env));
+    registry.register_buyer(&buyer, &Map::new(&env));
+
+    // Fund LP and buyer with USDC
+    let lp = Address::generate(&env);
+    let lp_bal_key = TKey(lp.clone());
+    let buyer_bal_key = TKey(buyer.clone());
+    env.as_contract(&usdc_id, || {
+        env.storage().persistent().set(&lp_bal_key, &100_000_000_000i128);
+        env.storage().persistent().set(&buyer_bal_key, &100_000_000_000i128);
+    });
+
+    // Provide liquidity to pool
+    pool.deposit(&lp, &50_000_000_000);
+    
+    // 3. Create invoice
+    let face_value = 1_000_000_000;
+    let due_date = env.ledger().timestamp() + 86400;
+    let inv_id = invoice.create(&issuer, &buyer, &face_value, &due_date, &usdc_id);
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Created);
+
+    // 4. List for financing
+    invoice.list_for_financing(&inv_id, &200);
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Listed);
+
+    // 5. Fund via pool
+    let before_yield = pool.get_stats().total_yield_distributed;
+    pool.fund_invoice(&inv_id);
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Funded);
+
+    // 6. Mark as shipped
+    invoice.mark_shipped(&inv_id);
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Active);
+
+    // 7. Confirm delivery (both parties)
+    invoice.confirm_delivery(&inv_id, &issuer);
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Active);
+    invoice.confirm_delivery(&inv_id, &buyer);
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Confirmed);
+
+    // 8. Repay
+    invoice.repay(&inv_id);
+    
+    // 9. Assert final status == Repaid
+    assert_eq!(invoice.get(&inv_id).status, InvoiceStatus::Repaid);
+
+    // 10. Assert pool yield increased
+    let after_yield = pool.get_stats().total_yield_distributed;
+    assert!(after_yield > before_yield);
+}
+
