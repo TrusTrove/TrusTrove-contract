@@ -309,10 +309,12 @@ impl PoolContract {
     /// * `invoice_id` - The invoice to fund.
     ///
     /// # Auth
-    /// Requires authorization from the pool `admin` (via `admin.require_auth()`).
-    /// The additional eligibility checks below (invoice must be in Listed status,
-    /// asset must match the pool's asset, and the pool must have sufficient
-    /// liquidity) further constrain what admin-approved calls succeed.
+    /// **Permissionless.** Any caller can trigger funding for an invoice, provided
+    /// the invoice passes all on-chain eligibility checks:
+    /// 1. Invoice status must be `Listed` (status 1)
+    /// 2. Invoice funding asset must match the pool's asset (USDC)
+    /// 3. Pool must have sufficient available liquidity
+    /// 4. Funding would not cause pool utilization to exceed the `max_utilization_bps` cap
     ///
     /// See README §"Known Centralization Risks & Roadmap" for the longer-term
     /// governance design that will let LPs signal approval on funding decisions.
@@ -332,9 +334,6 @@ impl PoolContract {
     /// client.fund_invoice(&invoice_id);
     /// ```
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        admin.require_auth();
-
         let invoice_contract: Address = env
             .storage()
             .instance()
