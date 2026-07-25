@@ -65,6 +65,12 @@ TrusTrove smart contracts have not been formally audited.
 Users interact with testnet contracts at their own risk.
 A security audit is planned prior to any mainnet deployment.
 
+## Further Reading
+
+- [Threat Model](./docs/THREAT_MODEL.md) — detailed trust assumptions, auth gates, and attack vectors
+- [Storage Schema](./docs/STORAGE.md) — on-chain data layout and TTL management
+- [Limitations](./docs/LIMITATIONS.md) — known gaps, testnet constraints, and unhandled edge cases
+
 ## Important Notice
 
 TrusTrove is experimental software. Do not deposit real funds.
