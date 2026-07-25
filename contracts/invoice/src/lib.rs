@@ -13,6 +13,15 @@ mod types;
 pub use errors::*;
 pub use types::*;
 
+/// Upper bound on `Invoice::face_value`, in USDC stroops.
+///
+/// Chosen so that `face_value * 10_000` (the scaling factor used by
+/// downstream discount/utilization math in the pool contract, e.g.
+/// `face_value * (10_000 - discount_bps) / 10_000`) can never overflow
+/// `u128`, preventing arithmetic overflow in the pool when it consumes
+/// this value.
+pub const MAX_FACE_VALUE: u128 = u128::MAX / 10_000;
+
 #[contract]
 pub struct InvoiceContract;
 
@@ -100,6 +109,7 @@ impl InvoiceContract {
     /// * `InvoiceError::IssuerNotVerified` if the issuer is not verified in the registry.
     /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
     /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
+    /// * `InvoiceError::InvalidAmount` if `face_value` exceeds [`MAX_FACE_VALUE`].
     /// * `InvoiceError::InvalidDueDate` if `due_date` is not in the future.
     ///
     /// # Returns
@@ -143,6 +153,9 @@ impl InvoiceContract {
 
         if face_value == 0 {
             panic_with_error!(&env, InvoiceError::InvalidFaceValue);
+        }
+        if face_value > MAX_FACE_VALUE {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
         if due_date <= env.ledger().timestamp() {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
