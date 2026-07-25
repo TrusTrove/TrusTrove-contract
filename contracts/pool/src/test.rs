@@ -2,8 +2,8 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Ledger},
-    Address, BytesN, Env,
+    testutils::{Address as _, Events as _, Ledger},
+    Address, BytesN, Env, Symbol, TryFromVal,
 };
 
 use crate::{DataKey, PoolContract, PoolContractClient};
@@ -822,13 +822,56 @@ fn test_handle_default() {
     let funded_amount = 9_800_000_000;
 
     let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
     let result = te.pool.handle_default(&invoice_id);
     assert!(result);
 
     let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
     assert_eq!(after.total_deposits, before.total_deposits - funded_amount);
     assert_eq!(after.total_funded, 0);
     assert_eq!(after.active_invoice_count, 0);
+    assert_eq!(after.total_shares, before.total_shares);
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value - funded_amount
+    );
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "invoice_defaulted")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(u128::try_from_val(&te.env, &data).unwrap(), funded_amount);
+}
+
+#[test]
+fn test_handle_default_rejects_double_default() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    assert!(te.pool.handle_default(&invoice_id));
+    assert!(!te.pool.handle_default(&invoice_id));
+}
+
+#[test]
+#[should_panic]
+fn test_handle_default_requires_invoice_contract_authorization() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    te.env.set_auths(&[]);
+    te.pool.handle_default(&invoice_id);
 }
 
 #[test]
