@@ -229,6 +229,8 @@ Invoice status: → Defaulted
 - `receive_repayment` in the pool is callable only by the registered `invoice_contract`.
 - Every state transition in `invoice_contract` is guarded by an explicit status check; no skipping steps.
 
+> **Detailed references:** [Threat Model](./docs/THREAT_MODEL.md) · [Storage Schema](./docs/STORAGE.md) · [Limitations](./docs/LIMITATIONS.md)
+
 ---
 
 ## Deployed Contracts (Stellar Testnet)
@@ -357,6 +359,14 @@ Issues are labeled by contract and complexity:
 - `complexity:low` — isolated function or test, good entry point
 - `complexity:medium` — touches contract logic and storage
 - `complexity:high` — cross-contract interactions or new mechanics
+
+### Architecture Docs
+
+Detailed references for contributors and integrators:
+
+- [Threat Model](./docs/THREAT_MODEL.md) — trust assumptions, auth gates, attack vectors
+- [Storage Schema](./docs/STORAGE.md) — on-chain data layout, TTL patterns, gas estimates
+- [Limitations](./docs/LIMITATIONS.md) — testnet constraints, known gaps, unhandled edge cases
 
 ### Key conventions
 
