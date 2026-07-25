@@ -45,6 +45,15 @@ TrusTrove is a decentralized trade finance protocol on Stellar. SMEs tokenize un
 
 Join the contributor community: **[t.me/trusttrove](https://t.me/trusttrove)**
 
+### Maintainer Tooling
+
+Seed-issue generator scripts live in [`scripts/maintainer/`](./scripts/maintainer/):
+
+- `create_issues.py` — generate issues from a template
+- `create-contract-issues.sh` / `create-contract-issues.ps1` — shell/PowerShell helpers
+
+Run any script from the repo root, e.g. `bash scripts/maintainer/create-contract-issues.sh`.
+
 ---
 
 ## Contracts
