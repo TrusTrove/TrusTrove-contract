@@ -27,6 +27,7 @@ pub struct EscrowEvent {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
 pub enum DataKey {
     Admin,
     PoolContract,

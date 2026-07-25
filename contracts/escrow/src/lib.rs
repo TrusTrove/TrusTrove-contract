@@ -83,12 +83,7 @@ impl EscrowContract {
     /// client.lock(&invoice_id, &amount);
     /// ```
     pub fn lock(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
-        let pool: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PoolContract)
-            .unwrap();
-        pool.require_auth();
+        let pool = Self::require_pool_auth(&env);
 
         if amount == 0 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
@@ -139,12 +134,7 @@ impl EscrowContract {
     /// client.release_to_issuer(&invoice_id, &issuer);
     /// ```
     pub fn release_to_issuer(env: Env, invoice_id: BytesN<32>, issuer: Address) -> bool {
-        let pool: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PoolContract)
-            .unwrap();
-        pool.require_auth();
+        let pool = Self::require_pool_auth(&env);
 
         if issuer == env.current_contract_address() || issuer == pool {
             panic_with_error!(&env, EscrowError::InvalidRecipient);
@@ -209,12 +199,7 @@ impl EscrowContract {
     /// client.release_to_pool(&invoice_id, &repayment_amount);
     /// ```
     pub fn release_to_pool(env: Env, invoice_id: BytesN<32>, repayment_amount: u128) -> bool {
-        let pool: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PoolContract)
-            .unwrap();
-        pool.require_auth();
+        let pool = Self::require_pool_auth(&env);
 
         let key = DataKey::Locked(invoice_id.clone());
         let record: EscrowRecord = env
@@ -360,5 +345,15 @@ impl EscrowContract {
 
     fn extend_instance_ttl(env: &Env) {
         env.storage().instance().extend_ttl(100, 2_000_000);
+    }
+
+    fn require_pool_auth(env: &Env) -> Address {
+        let pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .unwrap();
+        pool.require_auth();
+        pool
     }
 }
