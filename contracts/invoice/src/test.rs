@@ -370,6 +370,106 @@ fn test_trigger_default_requires_past_due_date() {
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
 }
 
+// ============== ISSUE #211: trigger_default FROM INVALID STATUSES ==============
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_trigger_default_from_created_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
+
+    // A freshly created invoice is not Funded/Active/Confirmed, so defaulting
+    // it must be rejected with InvalidStatusTransition (#8).
+    env.ledger().set_timestamp(due_date + 1);
+    client.trigger_default(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_trigger_default_from_listed_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Listed);
+
+    // A Listed invoice has not been funded, so defaulting it must be rejected
+    // with InvalidStatusTransition (#8).
+    env.ledger().set_timestamp(due_date + 1);
+    client.trigger_default(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_trigger_default_from_repaid_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    let pool_id = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool_id);
+    client.mark_funded(&invoice_id, &pool_id, &usdc, &980_000_000);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    client.repay(&invoice_id);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Repaid);
+
+    // A Repaid invoice is terminal, so defaulting it must be rejected with
+    // InvalidStatusTransition (#8).
+    env.ledger().set_timestamp(due_date + 1);
+    client.trigger_default(&invoice_id);
+}
+
+#[test]
+fn test_trigger_default_succeeds_at_exact_due_date() {
+    // Boundary test: default must be allowed when `now == due_date`
+    // (previously panicked due to `<=` comparison — issue #200)
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    let pool_id = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool_id);
+    client.mark_funded(&invoice_id, &pool_id, &usdc, &980_000_000);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+
+    // Set ledger to exactly the due date
+    env.ledger().set_timestamp(due_date);
+
+    let result = client.trigger_default(&invoice_id);
+    assert!(result);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_trigger_default_fails_before_due_date() {
+    // Negative test: default must NOT be allowed when `now < due_date`
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    let pool_id = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool_id);
+    client.mark_funded(&invoice_id, &pool_id, &usdc, &980_000_000);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+
+    // Set ledger to 1 second before the due date — should panic
+    env.ledger().set_timestamp(due_date - 1);
+
+    client.trigger_default(&invoice_id);
+}
+
 #[test]
 fn test_get_by_status_filters_correctly() {
     let (env, client, issuer, buyer, _, usdc) = setup();
@@ -558,6 +658,52 @@ fn test_expire_listing_configurable_window() {
     let result = client.expire_listing(&invoice_id);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
+}
+
+#[test]
+fn test_expire_listing_exact_boundary() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    // Fast forward by exact expiry window (7 days)
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60);
+
+    let result = client.expire_listing(&invoice_id);
+    assert!(result);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_expire_listing_one_second_before_boundary_panics() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    // Fast forward to 1 second before expiry window
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 - 1);
+
+    client.expire_listing(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_expire_listing_overflow_panics() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.ledger().set_timestamp(100);
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    // Set an expiry window that will overflow u64 when added to listed_at (100 + u64::MAX > u64::MAX)
+    client.set_expiry_window(&u64::MAX);
+
+    client.expire_listing(&invoice_id);
 }
 
 #[test]

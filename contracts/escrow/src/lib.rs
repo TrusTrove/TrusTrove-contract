@@ -129,6 +129,7 @@ impl EscrowContract {
     ///
     /// # Panics
     /// * `NotFound` if no escrow record exists for the invoice.
+    /// * `InvalidRecipient` if issuer is escrow, pool, or invoice contract address.
     ///
     /// # Returns
     /// * `bool` - `true` when funds are released.
@@ -144,6 +145,20 @@ impl EscrowContract {
             .get(&DataKey::PoolContract)
             .unwrap();
         pool.require_auth();
+
+        if issuer == env.current_contract_address() || issuer == pool {
+            panic_with_error!(&env, EscrowError::InvalidRecipient);
+        }
+
+        if let Some(invoice_contract) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if issuer == invoice_contract {
+                panic_with_error!(&env, EscrowError::InvalidRecipient);
+            }
+        }
 
         let key = DataKey::Locked(invoice_id.clone());
         let record: EscrowRecord = env
