@@ -298,6 +298,13 @@ bash scripts/setup-testnet.sh
 bash scripts/deploy.sh
 ```
 
+Or on Windows (PowerShell):
+
+```powershell
+./scripts/setup-testnet.ps1
+./scripts/deploy.ps1
+```
+
 The deploy script prints all four contract IDs at the end. Paste them into `TrusTrove-app/.env.local`.
 
 #### Stellar CLI Setup (Linux, macOS, Windows)
@@ -305,7 +312,11 @@ The deploy script prints all four contract IDs at the end. Paste them into `Trus
 The deploy script requires the Stellar CLI. Choose one:
 
 - **Linux/macOS:** Install globally per [Stellar docs](https://developers.stellar.org/docs/learn/developing-with-soroban/setup) — the script will find it on `PATH`.
-- **Windows (native):** Install to `Program Files (x86)/Stellar CLI/`, or set `STELLAR_BIN=/path/to/stellar.exe` before running the script.
+- **Windows (native):** Use the PowerShell scripts (`scripts/setup-testnet.ps1` and `scripts/deploy.ps1`). Install the Stellar CLI to `Program Files (x86)\Stellar CLI\`, or set `STELLAR_BIN` environment variable. Run from PowerShell:
+  ```powershell
+  powershell ./scripts/setup-testnet.ps1
+  powershell ./scripts/deploy.ps1
+  ```
 - **Windows (WSL):** Install Stellar CLI in your WSL environment, or install on Windows host and set `STELLAR_BIN` to the Windows path (e.g., `/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe`).
 
 ---
