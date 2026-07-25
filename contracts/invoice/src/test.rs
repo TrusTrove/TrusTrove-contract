@@ -551,7 +551,12 @@ fn test_trigger_default_stranger_panics() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &contract_id,
             fn_name: "mark_funded",
-            args: (invoice_id.clone(), pool_id.clone(), usdc.clone(), 980_000_000u128)
+            args: (
+                invoice_id.clone(),
+                pool_id.clone(),
+                usdc.clone(),
+                980_000_000u128,
+            )
                 .into_val(&env),
             sub_invokes: &[],
         },
@@ -680,7 +685,12 @@ fn test_trigger_default_admin_succeeds_after_due_date_with_auth() {
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
             contract: &contract_id,
             fn_name: "mark_funded",
-            args: (invoice_id.clone(), pool_id.clone(), usdc.clone(), 980_000_000u128)
+            args: (
+                invoice_id.clone(),
+                pool_id.clone(),
+                usdc.clone(),
+                980_000_000u128,
+            )
                 .into_val(&env),
             sub_invokes: &[],
         },
