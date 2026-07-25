@@ -62,6 +62,7 @@ impl RegistryContract {
     ///   must sign the call, so accounts cannot be enrolled without consent.
     ///
     /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been initialized.
     /// * `RegistryError::AlreadyRegistered` if a profile is already stored
     ///   for `address`.
     ///
@@ -73,6 +74,7 @@ impl RegistryContract {
     /// let result = client.register_issuer(&issuer, &metadata);
     /// ```
     pub fn register_issuer(env: Env, address: Address, metadata: Map<String, String>) -> bool {
+        Self::require_initialized(&env);
         address.require_auth();
         if env
             .storage()
@@ -161,6 +163,7 @@ impl RegistryContract {
     ///   sign the call, so accounts cannot be enrolled without consent.
     ///
     /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been initialized.
     /// * `RegistryError::AlreadyRegistered` if a profile is already stored
     ///   for `address`.
     ///
@@ -172,6 +175,7 @@ impl RegistryContract {
     /// let result = client.register_buyer(&buyer, &metadata);
     /// ```
     pub fn register_buyer(env: Env, address: Address, metadata: Map<String, String>) -> bool {
+        Self::require_initialized(&env);
         address.require_auth();
         if env
             .storage()
@@ -422,6 +426,12 @@ impl RegistryContract {
 }
 
 impl RegistryContract {
+    fn require_initialized(env: &Env) {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(env, RegistryError::NotInitialized);
+        }
+    }
+
     fn extend_instance_ttl(env: &Env) {
         env.storage().instance().extend_ttl(100, 2_000_000);
     }

@@ -17,4 +17,5 @@ pub enum InvoiceError {
     UnsupportedAsset = 13,
     ListingNotExpired = 14,
     MathOverflow = 15,
+    InvalidAmount = 16,
 }
