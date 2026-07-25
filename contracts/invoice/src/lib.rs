@@ -636,6 +636,10 @@ impl InvoiceContract {
 
     /// Triggers default on a past-due invoice.
     ///
+    /// Default is permitted once `now >= due_date` — the due date has been
+    /// reached or passed. This is consistent with the `create` check that
+    /// rejects `due_date <= now` (due dates must be in the future).
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice to default.
@@ -646,7 +650,8 @@ impl InvoiceContract {
     /// # Panics
     /// * `InvoiceError::NotFound` if the admin, invoice, or funding pool cannot be found.
     /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::DueDateNotPassed` if the invoice due date has not yet passed.
+    /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
+    ///   has not yet been reached.
     ///
     /// # Returns
     /// * `bool` - `true` when default processing succeeds.
@@ -676,7 +681,7 @@ impl InvoiceContract {
         if !valid_transition {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        if env.ledger().timestamp() <= invoice.due_date {
+        if env.ledger().timestamp() < invoice.due_date {
             panic_with_error!(&env, InvoiceError::DueDateNotPassed);
         }
 
