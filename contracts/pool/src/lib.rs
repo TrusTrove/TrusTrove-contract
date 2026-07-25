@@ -693,8 +693,9 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// This function does not panic; all storage reads default to `0` (or the
-    /// initialization default of `8500` for `max_utilization_bps`).
+    /// * `Overflow` if scaling `total_funded` into basis points would overflow.
+    ///   All storage reads still default to `0` (or the initialization default
+    ///   of `8500` for `max_utilization_bps`).
     ///
     /// # Returns
     /// * `PoolStats` - The current pool statistics.
@@ -715,9 +716,7 @@ impl PoolContract {
             .get(&DataKey::TotalFunded)
             .unwrap_or(0);
         let available = total_deposits - total_funded;
-        let utilization = (total_funded * 10000)
-            .checked_div(total_deposits)
-            .unwrap_or(0) as u32;
+        let utilization = Self::utilization_bps_or_panic(&env, total_funded, total_deposits);
         let total_yield: u128 = env
             .storage()
             .instance()
@@ -858,6 +857,18 @@ impl PoolContract {
             .set(&DataKey::MaxUtilizationBps, &new_cap_bps);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
+        if total_deposits == 0 {
+            return 0;
+        }
+
+        let scaled_funded = total_funded
+            .checked_mul(10_000)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+
+        scaled_funded.checked_div(total_deposits).unwrap_or(0) as u32
     }
 
     fn extend_instance_ttl(env: &Env) {
