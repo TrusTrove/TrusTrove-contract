@@ -1,18 +1,22 @@
 [package]
 name = "trusttrove-invoice"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
-trusttrove-common = { path = "../common" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-proptest = { workspace = true }
+trusttrove-registry = { path = "../registry" }
+trusttrove-escrow = { path = "../escrow" }
+trusttrove-pool = { path = "../pool" }
 
 [features]
 testutils = ["soroban-sdk/testutils"]
