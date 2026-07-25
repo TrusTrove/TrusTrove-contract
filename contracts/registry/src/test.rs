@@ -60,6 +60,20 @@ fn test_register_buyer() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_issuer_before_initialize_panics() {
+    let (env, client) = setup();
+    client.register_issuer(&Address::generate(&env), &map![&env]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_buyer_before_initialize_panics() {
+    let (env, client) = setup();
+    client.register_buyer(&Address::generate(&env), &map![&env]);
+}
+
+#[test]
 fn test_is_verified_returns_true_for_registered() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
