@@ -787,14 +787,67 @@ fn test_receive_repayment() {
     let yield_amount = 200_000_000;
 
     let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
     let result = te.pool.receive_repayment(&invoice_id, &10_000_000_000);
     assert!(result);
 
     let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
     assert_eq!(after.total_deposits, before.total_deposits + yield_amount);
     assert_eq!(after.total_yield_distributed, yield_amount);
     assert_eq!(after.total_funded, 0);
     assert_eq!(after.active_invoice_count, 0);
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value + yield_amount
+    );
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, yield_amount)
+    );
+}
+
+#[test]
+fn test_receive_repayment_exact_funded_amount_has_no_yield() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+    te.pool.receive_repayment(&invoice_id, &9_800_000_000);
+
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(after.total_deposits, before.total_deposits);
+    assert_eq!(after.total_yield_distributed, 0);
+    assert_eq!(after.total_funded, 0);
+    assert_eq!(position_after.usdc_value, position_before.usdc_value);
+}
+
+#[test]
+#[should_panic]
+fn test_receive_repayment_requires_invoice_contract_authorization() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    te.env.set_auths(&[]);
+    te.pool.receive_repayment(&invoice_id, &10_000_000_000);
 }
 
 #[test]
