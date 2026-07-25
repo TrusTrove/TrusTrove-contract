@@ -769,23 +769,10 @@ impl InvoiceContract {
             let invoice: Invoice = env
                 .storage()
                 .persistent()
-                .get(&DataKey::StatusIndexEntry(status_u32, i))
+                .get(&DataKey::Invoice(id))
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-            // O(1) membership check instead of loading full invoice
-            let is_member: bool = env
-                .storage()
-                .persistent()
-                .get(&DataKey::StatusMembership(status_u32, id.clone()))
-                .unwrap_or(false);
-            if is_member {
-                let invoice: Invoice = env
-                    .storage()
-                    .persistent()
-                    .get(&DataKey::Invoice(id))
-                    .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-                if invoice.status == status {
-                    result.push_back(invoice);
-                }
+            if invoice.status == status {
+                result.push_back(invoice);
             }
         }
         result
@@ -801,11 +788,7 @@ impl InvoiceContract {
         let mut result: Vec<Invoice> = Vec::new(&env);
         let end = core::cmp::min(offset.saturating_add(limit), vec.len());
         for i in offset..end {
-            let id: BytesN<32> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::IssuerIndexEntry(address.clone(), i))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let id = vec.get(i).unwrap();
             let invoice: Invoice = env
                 .storage()
                 .persistent()
@@ -826,11 +809,7 @@ impl InvoiceContract {
         let mut result: Vec<Invoice> = Vec::new(&env);
         let end = core::cmp::min(offset.saturating_add(limit), vec.len());
         for i in offset..end {
-            let id: BytesN<32> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::BuyerIndexEntry(address.clone(), i))
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let id = vec.get(i).unwrap();
             let invoice: Invoice = env
                 .storage()
                 .persistent()
@@ -973,20 +952,10 @@ fn push_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) 
     let mut vec: Vec<BytesN<32>> = env
         .storage()
         .persistent()
-        .extend_ttl(&membership_key, 100, 2_000_000);
-
-    // Increment count
-    let count_key = DataKey::StatusIndexCount(status_u32);
-    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-    let entry_key = DataKey::StatusIndexEntry(status_u32, count);
-    env.storage().persistent().set(&entry_key, invoice_id);
-    env.storage()
-        .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
-    env.storage().persistent().set(&count_key, &(count + 1));
-    env.storage()
-        .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+    vec.push_back(invoice_id.clone());
+    persistent_set(env, &key, &vec);
 }
 
 fn move_status_index(env: &Env, invoice_id: &BytesN<32>, _from: InvoiceStatus, to: InvoiceStatus) {

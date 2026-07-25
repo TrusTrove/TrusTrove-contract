@@ -8,9 +8,7 @@ use soroban_sdk::{
     vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
-use crate::{
-    DataKey as ContractDataKey, InvoiceContract, InvoiceContractClient, InvoiceStatus,
-};
+use crate::{DataKey as ContractDataKey, InvoiceContract, InvoiceContractClient, InvoiceStatus};
 
 #[contract]
 pub struct MockRegistry;
@@ -1190,9 +1188,14 @@ fn test_create_invoice_writes_issuer_and_buyer_indices() {
             &env,
             (
                 contract_id,
-                (Symbol::new(&env, "invoice_created"), invoice_id, issuer, buyer, usdc).into_val(
-                    &env
-                ),
+                (
+                    Symbol::new(&env, "invoice_created"),
+                    invoice_id,
+                    issuer,
+                    buyer,
+                    usdc,
+                )
+                    .into_val(&env),
                 face_value.into_val(&env),
             ),
         ]
