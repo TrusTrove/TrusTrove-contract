@@ -5,10 +5,12 @@ use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
-    vec, Address, BytesN, Env, IntoVal, Symbol,
+    vec, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 
-use crate::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
+use crate::{
+    DataKey as ContractDataKey, InvoiceContract, InvoiceContractClient, InvoiceStatus,
+};
 
 #[contract]
 pub struct MockRegistry;
@@ -1128,4 +1130,118 @@ fn test_initialized_invoice_create_succeeds() {
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.issuer, issuer);
     assert_eq!(invoice.buyer, buyer);
+}
+
+// ── Index write path tests ─────────────────────────────────────────────────────
+
+#[test]
+fn test_create_invoice_writes_issuer_and_buyer_indices() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let face_value: u128 = 1_000_000_000;
+
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+
+    // Direct storage: issuer index Vec contains invoice ID
+    let issuer_key = ContractDataKey::InvoicesByIssuer(issuer.clone());
+    let issuer_vec: Vec<BytesN<32>> = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&issuer_key)
+            .unwrap_or(Vec::new(&env))
+    });
+    assert_eq!(issuer_vec.len(), 1);
+    assert_eq!(issuer_vec.get(0).unwrap(), invoice_id);
+
+    // Direct storage: buyer index Vec contains invoice ID
+    let buyer_key = ContractDataKey::InvoicesByBuyer(buyer.clone());
+    let buyer_vec: Vec<BytesN<32>> = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&buyer_key)
+            .unwrap_or(Vec::new(&env))
+    });
+    assert_eq!(buyer_vec.len(), 1);
+    assert_eq!(buyer_vec.get(0).unwrap(), invoice_id);
+
+    // Client getter
+    let issuer_invoices = client.get_by_issuer(&issuer, &0, &10);
+    assert_eq!(issuer_invoices.len(), 1);
+    assert_eq!(issuer_invoices.get(0).unwrap().id, invoice_id);
+
+    let buyer_invoices = client.get_by_buyer(&buyer, &0, &10);
+    assert_eq!(buyer_invoices.len(), 1);
+    assert_eq!(buyer_invoices.get(0).unwrap().id, invoice_id);
+
+    // Other address returns empty
+    let other = Address::generate(&env);
+    let empty = client.get_by_issuer(&other, &0, &10);
+    assert_eq!(empty.len(), 0);
+    let empty = client.get_by_buyer(&other, &0, &10);
+    assert_eq!(empty.len(), 0);
+
+    // Emitted event
+    let contract_id = client.address.clone();
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                contract_id,
+                (Symbol::new(&env, "invoice_created"), invoice_id, issuer, buyer, usdc).into_val(
+                    &env
+                ),
+                face_value.into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_create_invoice_unauthorized_panics() {
+    let env = Env::default();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (admin.clone(), registry_id.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &registry_id);
+
+    let usdc = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_supported_asset",
+            args: (usdc.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.add_supported_asset(&usdc);
+
+    let due_date = env.ledger().timestamp() + 86400;
+
+    // No auth mocked for issuer — create() should panic at require_auth()
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
 }
