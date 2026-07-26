@@ -200,7 +200,7 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if no escrow record exists for the invoice.
-    /// * `InvalidAmount` if `repayment_amount` is zero or does not match the locked amount.
+    /// * `InvalidAmount` if `repayment_amount` is zero or exceeds the locked amount.
     ///
     /// # Returns
     /// * `bool` - `true` when funds are returned.
@@ -223,7 +223,7 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        if repayment_amount != record.amount {
+        if repayment_amount > record.amount {
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
 

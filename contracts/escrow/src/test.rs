@@ -353,7 +353,7 @@ fn test_release_to_pool_transfers_correct_amount() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #5)")]
-fn test_release_to_pool_fails_on_mismatched_repayment_amount() {
+fn test_release_to_pool_fails_on_overpayment() {
     let (env, client, _admin, _pool, _usdc_id, _contract_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
     let amount: u128 = 1_000_000_000;
@@ -373,6 +373,19 @@ fn test_release_to_pool_fails_zero_repayment() {
 
     client.lock(&invoice_id, &amount);
     client.release_to_pool(&invoice_id, &0);
+}
+
+#[test]
+fn test_release_to_pool_partial_repayment_succeeds() {
+    let (env, client, _admin, _pool, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+    let partial: u128 = 500_000_000;
+    let result = client.release_to_pool(&invoice_id, &partial);
+    assert!(result);
+    assert_eq!(client.get_locked(&invoice_id), 0);
 }
 
 #[test]
