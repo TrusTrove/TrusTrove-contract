@@ -10,6 +10,8 @@ set -euo pipefail
 # Prefer a globally available `stellar` on PATH, fall back to a common WSL installation
 if command -v stellar &> /dev/null; then
   STELLAR="stellar"
+elif [ -n "${STELLAR_BIN:-}" ] && [ -f "$STELLAR_BIN" ]; then
+  STELLAR="$STELLAR_BIN"
 elif [ -f "/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe" ]; then
   STELLAR="/mnt/c/Program Files (x86)/Stellar CLI/stellar.exe"
 else

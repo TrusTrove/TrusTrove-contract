@@ -7,6 +7,13 @@ members = [
     "contracts/pool",
 ]
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["TrusTrove"]
+repository = "https://github.com/TrusTrove/TrusTrove-contract"
+
 [workspace.dependencies]
 soroban-sdk = { version = "21.7.6" }
 

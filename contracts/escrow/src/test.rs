@@ -266,6 +266,56 @@ fn test_release_to_issuer_sends_correct_amount() {
     );
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_release_to_issuer_self_address_panics() {
+    let (env, client, _admin, _pool, _usdc_id, contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 6);
+    client.lock(&invoice_id, &1_000_000_000);
+
+    // Releasing to self (escrow contract itself) must panic with InvalidRecipient (#7)
+    client.release_to_issuer(&invoice_id, &contract_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_release_to_issuer_pool_address_panics() {
+    let (env, client, _admin, pool, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 7);
+    client.lock(&invoice_id, &1_000_000_000);
+
+    // Releasing to pool contract address must panic with InvalidRecipient (#7)
+    client.release_to_issuer(&invoice_id, &pool);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_release_to_issuer_invoice_contract_panics() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let pool = env.register_contract(None, MockCaller);
+    let invoice = Address::generate(&env);
+    let usdc_id = env.register_contract(None, MockToken);
+
+    let pool_bal_key = BalanceKey(pool.clone());
+    env.as_contract(&usdc_id, || {
+        env.storage()
+            .persistent()
+            .set(&pool_bal_key, &10_000_000_000_000i128);
+    });
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &pool, &invoice, &usdc_id);
+
+    let invoice_id = generate_invoice_id(&env, 8);
+    client.lock(&invoice_id, &1_000_000_000);
+
+    // Releasing to invoice contract address must panic with InvalidRecipient (#7)
+    client.release_to_issuer(&invoice_id, &invoice);
+}
+
 // ============================================================================
 // Release to Pool Tests
 // ============================================================================

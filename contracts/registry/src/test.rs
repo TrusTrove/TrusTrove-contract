@@ -3,7 +3,11 @@
 use crate::{DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus};
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
-use soroban_sdk::{map, testutils::Address as _, vec, Address, Env, String, Vec};
+use soroban_sdk::{
+    map,
+    testutils::{Address as _, Events as _},
+    vec, Address, Env, IntoVal, String, Symbol, Vec,
+};
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
     let env = Env::default();
@@ -56,6 +60,20 @@ fn test_register_buyer() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_issuer_before_initialize_panics() {
+    let (env, client) = setup();
+    client.register_issuer(&Address::generate(&env), &map![&env]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_register_buyer_before_initialize_panics() {
+    let (env, client) = setup();
+    client.register_buyer(&Address::generate(&env), &map![&env]);
+}
+
+#[test]
 fn test_is_verified_returns_true_for_registered() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
@@ -95,6 +113,73 @@ fn test_revoke_unregistered_panics() {
     client.initialize(&admin);
     let unknown = Address::generate(&env);
     client.revoke(&unknown);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_revoke_wrong_auth_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, RegistryContract);
+    let client = RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let metadata = map![&env];
+    let profile = Profile::new(
+        issuer.clone(),
+        Role::Issuer,
+        true,
+        env.ledger().timestamp(),
+        metadata,
+    );
+
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Profile(issuer.clone()), &profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Profile(issuer.clone()), 100, 2_000_000);
+    });
+
+    assert!(client.is_verified(&issuer));
+    client.revoke(&issuer);
+    assert!(client.is_verified(&issuer));
+    assert!(env.events().all().is_empty());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_re_register_revoked_issuer_panics() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert!(client.is_verified(&issuer));
+    client.revoke(&issuer);
+    assert!(!client.is_verified(&issuer));
+    // A revoked address still has a profile in storage, so re-registering
+    // must panic with AlreadyRegistered (#2).
+    client.register_issuer(&issuer, &map![&env]);
+}
+
+#[test]
+fn test_reinstate_revoked_issuer_restores_verification() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert!(client.is_verified(&issuer));
+
+    client.revoke(&issuer);
+    assert!(!client.is_verified(&issuer));
+
+    // Reinstate the revoked issuer via admin.verify_profile.
+    client.verify_profile(&issuer, &true);
+    assert!(client.is_verified(&issuer));
 }
 
 #[test]
@@ -593,4 +678,94 @@ fn test_profile_packing_correctness() {
     let p4 = Profile::new(addr.clone(), Role::Buyer, false, 100, metadata.clone());
     assert_eq!(p4.role(), Role::Buyer);
     assert!(!p4.verified());
+}
+
+// ============== EVENT-EMISSION TESTS (#188) ==============
+
+#[test]
+fn test_register_issuer_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+
+    client.register_issuer(&issuer, &map![&env]);
+
+    // State after: the issuer is registered and verified.
+    assert!(client.is_verified(&issuer));
+
+    // Registration emits exactly one `issuer_registered` event carrying the
+    // issuer address in the topics and an empty data payload.
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_register_buyer_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let buyer = Address::generate(&env);
+
+    client.register_buyer(&buyer, &map![&env]);
+
+    // State after: the buyer is registered and verified.
+    assert!(client.is_verified(&buyer));
+
+    // Registration emits exactly one `buyer_registered` event carrying the
+    // buyer address in the topics and an empty data payload.
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "buyer_registered"), buyer.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+}
+
+#[test]
+fn test_revoke_emits_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    client.revoke(&issuer);
+
+    // State after: verification has been revoked.
+    assert!(!client.is_verified(&issuer));
+
+    // The full event stream is the `issuer_registered` event from setup
+    // followed by the `address_revoked` event, each carrying the affected
+    // address in the topics and an empty data payload.
+    assert_eq!(
+        env.events().all(),
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "address_revoked"), issuer.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
 }

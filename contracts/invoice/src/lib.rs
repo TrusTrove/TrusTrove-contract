@@ -13,6 +13,15 @@ mod types;
 pub use errors::*;
 pub use types::*;
 
+/// Upper bound on `Invoice::face_value`, in USDC stroops.
+///
+/// Chosen so that `face_value * 10_000` (the scaling factor used by
+/// downstream discount/utilization math in the pool contract, e.g.
+/// `face_value * (10_000 - discount_bps) / 10_000`) can never overflow
+/// `u128`, preventing arithmetic overflow in the pool when it consumes
+/// this value.
+pub const MAX_FACE_VALUE: u128 = u128::MAX / 10_000;
+
 #[contract]
 pub struct InvoiceContract;
 
@@ -100,7 +109,9 @@ impl InvoiceContract {
     /// * `InvoiceError::IssuerNotVerified` if the issuer is not verified in the registry.
     /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
     /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
+    /// * `InvoiceError::InvalidAmount` if `face_value` exceeds [`MAX_FACE_VALUE`].
     /// * `InvoiceError::InvalidDueDate` if `due_date` is not in the future.
+    /// * `InvoiceError::CounterOverflow` if the internal invoice counter overflows.
     ///
     /// # Returns
     /// * `BytesN<32>` - The generated invoice ID.
@@ -144,12 +155,17 @@ impl InvoiceContract {
         if face_value == 0 {
             panic_with_error!(&env, InvoiceError::InvalidFaceValue);
         }
+        if face_value > MAX_FACE_VALUE {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
         if due_date <= env.ledger().timestamp() {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
         let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
-        let next_counter = counter + 1;
+        let next_counter = counter
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::CounterOverflow));
         env.storage()
             .instance()
             .set(&DataKey::Counter, &next_counter);
@@ -636,6 +652,10 @@ impl InvoiceContract {
 
     /// Triggers default on a past-due invoice.
     ///
+    /// Default is permitted once `now >= due_date` — the due date has been
+    /// reached or passed. This is consistent with the `create` check that
+    /// rejects `due_date <= now` (due dates must be in the future).
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice to default.
@@ -646,7 +666,8 @@ impl InvoiceContract {
     /// # Panics
     /// * `InvoiceError::NotFound` if the admin, invoice, or funding pool cannot be found.
     /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::DueDateNotPassed` if the invoice due date has not yet passed.
+    /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
+    ///   has not yet been reached.
     ///
     /// # Returns
     /// * `bool` - `true` when default processing succeeds.
@@ -676,7 +697,7 @@ impl InvoiceContract {
         if !valid_transition {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        if env.ledger().timestamp() <= invoice.due_date {
+        if env.ledger().timestamp() < invoice.due_date {
             panic_with_error!(&env, InvoiceError::DueDateNotPassed);
         }
 
@@ -780,13 +801,21 @@ impl InvoiceContract {
             .get(&DataKey::ExpiryWindow)
             .unwrap_or(7 * 24 * 60 * 60);
         let current_time = env.ledger().timestamp();
-        if current_time <= listed_at + expiry_window {
+        let deadline = listed_at
+            .checked_add(expiry_window)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+
+        if current_time < deadline {
             panic_with_error!(&env, InvoiceError::ListingNotExpired);
         }
 
         let prev_status = invoice.status;
         invoice.status = InvoiceStatus::Expired;
         env.storage().persistent().set(&inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .extend_ttl(&inv_key, 100, 2_000_000);
+        Self::extend_instance_ttl(&env);
 
         move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Expired);
         events::invoice_expired(&env, &invoice_id);
