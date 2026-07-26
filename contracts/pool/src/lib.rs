@@ -659,7 +659,11 @@ impl PoolContract {
         }
 
         // release escrow to the issuer
-        let escrow_contract: Address = env.storage().instance().get(&DataKey::EscrowContract).unwrap();
+        let escrow_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .unwrap();
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
         args.push_back(issuer.into_val(&env));
