@@ -416,7 +416,7 @@ fn test_receive_repayment_with_refund_requires_invoice_contract_auth() {
 
     te.env.set_auths(&[]);
     te.pool
-        .receive_repayment_with_refund(&invoice_id, &10_000_000_000, &0, &te.buyer);
+        .receive_repayment_with_refund(&invoice_id, &10_000_000_000, &0, &te.buyer, &te.issuer);
 }
 
 #[test]

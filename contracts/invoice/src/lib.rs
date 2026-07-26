@@ -548,6 +548,7 @@ impl InvoiceContract {
         let refund_to_buyer = discount.saturating_sub(earned_by_pool);
 
         let buyer = invoice.buyer.clone();
+        let issuer = invoice.issuer.clone();
 
         let token = token::Client::new(&env, &funding_asset);
         token.transfer(&buyer, &pool, &(face_value as i128));
@@ -557,6 +558,7 @@ impl InvoiceContract {
         args.push_back(face_value.into_val(&env));
         args.push_back(refund_to_buyer.into_val(&env));
         args.push_back(buyer.into_val(&env));
+        args.push_back(issuer.into_val(&env));
         let _: bool = env.invoke_contract(
             &pool,
             &Symbol::new(&env, "receive_repayment_with_refund"),
@@ -620,6 +622,7 @@ impl InvoiceContract {
         let refund_to_buyer = discount.saturating_sub(earned_by_pool);
 
         let buyer = invoice.buyer.clone();
+        let issuer = invoice.issuer.clone();
         let funding_asset = invoice.funding_asset.clone();
 
         let token = token::Client::new(&env, &funding_asset);
@@ -630,6 +633,7 @@ impl InvoiceContract {
         args.push_back(face_value.into_val(&env));
         args.push_back(refund_to_buyer.into_val(&env));
         args.push_back(buyer.into_val(&env));
+        args.push_back(issuer.into_val(&env));
         let _: bool = env.invoke_contract(
             &pool,
             &Symbol::new(&env, "receive_repayment_with_refund"),

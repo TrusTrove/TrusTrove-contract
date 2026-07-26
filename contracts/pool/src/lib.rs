@@ -581,7 +581,7 @@ impl PoolContract {
     ///
     /// # Example
     /// ```ignore
-    /// client.receive_repayment_with_refund(&invoice_id, 1_050, 50, &buyer);
+    /// client.receive_repayment_with_refund(&invoice_id, 1_050, 50, &buyer, &issuer);
     /// ```
     pub fn receive_repayment_with_refund(
         env: Env,
@@ -589,6 +589,7 @@ impl PoolContract {
         amount: u128,
         refund: u128,
         buyer: Address,
+        issuer: Address,
     ) -> bool {
         let invoice_contract: Address = env
             .storage()
@@ -659,13 +660,6 @@ impl PoolContract {
 
         // release escrow to the issuer
         let escrow_contract: Address = env.storage().instance().get(&DataKey::EscrowContract).unwrap();
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        let issuer: Address = env.invoke_contract(
-            &invoice_contract,
-            &Symbol::new(&env, "get_issuer"),
-            args,
-        );
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
         args.push_back(issuer.into_val(&env));

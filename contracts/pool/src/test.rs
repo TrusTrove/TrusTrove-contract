@@ -923,7 +923,7 @@ fn test_receive_repayment_with_refund_active_count_underflow_panics() {
     });
 
     te.pool
-        .receive_repayment_with_refund(&phantom_id, &funded_amount, &0, &te.buyer);
+        .receive_repayment_with_refund(&phantom_id, &funded_amount, &0, &te.buyer, &te.issuer);
 }
 
 #[test]
