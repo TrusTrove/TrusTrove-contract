@@ -41,10 +41,27 @@ jobs:
         run: cargo build --workspace
 
       - name: Build wasm (release)
-        run: cargo build --workspace --release --target wasm32v1-none
+        run: cargo build --workspace --exclude trusttrove-integration-tests --release --target wasm32v1-none
 
       - name: Test
         run: cargo test --workspace
+
+  integration-tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run cross-contract integration tests
+        run: cargo test -p trusttrove-integration-tests
 
       - name: Check wasm size budget
         run: |
@@ -72,3 +89,4 @@ jobs:
           [ "$INVOICE" -le "$INVOICE_BUDGET" ] || exit 1
           [ "$ESCROW" -le "$ESCROW_BUDGET" ] || exit 1
           [ "$POOL" -le "$POOL_BUDGET" ] || exit 1
+          

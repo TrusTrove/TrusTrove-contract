@@ -53,6 +53,7 @@ impl MockPool {
         _amount: u128,
         refund: u128,
         _buyer: Address,
+        _issuer: Address,
     ) -> bool {
         let key = Symbol::new(&env, "last_refund");
         env.storage().instance().set(&key, &refund);

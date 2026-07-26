@@ -1,0 +1,19 @@
+[package]
+name = "trusttrove-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+trusttrove-pool = { path = "../../contracts/pool" }
+trusttrove-invoice = { path = "../../contracts/invoice" }
+trusttrove-escrow = { path = "../../contracts/escrow" }
+trusttrove-registry = { path = "../../contracts/registry" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
