@@ -10,8 +10,10 @@ repository.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
 trusttrove-pool = { path = "../../contracts/pool" }
 trusttrove-invoice = { path = "../../contracts/invoice" }
 trusttrove-escrow = { path = "../../contracts/escrow" }
 trusttrove-registry = { path = "../../contracts/registry" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

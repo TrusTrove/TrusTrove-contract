@@ -657,6 +657,24 @@ impl PoolContract {
             usdc.transfer(&env.current_contract_address(), &buyer, &(refund as i128));
         }
 
+        // release escrow to the issuer
+        let escrow_contract: Address = env.storage().instance().get(&DataKey::EscrowContract).unwrap();
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        let issuer: Address = env.invoke_contract(
+            &invoice_contract,
+            &Symbol::new(&env, "get_issuer"),
+            args,
+        );
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        args.push_back(issuer.into_val(&env));
+        let _: bool = env.invoke_contract(
+            &escrow_contract,
+            &Symbol::new(&env, "release_to_issuer"),
+            args,
+        );
+
         events::repayment_received(&env, &invoice_id, amount, yield_amount);
         Self::extend_instance_ttl(&env);
         true
