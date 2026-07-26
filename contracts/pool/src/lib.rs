@@ -7,10 +7,13 @@ use soroban_sdk::{
 mod errors;
 mod events;
 mod test;
+mod ttl;
 mod types;
 
 pub use errors::*;
 pub use types::*;
+
+use ttl::{EXTEND_TO, THRESHOLD};
 
 #[contract]
 pub struct PoolContract;
@@ -31,6 +34,8 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `AlreadyInitialized` if the contract has already been initialized.
+    /// * `InvalidConfiguration` if any two of `admin`, `invoice_contract`,
+    ///   `escrow_contract`, and `usdc_asset` are the same address.
     ///
     /// # Returns
     /// * `()` - No value is returned.
@@ -48,6 +53,15 @@ impl PoolContract {
     ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, PoolError::AlreadyInitialized);
+        }
+        if admin == invoice_contract
+            || admin == escrow_contract
+            || admin == usdc_asset
+            || invoice_contract == escrow_contract
+            || invoice_contract == usdc_asset
+            || escrow_contract == usdc_asset
+        {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -169,7 +183,7 @@ impl PoolContract {
             .set(&lp_shares_key, &(lp_shares + shares_to_issue));
         env.storage()
             .persistent()
-            .extend_ttl(&lp_shares_key, 100, 2_000_000);
+            .extend_ttl(&lp_shares_key, THRESHOLD, EXTEND_TO);
 
         let lp_deposit_count_key = DataKey::LPDepositCount(lp.clone());
         let count: u32 = env
@@ -182,7 +196,7 @@ impl PoolContract {
             .set(&lp_deposit_count_key, &(count + 1));
         env.storage()
             .persistent()
-            .extend_ttl(&lp_deposit_count_key, 100, 2_000_000);
+            .extend_ttl(&lp_deposit_count_key, THRESHOLD, EXTEND_TO);
 
         let lp_init_key = DataKey::LPInitialDeposit(lp.clone());
         let init_dep: u128 = env.storage().persistent().get(&lp_init_key).unwrap_or(0);
@@ -191,7 +205,7 @@ impl PoolContract {
             .set(&lp_init_key, &(init_dep + usdc_amount));
         env.storage()
             .persistent()
-            .extend_ttl(&lp_init_key, 100, 2_000_000);
+            .extend_ttl(&lp_init_key, THRESHOLD, EXTEND_TO);
 
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
         Self::extend_instance_ttl(&env);
@@ -271,7 +285,7 @@ impl PoolContract {
             .set(&lp_shares_key, &(lp_shares - shares));
         env.storage()
             .persistent()
-            .extend_ttl(&lp_shares_key, 100, 2_000_000);
+            .extend_ttl(&lp_shares_key, THRESHOLD, EXTEND_TO);
 
         let init_dep_key = DataKey::LPInitialDeposit(lp.clone());
         let init_dep: u128 = env.storage().persistent().get(&init_dep_key).unwrap_or(0);
@@ -283,7 +297,7 @@ impl PoolContract {
             env.storage().persistent().set(&init_dep_key, &new_init_dep);
             env.storage()
                 .persistent()
-                .extend_ttl(&init_dep_key, 100, 2_000_000);
+                .extend_ttl(&init_dep_key, THRESHOLD, EXTEND_TO);
         } else {
             env.storage().persistent().remove(&init_dep_key);
         }
@@ -295,7 +309,7 @@ impl PoolContract {
             .set(&yield_key, &(prev_yield + yield_earned));
         env.storage()
             .persistent()
-            .extend_ttl(&yield_key, 100, 2_000_000);
+            .extend_ttl(&yield_key, THRESHOLD, EXTEND_TO);
 
         events::lp_withdrawn(&env, &lp, usdc_to_return, shares);
         Self::extend_instance_ttl(&env);
@@ -321,6 +335,7 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `InvoiceNotListed` if the invoice is not in listed status.
+    /// * `AlreadyFunded` if a `FundedInvoice` entry already exists for this invoice id.
     /// * `AssetMismatch` if the invoice funding asset does not match pool USDC.
     /// * `InvalidAmount` if the computed funded amount is zero.
     /// * `InsufficientLiquidity` if the pool does not have enough funds.
@@ -346,6 +361,11 @@ impl PoolContract {
             env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_status"), args);
         if invoice_status != 1 {
             panic_with_error!(&env, PoolError::InvoiceNotListed);
+        }
+
+        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+        if env.storage().persistent().has(&funded_key) {
+            panic_with_error!(&env, PoolError::AlreadyFunded);
         }
 
         let mut args = Vec::new(&env);
@@ -436,11 +456,10 @@ impl PoolContract {
             .instance()
             .set(&DataKey::ActiveInvoiceCount, &(active_count + 1));
 
-        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
         env.storage().persistent().set(&funded_key, &funded_amount);
         env.storage()
             .persistent()
-            .extend_ttl(&funded_key, 100, 2_000_000);
+            .extend_ttl(&funded_key, THRESHOLD, EXTEND_TO);
 
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
@@ -871,6 +890,6 @@ impl PoolContract {
     }
 
     fn extend_instance_ttl(env: &Env) {
-        env.storage().instance().extend_ttl(100, 2_000_000);
+        env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO);
     }
 }

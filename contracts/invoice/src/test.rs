@@ -1453,3 +1453,18 @@ fn test_repay_from_expired_rejected() {
 
     client.repay(&invoice_id);
 }
+
+#[test]
+#[should_panic(expected = "Error(Contract, #17)")]
+fn test_create_fails_counter_overflow() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&crate::DataKey::Counter, &u64::MAX);
+    });
+
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+}

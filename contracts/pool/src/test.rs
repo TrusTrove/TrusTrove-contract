@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Events as _, Ledger},
+    testutils::{storage::Instance as _, Address as _, Events as _, Ledger},
     Address, BytesN, Env, Symbol, TryFromVal,
 };
 
@@ -1135,3 +1135,187 @@ fn test_multi_lp_proportional_yield_with_mid_cycle_deposit() {
 // of contract-to-contract calls. The auth logic is enforced at the contract boundary
 // and verified through integration tests. Individual contract auth is covered by the
 // fact that mock_all_auths() is used during setup and cleared when specific auths are set.
+
+// ============== ISSUE #268: WITHDRAW AFTER REPAYMENT (SHARE PRICE > 1) ==============
+
+// Covers the "yield grows share price" invariant end-to-end: deposit, fund,
+// repay, then withdraw the same shares and confirm the LP is paid back more
+// USDC than they put in, with the surplus exactly matching the discount
+// portion of yield distributed on repayment.
+#[test]
+fn test_withdraw_after_repayment_returns_more_than_deposited() {
+    let te = setup();
+    let deposit_amount = 10_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit_amount);
+    fund_and_repay_invoice(&te);
+
+    // face_value=10_000_000_000, discount_bps=200 (create_and_list defaults):
+    // funded_amount = 10_000_000_000 * 9800 / 10000 = 9_800_000_000
+    // yield = face_value - funded_amount = 200_000_000, all of which accrues
+    // to this LP since they are the pool's sole depositor.
+    let expected_yield = 200_000_000u128;
+
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, deposit_amount);
+    assert_eq!(pos.usdc_value, deposit_amount + expected_yield);
+
+    let usdc_returned = te.pool.withdraw(&te.lp, &pos.shares);
+
+    assert!(
+        usdc_returned > deposit_amount,
+        "withdrawal after yield-generating repayment should return more than was deposited"
+    );
+    assert_eq!(usdc_returned, deposit_amount + expected_yield);
+    assert_eq!(usdc_returned - deposit_amount, expected_yield);
+
+    // Pool is fully drained: no shares or deposits remain.
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_shares, 0);
+    assert_eq!(stats.total_deposits, 0);
+
+    // The LP's realised yield is tracked for future reporting.
+    let final_pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(final_pos.yield_earned, expected_yield);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "lp_withdrawn")
+    );
+    assert_eq!(
+        Address::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        te.lp
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (usdc_returned, deposit_amount)
+    );
+}
+
+// ============== ISSUE #263: INITIALIZE ADDRESS COLLISION GUARD ==============
+
+// A fresh, valid initialize() with four distinct addresses must keep working;
+// `setup()` (used throughout this file) already exercises this path, but this
+// test makes the positive case explicit for the collision guard added below.
+#[test]
+fn test_initialize_accepts_distinct_addresses() {
+    let te = setup();
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_shares, 0);
+    assert_eq!(stats.total_deposits, 0);
+}
+
+// Every pairwise collision among (admin, invoice_contract, escrow_contract,
+// usdc_asset) must be rejected with InvalidConfiguration (#15) so the
+// handle_default gate can never collide with the admin path.
+#[test]
+fn test_initialize_rejects_each_pairwise_address_collision() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let base = [
+        Address::generate(&env), // admin
+        Address::generate(&env), // invoice_contract
+        Address::generate(&env), // escrow_contract
+        Address::generate(&env), // usdc_asset
+    ];
+
+    let pairs = [(0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3)];
+    for (i, j) in pairs {
+        let mut addrs = base.clone();
+        addrs[j] = addrs[i].clone();
+
+        let pool_id = env.register_contract(None, PoolContract);
+        let pool = PoolContractClient::new(&env, &pool_id);
+        let res = pool.try_initialize(&addrs[0], &addrs[1], &addrs[2], &addrs[3]);
+        assert!(
+            res.is_err(),
+            "collision between initialize() params {i} and {j} should be rejected"
+        );
+    }
+}
+
+// ============== ISSUE #265: PREVENT ALREADYFUNDED SILENT SHADOWING ==============
+
+// If a `FundedInvoice` entry already exists for an invoice id, fund_invoice
+// must reject the call with AlreadyFunded (#16) instead of silently
+// overwriting the prior entry (which would double-lock escrow funds and
+// double-count active_invoice_count for a single invoice).
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_fund_invoice_rejects_replay_when_funded_invoice_entry_exists() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // Simulate a stale FundedInvoice entry already present for this invoice
+    // id while the invoice itself is still Listed.
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().set(&funded_key, &1u128);
+    });
+
+    te.pool.fund_invoice(&invoice_id);
+}
+
+// The normal (non-replayed) funding path must be unaffected by the guard.
+#[test]
+fn test_fund_invoice_succeeds_when_no_prior_funded_entry() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    let funded_amount: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get(&funded_key).unwrap()
+    });
+    assert_eq!(funded_amount, 9_800_000_000);
+}
+
+// ============== ISSUE #281: INSTANCE TTL EXTENSION ==============
+
+// Every state-changing entrypoint must extend the contract's instance TTL so
+// an active pool never expires. New instance storage entries start with a
+// small default ttl (well above the extend_ttl threshold), so the
+// initialize()/set_max_utilization() calls in `setup()` are no-ops for the
+// ttl bump. Drive the ttl down below the threshold here, then confirm a
+// state-changing call (deposit) bumps it back up close to the configured
+// extend-to window.
+#[test]
+fn test_deposit_extends_instance_ttl_when_below_threshold() {
+    let te = setup();
+
+    let start_seq = te.env.ledger().sequence();
+    // The instance starts with the network's default minimum entry ttl
+    // (4096 ledgers). Move just past that so the remaining ttl drops below
+    // the extend_ttl threshold (100 ledgers), while the entry is still live.
+    te.env.ledger().set_sequence_number(start_seq + 4000);
+
+    let ttl_before = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_before < 100,
+        "test setup should place ttl below the extend threshold, got {ttl_before}"
+    );
+
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let ttl_after = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_after > ttl_before,
+        "deposit() should extend the instance ttl once it drops below the \
+         threshold, before={ttl_before} after={ttl_after}"
+    );
+    assert!(
+        ttl_after >= 1_999_000,
+        "instance ttl should be extended close to EXTEND_TO, got {ttl_after}"
+    );
+}
