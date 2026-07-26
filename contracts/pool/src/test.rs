@@ -970,7 +970,9 @@ fn test_handle_default() {
 
     let before = te.pool.get_stats();
     let position_before = te.pool.get_lp_position(&te.lp);
-    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 60);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
     let result = te.pool.handle_default(&invoice_id);
     assert!(result);
 
@@ -1005,7 +1007,9 @@ fn test_handle_default_rejects_double_default() {
     te.pool.deposit(&te.lp, &100_000_000_000);
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
-    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 60);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
 
     assert!(te.pool.handle_default(&invoice_id));
     assert!(!te.pool.handle_default(&invoice_id));
@@ -1018,7 +1022,9 @@ fn test_handle_default_requires_invoice_contract_authorization() {
     te.pool.deposit(&te.lp, &100_000_000_000);
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
-    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 60);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
 
     te.env.set_auths(&[]);
     te.pool.handle_default(&invoice_id);
@@ -1042,7 +1048,9 @@ fn test_deposit_when_deposits_zero_but_shares_exist() {
 
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
-    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 60);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
 
     // Trigger default, wiping out all pool deposits
     te.pool.handle_default(&invoice_id);
@@ -1070,7 +1078,9 @@ fn test_deposit_after_default_share_price_recovery() {
     // Fund invoice (9.8B funded)
     let invoice_id = create_and_list(&te, &te.usdc_id);
     let _ = te.pool.fund_invoice(&invoice_id);
-    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + 60);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
 
     // Default wipes out 9.8B, leaving LP1 with 0.2B / 10B shares = 0.02 USDC per share
     let _ = te.pool.handle_default(&invoice_id);
