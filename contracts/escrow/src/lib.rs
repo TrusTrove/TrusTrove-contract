@@ -10,6 +10,8 @@ mod types;
 pub use errors::*;
 pub use types::*;
 
+const DEFAULT_MIN_LOCK_SECONDS: u64 = 60;
+
 #[contract]
 pub struct EscrowContract;
 
@@ -265,6 +267,7 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized and a lock record exists for the invoice.
     /// * `NotAuthorized` if `caller` is neither the admin nor the pool contract.
+    /// * `NotAuthorized` if the record has not been locked long enough to satisfy the grace period.
     ///
     /// # Returns
     /// * `bool` - `true` if default handling completed, `false` if no lock exists.
@@ -291,6 +294,11 @@ impl EscrowContract {
 
         caller.require_auth();
         if caller != admin && caller != pool {
+            panic_with_error!(&env, EscrowError::NotAuthorized);
+        }
+
+        let now = env.ledger().timestamp();
+        if now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 

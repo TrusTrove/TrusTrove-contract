@@ -395,6 +395,7 @@ fn test_handle_default_returns_funds_to_pool() {
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
     // Pool is the normal operational caller for default resolution
     let result = client.handle_default(&invoice_id, &pool);
     assert!(result);
@@ -411,6 +412,7 @@ fn test_handle_default_invoked_by_pool_succeeds() {
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
 
     // Call handle_default with pool as the caller (mocking authorizations is enabled)
     let result = client.handle_default(&invoice_id, &pool);
@@ -427,6 +429,7 @@ fn test_handle_default_invoked_by_admin_succeeds() {
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
 
     // Call handle_default with admin as the caller
     let result = client.handle_default(&invoice_id, &admin);
@@ -444,6 +447,7 @@ fn test_handle_default_admin_can_trigger() {
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
     // Admin can directly trigger default resolution (emergency / recovery path)
     let result = client.handle_default(&invoice_id, &admin);
     assert!(result);
@@ -461,6 +465,33 @@ fn test_handle_default_returns_false_if_no_record() {
 
     let result = client.handle_default(&invoice_id, &pool);
     assert!(!result);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_handle_default_rejects_before_grace_period() {
+    let (env, client, _admin, pool, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 9);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 59);
+
+    client.handle_default(&invoice_id, &pool);
+}
+
+#[test]
+fn test_handle_default_allows_at_grace_period_boundary() {
+    let (env, client, _admin, pool, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 10);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+
+    let result = client.handle_default(&invoice_id, &pool);
+    assert!(result);
+    assert_eq!(client.get_locked(&invoice_id), 0);
 }
 
 // ============================================================================
