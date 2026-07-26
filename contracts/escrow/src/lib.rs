@@ -200,7 +200,7 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if no escrow record exists for the invoice.
-    /// * `InvalidAmount` if `repayment_amount` does not match the locked amount.
+    /// * `InvalidAmount` if `repayment_amount` is zero or does not match the locked amount.
     ///
     /// # Returns
     /// * `bool` - `true` when funds are returned.
@@ -211,6 +211,10 @@ impl EscrowContract {
     /// ```
     pub fn release_to_pool(env: Env, invoice_id: BytesN<32>, repayment_amount: u128) -> bool {
         let pool = Self::require_pool_auth(&env);
+
+        if repayment_amount == 0 {
+            panic_with_error!(&env, EscrowError::InvalidAmount);
+        }
 
         let key = DataKey::Locked(invoice_id.clone());
         let record: EscrowRecord = env

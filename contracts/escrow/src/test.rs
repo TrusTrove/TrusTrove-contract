@@ -365,6 +365,17 @@ fn test_release_to_pool_fails_on_mismatched_repayment_amount() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_release_to_pool_fails_zero_repayment() {
+    let (env, client, _admin, _pool, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+    client.release_to_pool(&invoice_id, &0);
+}
+
+#[test]
 fn test_handle_default_returns_funds_to_pool() {
     let (env, client, _admin, pool, _usdc_id, _contract_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
