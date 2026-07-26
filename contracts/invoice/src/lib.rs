@@ -106,6 +106,7 @@ impl InvoiceContract {
     /// Requires authorization from `issuer`.
     ///
     /// # Panics
+    /// * `InvoiceError::NotFound` if the contract has not been initialized.
     /// * `InvoiceError::IssuerNotVerified` if the issuer is not verified in the registry.
     /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
     /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
@@ -134,7 +135,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::RegistryContract)
-            .unwrap();
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
         let mut args = Vec::new(&env);
         args.push_back(issuer.clone().into_val(&env));
@@ -162,7 +163,11 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
-        let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Counter)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
         let next_counter = counter
             .checked_add(1)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::CounterOverflow));
@@ -985,18 +990,19 @@ impl InvoiceContract {
             .persistent()
             .get(&DataKey::StatusIndexCount(status as u32))
             .unwrap_or(0);
-        let mut result: Vec<Invoice> = Vec::new(&env);
+        let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in 0..count {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::StatusIndexEntry(status as u32, i))
                 .unwrap();
-            let invoice: Invoice = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Invoice(id))
-                .unwrap();
+            ids.push_back(id);
+        }
+        let invoices = hydrate_ids(&env, ids);
+        let mut result: Vec<Invoice> = Vec::new(&env);
+        for i in 0..invoices.len() {
+            let invoice = invoices.get(i).unwrap();
             if invoice.status == status {
                 result.push_back(invoice);
             }
@@ -1029,21 +1035,16 @@ impl InvoiceContract {
             .persistent()
             .get(&DataKey::IssuerIndexCount(address.clone()))
             .unwrap_or(0);
-        let mut result: Vec<Invoice> = Vec::new(&env);
+        let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in 0..count {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::IssuerIndexEntry(address.clone(), i))
                 .unwrap();
-            let invoice: Invoice = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Invoice(id))
-                .unwrap();
-            result.push_back(invoice);
+            ids.push_back(id);
         }
-        result
+        hydrate_ids(&env, ids)
     }
 
     /// Lists invoices associated with a given buyer.
@@ -1071,21 +1072,16 @@ impl InvoiceContract {
             .persistent()
             .get(&DataKey::BuyerIndexCount(address.clone()))
             .unwrap_or(0);
-        let mut result: Vec<Invoice> = Vec::new(&env);
+        let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in 0..count {
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
                 .get(&DataKey::BuyerIndexEntry(address.clone(), i))
                 .unwrap();
-            let invoice: Invoice = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Invoice(id))
-                .unwrap();
-            result.push_back(invoice);
+            ids.push_back(id);
         }
-        result
+        hydrate_ids(&env, ids)
     }
 
     /// Returns a map of invoice counts keyed by status name.
@@ -1241,4 +1237,18 @@ fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {
         .persistent()
         .get(&DataKey::StatusCount(status as u32))
         .unwrap_or(0u64)
+}
+
+fn hydrate_ids(env: &Env, ids: Vec<BytesN<32>>) -> Vec<Invoice> {
+    let mut result: Vec<Invoice> = Vec::new(env);
+    for i in 0..ids.len() {
+        let id = ids.get(i).unwrap();
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(id))
+            .unwrap();
+        result.push_back(invoice);
+    }
+    result
 }

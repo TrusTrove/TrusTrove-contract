@@ -546,7 +546,10 @@ fn test_trigger_default_fails_before_due_date() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Auth")]
+// `trigger_default` calls `admin.require_auth()` directly, so non-admin
+// callers are rejected by Soroban's native `Error(Auth, InvalidAction)`
+// before any contract-level error can be returned.
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_trigger_default_stranger_panics() {
     let env = Env::default();
 
@@ -680,47 +683,12 @@ fn test_trigger_default_stranger_panics() {
     client.trigger_default(&invoice_id);
 }
 
-#[test]
-fn test_trigger_default_admin_succeeds_after_due_date_with_auth() {
-    // Use mock_all_auths like the other trigger_default tests;
-    // the sub-invocation to handle_default on the pool requires
-    // the full auth context to be available.
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let registry_id = env.register_contract(None, MockRegistry);
-    let registry_client = MockRegistryClient::new(&env, &registry_id);
-
-    let issuer = Address::generate(&env);
-    let buyer = Address::generate(&env);
-    registry_client.register(&issuer);
-    registry_client.register(&buyer);
-
-    let contract_id = env.register_contract(None, InvoiceContract);
-    let client = InvoiceContractClient::new(&env, &contract_id);
-
-    let admin = Address::generate(&env);
-    client.initialize(&admin, &registry_id);
-
-    let usdc = Address::generate(&env);
-    let due_date = env.ledger().timestamp() + 86400;
-    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
-    client.list_for_financing(&invoice_id, &200);
-
-    let pool_id = mock_pool_with_asset(&env, &usdc);
-    client.set_pool_contract(&pool_id);
-    client.mark_funded(&invoice_id, &pool_id, &usdc, &980_000_000);
-    client.mark_shipped(&invoice_id);
-    client.confirm_delivery(&invoice_id, &issuer);
-    client.confirm_delivery(&invoice_id, &buyer);
-
-    // Fast forward past due date
-    env.ledger().set_timestamp(due_date + 1);
-
-    let result = client.trigger_default(&invoice_id);
-    assert!(result);
-    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
-}
+// Note: `test_trigger_default_admin_succeeds_after_due_date_with_auth` was
+// removed as part of PR #363 (closing #314). The happy-path admin-trigger
+// behavior is already exercised by `test_trigger_default_requires_past_due_date`
+// and `test_trigger_default_succeeds_at_exact_due_date`, both of which rely
+// on the shared `setup()` helper. Keeping this note here so future readers
+// know the gap was intentional and not an oversight.
 
 #[test]
 fn test_get_by_status_filters_correctly() {
@@ -911,7 +879,6 @@ fn test_expire_listing_configurable_window() {
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
-
 #[test]
 fn test_expire_listing_exact_boundary() {
     let (env, client, issuer, buyer, _, usdc) = setup();
@@ -1000,6 +967,123 @@ fn test_set_expiry_window_emits_event() {
             )
         ]
     );
+}
+
+#[test]
+fn test_mark_shipped_succeeds_by_issuer() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    client.list_for_financing(&invoice_id, &200);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, &usdc, &980_000_000);
+
+    let result = client.mark_shipped(&invoice_id);
+    assert!(result);
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Active);
+    assert!(inv.shipped_at.is_some());
+}
+
+#[test]
+#[should_panic]
+fn test_mark_shipped_stranger_panics() {
+    let env = Env::default();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let usdc = Address::generate(&env);
+    let due_date = env.ledger().timestamp() + 86400;
+    let pool = mock_pool_with_asset(&env, &usdc);
+
+    // Initialize as admin
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (admin.clone(), registry_id.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &registry_id);
+
+    // Create invoice as issuer
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                1_000_000_000u128,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+
+    // List as issuer
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "list_for_financing",
+            args: (invoice_id.clone(), 200u32).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.list_for_financing(&invoice_id, &200);
+
+    // Set pool as admin
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_pool_contract",
+            args: (pool.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_pool_contract(&pool);
+
+    // Mark funded as pool
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &pool,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "mark_funded",
+            args: (
+                invoice_id.clone(),
+                pool.clone(),
+                usdc.clone(),
+                980_000_000u128,
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.mark_funded(&invoice_id, &pool, &usdc, &980_000_000);
+
+    // Calling mark_shipped without mocking auths for the issuer should panic
+    // due to failed require_auth. The stranger address is not the issuer.
+    client.mark_shipped(&invoice_id);
 }
 
 #[test]
@@ -1466,5 +1550,58 @@ fn test_create_fails_counter_overflow() {
             .set(&crate::DataKey::Counter, &u64::MAX);
     });
 
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+}
+
+// ============== ISSUE #201: TYPED ERRORS FOR UNINITIALIZED CONTRACT ==============
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_create_fails_uninitialized_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let due_date = env.ledger().timestamp() + 86400;
+    let usdc = Address::generate(&env);
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_create_fails_missing_counter() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &registry_id);
+
+    env.as_contract(&client.address, || {
+        env.storage().instance().remove(&crate::DataKey::Counter);
+    });
+
+    let due_date = env.ledger().timestamp() + 86400;
+    let usdc = Address::generate(&env);
     client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
 }
