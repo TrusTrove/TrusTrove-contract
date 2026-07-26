@@ -106,6 +106,7 @@ impl InvoiceContract {
     /// Requires authorization from `issuer`.
     ///
     /// # Panics
+    /// * `InvoiceError::NotFound` if the contract has not been initialized.
     /// * `InvoiceError::IssuerNotVerified` if the issuer is not verified in the registry.
     /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
     /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
@@ -134,7 +135,7 @@ impl InvoiceContract {
             .storage()
             .instance()
             .get(&DataKey::RegistryContract)
-            .unwrap();
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
         let mut args = Vec::new(&env);
         args.push_back(issuer.clone().into_val(&env));
@@ -162,7 +163,11 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
-        let counter: u64 = env.storage().instance().get(&DataKey::Counter).unwrap();
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::Counter)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
         let next_counter = counter
             .checked_add(1)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::CounterOverflow));

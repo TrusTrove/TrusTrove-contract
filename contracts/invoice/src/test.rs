@@ -1436,3 +1436,56 @@ fn test_create_fails_counter_overflow() {
 
     client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
 }
+
+// ============== ISSUE #201: TYPED ERRORS FOR UNINITIALIZED CONTRACT ==============
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_create_fails_uninitialized_registry() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let due_date = env.ledger().timestamp() + 86400;
+    let usdc = Address::generate(&env);
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_create_fails_missing_counter() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &registry_id);
+
+    env.as_contract(&client.address, || {
+        env.storage().instance().remove(&crate::DataKey::Counter);
+    });
+
+    let due_date = env.ledger().timestamp() + 86400;
+    let usdc = Address::generate(&env);
+    client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+}
