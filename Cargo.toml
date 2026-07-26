@@ -5,6 +5,7 @@ members = [
     "contracts/invoice",
     "contracts/escrow",
     "contracts/pool",
+    "tests/integration",
 ]
 
 [workspace.package]
