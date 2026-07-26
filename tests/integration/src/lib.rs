@@ -3,7 +3,7 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
-    vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Vec,
+    Address, BytesN, Env, Symbol, TryFromVal,
 };
 
 use trusttrove_escrow::{EscrowContract, EscrowContractClient};
@@ -25,9 +25,7 @@ impl MockToken {
         env.storage()
             .persistent()
             .set(&from_key, &(from_bal - amount));
-        env.storage()
-            .persistent()
-            .set(&to_key, &(to_bal + amount));
+        env.storage().persistent().set(&to_key, &(to_bal + amount));
     }
 
     pub fn balance(env: Env, addr: Address) -> i128 {
@@ -143,11 +141,35 @@ fn setup_with_auths() -> IntegrationEnv {
 
 fn create_and_list(te: &IntegrationEnv) -> BytesN<32> {
     let due_date = te.env.ledger().timestamp() + 86400;
-    let invoice_id = te
-        .invoice
-        .create(&te.issuer, &te.buyer, &10_000_000_000, &due_date, &te.usdc_id);
+    let invoice_id = te.invoice.create(
+        &te.issuer,
+        &te.buyer,
+        &10_000_000_000,
+        &due_date,
+        &te.usdc_id,
+    );
     te.invoice.list_for_financing(&invoice_id, &200);
     invoice_id
+}
+
+fn has_event(
+    env: &Env,
+    events: &soroban_sdk::Vec<(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)>,
+    contract_id: &Address,
+    event_name: &str,
+) -> bool {
+    for i in 0..events.len() {
+        let (c, topics, _) = events.get(i).unwrap();
+        if c != *contract_id {
+            continue;
+        }
+        let topic0: Symbol =
+            Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+        if topic0 == Symbol::new(env, event_name) {
+            return true;
+        }
+    }
+    false
 }
 
 // ==================== POSITIVE PATH: FULL LIFECYCLE ====================
@@ -312,26 +334,16 @@ fn test_events_emitted_during_funding() {
     );
 
     // Verify pool event
-    let pool_events: Vec<_> = events_after
-        .iter()
-        .filter(|(c, _, _)| *c == te.pool_id)
-        .collect();
-    let has_invoice_funded = pool_events.iter().any(|(_, topics, _)| {
-        let topic0: Symbol = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap();
-        topic0 == Symbol::new(&te.env, "invoice_funded")
-    });
-    assert!(has_invoice_funded, "pool should emit invoice_funded event");
+    assert!(
+        has_event(&te.env, &events_after, &te.pool_id, "invoice_funded"),
+        "pool should emit invoice_funded event"
+    );
 
     // Verify escrow event
-    let escrow_events: Vec<_> = events_after
-        .iter()
-        .filter(|(c, _, _)| *c == te.escrow_id)
-        .collect();
-    let has_funds_locked = escrow_events.iter().any(|(_, topics, _)| {
-        let topic0: Symbol = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap();
-        topic0 == Symbol::new(&te.env, "funds_locked")
-    });
-    assert!(has_funds_locked, "escrow should emit funds_locked event");
+    assert!(
+        has_event(&te.env, &events_after, &te.escrow_id, "funds_locked"),
+        "escrow should emit funds_locked event"
+    );
 }
 
 #[test]
@@ -357,43 +369,13 @@ fn test_events_emitted_during_repayment() {
         "expected >= 2 events from repay (invoice repaid, pool repayment_received), got {new_events_count}"
     );
 
-    let pool_events: Vec<_> = events_after
-        .iter()
-        .filter(|(c, _, _)| *c == te.pool_id)
-        .collect();
-    let has_repayment = pool_events.iter().any(|(_, topics, _)| {
-        let topic0: Symbol = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap();
-        topic0 == Symbol::new(&te.env, "repayment_received")
-    });
     assert!(
-        has_repayment,
+        has_event(&te.env, &events_after, &te.pool_id, "repayment_received"),
         "pool should emit repayment_received event"
     );
 }
 
 // ==================== NEGATIVE AUTH TESTS ====================
-
-#[test]
-#[should_panic(expected = "Error(Auth, InvalidAction)")]
-fn test_fund_invoice_rejects_unauthorized_caller() {
-    let te = setup_with_auths();
-
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    let invoice_id = create_and_list(&te);
-
-    // Clear all auths to ensure fund_invoice permissionless path works
-    // but other auth'd paths would fail
-    te.env.set_auths(&[]);
-    // fund_invoice is permissionless, so this should still succeed
-    // Actually, fund_invoice is permissionless but the escrow.lock call
-    // inside it requires pool auth, and mock_all_auths was used for setup.
-    // Let me test a different path: receive_repayment which requires invoice contract auth.
-    // For fund_invoice which is permissionless, we test the actual behavior:
-    let result = te.pool.try_fund_invoice(&invoice_id);
-    assert!(result.is_ok(), "fund_invoice should be permissionless");
-
-    // Instead, test handle_default which requires invoice_contract auth
-}
 
 #[test]
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
@@ -446,9 +428,13 @@ fn test_fund_invoice_fails_on_asset_mismatch() {
     // Create invoice with a different asset (not usdc)
     let due_date = te.env.ledger().timestamp() + 86400;
     let other_asset = Address::generate(&te.env);
-    let invoice_id = te
-        .invoice
-        .create(&te.issuer, &te.buyer, &10_000_000_000, &due_date, &other_asset);
+    let invoice_id = te.invoice.create(
+        &te.issuer,
+        &te.buyer,
+        &10_000_000_000,
+        &due_date,
+        &other_asset,
+    );
     te.invoice.list_for_financing(&invoice_id, &200);
 
     te.pool.fund_invoice(&invoice_id);
