@@ -14,4 +14,6 @@ pub enum PoolError {
     UtilizationCapExceeded = 12,
     Overflow = 13,
     MinimumDeposit = 14,
+    InvalidConfiguration = 15,
+    AlreadyFunded = 16,
 }
