@@ -41,7 +41,7 @@ jobs:
         run: cargo build --workspace
 
       - name: Build wasm (release)
-        run: cargo build --workspace --release --target wasm32v1-none
+        run: cargo build --workspace --exclude trusttrove-integration-tests --release --target wasm32v1-none
 
       - name: Test
         run: cargo test --workspace
@@ -89,3 +89,4 @@ jobs:
           [ "$INVOICE" -le "$INVOICE_BUDGET" ] || exit 1
           [ "$ESCROW" -le "$ESCROW_BUDGET" ] || exit 1
           [ "$POOL" -le "$POOL_BUDGET" ] || exit 1
+          
