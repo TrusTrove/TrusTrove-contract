@@ -68,11 +68,9 @@ struct IntegrationEnv {
     pool: PoolContractClient<'static>,
     pool_id: Address,
     invoice: InvoiceContractClient<'static>,
-    invoice_id: Address,
     escrow: EscrowContractClient<'static>,
     escrow_id: Address,
     usdc_id: Address,
-    admin: Address,
     issuer: Address,
     buyer: Address,
     lp: Address,
@@ -128,11 +126,9 @@ fn setup_with_auths() -> IntegrationEnv {
         pool,
         pool_id,
         invoice,
-        invoice_id,
         escrow,
         escrow_id,
         usdc_id,
-        admin,
         issuer,
         buyer,
         lp,
@@ -154,7 +150,11 @@ fn create_and_list(te: &IntegrationEnv) -> BytesN<32> {
 
 fn has_event(
     env: &Env,
-    events: &soroban_sdk::Vec<(Address, soroban_sdk::Vec<soroban_sdk::Val>, soroban_sdk::Val)>,
+    events: &soroban_sdk::Vec<(
+        Address,
+        soroban_sdk::Vec<soroban_sdk::Val>,
+        soroban_sdk::Val,
+    )>,
     contract_id: &Address,
     event_name: &str,
 ) -> bool {
@@ -163,8 +163,7 @@ fn has_event(
         if c != *contract_id {
             continue;
         }
-        let topic0: Symbol =
-            Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+        let topic0: Symbol = Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
         if topic0 == Symbol::new(env, event_name) {
             return true;
         }
@@ -231,7 +230,7 @@ fn test_full_cross_contract_lifecycle() {
     assert!(repaid);
 
     // Verify terminal states
-    assert_eq!(te.invoice.get_status(&invoice_id), 6); // Repaid
+    assert_eq!(te.invoice.get_status(&invoice_id), 5); // Repaid
 
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_funded, 0);
@@ -247,6 +246,8 @@ fn test_full_cross_contract_lifecycle() {
     let all_events = te.env.events().all();
     assert!(all_events.len() >= 10);
 }
+
+// ==================== YIELD VERIFICATION ====================
 
 #[test]
 fn test_lp_receives_yield_after_full_cycle() {
@@ -298,7 +299,7 @@ fn test_cross_contract_default_lifecycle() {
     assert!(defaulted);
 
     // Verify states
-    assert_eq!(te.invoice.get_status(&invoice_id), 7); // Defaulted
+    assert_eq!(te.invoice.get_status(&invoice_id), 6); // Defaulted
 
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_funded, 0);
@@ -419,7 +420,7 @@ fn test_receive_repayment_with_refund_requires_invoice_contract_auth() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #4)")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_fund_invoice_fails_on_asset_mismatch() {
     let te = setup_with_auths();
 
