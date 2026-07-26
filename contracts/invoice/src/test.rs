@@ -6,7 +6,7 @@ use soroban_sdk::{
     vec, Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
 };
 
-use crate::{DataKey as ContractDataKey, InvoiceContract, InvoiceContractClient, InvoiceStatus};
+use crate::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
 
 #[contract]
 pub struct MockRegistry;
