@@ -1661,7 +1661,10 @@
           "v0": {
             "topics": [
               {
-                "symbol": "pool_contract_set"
+                "symbol": "pool_contract_updated"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
