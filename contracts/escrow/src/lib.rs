@@ -40,12 +40,12 @@ impl EscrowContract {
     /// client.initialize(&admin, &pool, &invoice, &usdc);
     /// ```
     /// Get a token client for the USDC asset stored in the contract.
-fn usdc_client(env: &Env) -> token::Client {
-    let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
-    token::Client::new(env, &usdc_id)
-}
+    fn usdc_client(env: &Env) -> token::Client {
+        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
+        token::Client::new(env, &usdc_id)
+    }
 
-pub fn initialize(
+    pub fn initialize(
         env: Env,
         admin: Address,
         pool_contract: Address,
