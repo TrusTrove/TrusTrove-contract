@@ -103,7 +103,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::AlreadyLocked);
         }
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(&pool, &env.current_contract_address(), &(amount as i128));
 
         let record = EscrowRecord {
@@ -166,7 +166,7 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
             &issuer,
@@ -225,7 +225,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
             &pool,
@@ -293,7 +293,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
             &pool,
