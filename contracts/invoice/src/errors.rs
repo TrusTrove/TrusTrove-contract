@@ -19,4 +19,5 @@ pub enum InvoiceError {
     MathOverflow = 15,
     InvalidAmount = 16,
     CounterOverflow = 17,
+    GracePeriodNotPassed = 12,
 }
