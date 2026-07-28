@@ -95,6 +95,7 @@ pub enum DataKey {
     BuyerIndexEntry(Address, u32),
     StatusIndexEntry(u32, u32),
     ExpiryWindow,
+    DefaultGraceSeconds,
 }
 
 impl InvoiceStatus {

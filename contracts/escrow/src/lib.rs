@@ -40,12 +40,12 @@ impl EscrowContract {
     /// client.initialize(&admin, &pool, &invoice, &usdc);
     /// ```
     /// Get a token client for the USDC asset stored in the contract.
-fn usdc_client(env: &Env) -> token::Client {
-    let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
-    token::Client::new(env, &usdc_id)
-}
+    fn usdc_client(env: &Env) -> token::Client {
+        let usdc_id: Address = env.storage().instance().get(&DataKey::UsdcAsset).unwrap();
+        token::Client::new(env, &usdc_id)
+    }
 
-pub fn initialize(
+    pub fn initialize(
         env: Env,
         admin: Address,
         pool_contract: Address,
@@ -103,7 +103,7 @@ pub fn initialize(
             panic_with_error!(&env, EscrowError::AlreadyLocked);
         }
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(&pool, &env.current_contract_address(), &(amount as i128));
 
         let record = EscrowRecord {
@@ -166,7 +166,7 @@ pub fn initialize(
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
             &issuer,
@@ -225,7 +225,7 @@ pub fn initialize(
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
             &pool,
@@ -293,7 +293,7 @@ pub fn initialize(
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
-        let usdc = usdc_client(&env);
+        let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
             &pool,

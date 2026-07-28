@@ -27,13 +27,6 @@ mod storage {
 /// this value.
 pub const MAX_FACE_VALUE: u128 = u128::MAX / 10_000;
 
-/// Maximum allowed invoice lifetime in seconds.
-///
-/// This caps `due_date` to `now + MAX_INVOICE_LIFETIME_SECONDS` to reject
-/// far-future due dates that are effectively garbage data (e.g., centuries
-/// in the future). The value is ~10 years (10 * 365 * 24 * 60 * 60).
-pub const MAX_INVOICE_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
-
 #[contract]
 pub struct InvoiceContract;
 
@@ -79,7 +72,6 @@ impl InvoiceContract {
             .set(&DataKey::RegistryContract, &registry_contract);
         env.storage().instance().set(&DataKey::Counter, &0u64);
         Self::extend_instance_ttl(&env);
-        events::contract_initialized(&env, &admin, &registry_contract);
     }
 
     /// Sets the pool contract address used by this invoice contract.
@@ -143,8 +135,6 @@ impl InvoiceContract {
     ///   so `due_date == now` is rejected. Pinning tests:
     ///   `test_create_fails_when_due_date_equals_now` and
     ///   `test_create_succeeds_when_due_date_one_second_in_future`.
-    /// * `InvoiceError::InvalidDueDateTooFar` if `due_date` exceeds
-    ///   `now + MAX_INVOICE_LIFETIME_SECONDS` (~10 years).
     /// * `InvoiceError::CounterOverflow` if the internal invoice counter overflows.
     ///
     /// # Returns
@@ -192,14 +182,7 @@ impl InvoiceContract {
         if face_value > MAX_FACE_VALUE {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
-        let now = env.ledger().timestamp();
-        if due_date <= now {
-            panic_with_error!(&env, InvoiceError::InvalidDueDate);
-        }
-        let max_due_date = now
-            .checked_add(MAX_INVOICE_LIFETIME_SECONDS)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
-        if due_date > max_due_date {
+        if due_date <= env.ledger().timestamp() {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
@@ -676,9 +659,11 @@ impl InvoiceContract {
 
     /// Triggers default on a past-due invoice.
     ///
-    /// Default is permitted once `now >= due_date` — the due date has been
-    /// reached or passed. This is consistent with the `create` check that
-    /// rejects `due_date <= now` (due dates must be in the future).
+    /// Default is permitted once `now > due_date + grace_period` — the due
+    /// date plus any configured grace period must have passed.  The grace
+    /// period gives buyers a window to repay after confirmation before being
+    /// defaulted.  It is configured via [`set_default_grace_seconds`] and
+    /// defaults to `0` (no extra wait).
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -690,8 +675,8 @@ impl InvoiceContract {
     /// # Panics
     /// * `InvoiceError::NotFound` if the admin, invoice, or funding pool cannot be found.
     /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
-    ///   has not yet been reached.
+    /// * `InvoiceError::GracePeriodNotPassed` if `now <= due_date + grace` — the
+    ///   due date plus the default grace period has not yet passed.
     ///
     /// # Returns
     /// * `bool` - `true` when default processing succeeds.
@@ -721,8 +706,13 @@ impl InvoiceContract {
         if !valid_transition {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        if env.ledger().timestamp() < invoice.due_date {
-            panic_with_error!(&env, InvoiceError::DueDateNotPassed);
+        let grace: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(0);
+        if env.ledger().timestamp() <= invoice.due_date.saturating_add(grace) {
+            panic_with_error!(&env, InvoiceError::GracePeriodNotPassed);
         }
 
         let prev_status = invoice.status;
@@ -781,12 +771,77 @@ impl InvoiceContract {
             .unwrap_or(7 * 24 * 60 * 60)
     }
 
+    /// Sets the default grace period (in seconds) after the due date before an
+    /// invoice can be defaulted. During this window the buyer can still repay.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `seconds` - The grace period in seconds (0 to disable).
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin is not initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    pub fn set_default_grace_seconds(env: Env, seconds: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultGraceSeconds, &seconds);
+        events::default_grace_seconds_set(&env, seconds);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the current default grace period in seconds.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u64` - The grace period in seconds. Defaults to `0` if unset.
+    pub fn get_default_grace_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(0)
+    }
+
     /// Helper to check authorization for a given address.
-    /// This is invoked dynamically via `try_invoke_contract` in `expire_listing`.
-    /// Rust's dead-code analysis can't see the dynamic dispatch via `Symbol`, so
-    /// the `#[allow(dead_code)]` keeps it in the WASM dispatch table.
-    #[allow(dead_code)]
-    fn check_auth(_env: Env, address: Address) {
+    ///
+    /// Invoked dynamically by `expire_listing` via `try_invoke_contract` with
+    /// `Symbol("check_auth")`. It must remain `pub` so that Soroban's
+    /// `#[contractimpl]` macro exports it to the WASM contract-method
+    /// dispatch table; without that, the dynamic call would fail because the
+    /// target method would not be reachable in the WASM export list.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The address whose authorization should be checked.
+    ///
+    /// # Auth
+    /// Requires authorization from `address`.
+    ///
+    /// # Panics
+    /// Does not panic directly; propagates the auth failure from
+    /// `address.require_auth()` back to the dynamic caller.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    pub fn check_auth(_env: Env, address: Address) {
         address.require_auth();
     }
 
@@ -1186,31 +1241,9 @@ impl InvoiceContract {
     }
 }
 
-/// Adds an invoice ID to the issuer's index if not already present.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `issuer` - The issuer address.
-/// * `invoice_id` - The invoice ID to add.
-///
-/// # Panics
-/// Does not panic.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
     let count_key = DataKey::IssuerIndexCount(issuer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Check if invoice_id already exists in this issuer index
-    for i in 0..count {
-        let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap();
-        if existing_id == *invoice_id {
-            return; // Already exists, skip duplicate
-        }
-    }
-
     let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), count);
     env.storage().persistent().set(&entry_key, invoice_id);
     env.storage().persistent().set(&count_key, &(count + 1));
@@ -1222,31 +1255,9 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
         .extend_ttl(&count_key, 100, 2_000_000);
 }
 
-/// Adds an invoice ID to the buyer's index if not already present.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `buyer` - The buyer address.
-/// * `invoice_id` - The invoice ID to add.
-///
-/// # Panics
-/// Does not panic.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     let count_key = DataKey::BuyerIndexCount(buyer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Check if invoice_id already exists in this buyer index
-    for i in 0..count {
-        let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap();
-        if existing_id == *invoice_id {
-            return; // Already exists, skip duplicate
-        }
-    }
-
     let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), count);
     env.storage().persistent().set(&entry_key, invoice_id);
     env.storage().persistent().set(&count_key, &(count + 1));
@@ -1258,32 +1269,10 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
         .extend_ttl(&count_key, 100, 2_000_000);
 }
 
-/// Adds an invoice ID to the status index if not already present.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `status` - The invoice status.
-/// * `invoice_id` - The invoice ID to add.
-///
-/// # Panics
-/// Does not panic.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
     let status_u32 = status as u32;
     let count_key = DataKey::StatusIndexCount(status_u32);
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Check if invoice_id already exists in this status index
-    for i in 0..count {
-        let entry_key = DataKey::StatusIndexEntry(status_u32, i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap();
-        if existing_id == *invoice_id {
-            return; // Already exists, skip duplicate
-        }
-    }
-
     let entry_key = DataKey::StatusIndexEntry(status_u32, count);
     env.storage().persistent().set(&entry_key, invoice_id);
     env.storage().persistent().set(&count_key, &(count + 1));
@@ -1295,36 +1284,7 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
         .extend_ttl(&count_key, 100, 2_000_000);
 }
 
-/// Moves an invoice ID from one status index to another, with idempotency for replayed transitions.
-///
-/// This function checks if the invoice is already in the target status index before performing
-/// any operations. If already present, it returns early without modifying counts or indexes,
-/// making replayed transitions a no-op.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `invoice_id` - The invoice ID to move.
-/// * `from` - The source status.
-/// * `to` - The target status.
-///
-/// # Panics
-/// * `InvoiceError::InvalidStatusTransition` if the source status count underflows.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to: InvoiceStatus) {
-    // Check if invoice is already in the target status index (idempotency for replayed transitions)
-    let to_u32 = to as u32;
-    let count_key = DataKey::StatusIndexCount(to_u32);
-    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-    for i in 0..count {
-        let entry_key = DataKey::StatusIndexEntry(to_u32, i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap();
-        if existing_id == *invoice_id {
-            return; // Already in target index, skip all operations
-        }
-    }
-
     decrement_status_count(env, from);
     increment_status_count(env, to);
     extend_status_index(env, to, invoice_id);
