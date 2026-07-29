@@ -631,6 +631,27 @@ fn test_utilization_rate_calculates_correctly() {
     );
 }
 
+// Verify that `get_utilization_rate` panics with `Overflow` (#13) when
+// `total_funded * 10_000` would wrap around, instead of silently returning
+// a nonsense result. This mirrors the same guard already present in `get_stats`.
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_get_utilization_rate_rejects_overflow() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &u128::MAX);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(u128::MAX / 10_000 + 1));
+    });
+
+    let _ = te.pool.get_utilization_rate();
+}
+
 // ============== MAX UTILIZATION TESTS ==============
 
 #[test]

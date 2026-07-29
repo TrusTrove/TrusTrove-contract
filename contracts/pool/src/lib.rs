@@ -809,10 +809,11 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// This function does not panic; returns `0` when `total_deposits` is zero.
+    /// * `Overflow` if scaling `total_funded` into basis points would overflow.
     ///
     /// # Returns
-    /// * `u32` - The utilization rate in basis points (`total_funded * 10_000 / total_deposits`).
+    /// * `u32` - The utilization rate in basis points (`total_funded * 10_000 / total_deposits`),
+    ///   or `0` when `total_deposits` is zero.
     ///
     /// # Example
     /// ```ignore
@@ -820,12 +821,7 @@ impl PoolContract {
     /// ```
     pub fn get_utilization_rate(env: Env) -> u32 {
         let totals = Self::totals(&env);
-        let total_deposits = totals.deposits;
-        let total_funded = totals.funded;
-        if total_deposits == 0 {
-            return 0;
-        }
-        (total_funded * 10000 / total_deposits) as u32
+        Self::utilization_bps_or_panic(&env, totals.funded, totals.deposits)
     }
 
     pub fn set_max_utilization(env: Env, admin: Address, new_cap_bps: u32) -> bool {
