@@ -202,8 +202,11 @@ impl PoolContract {
 
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
-        let invoice_status: u32 =
-            env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_status"), args);
+        let (invoice_status, face_value, discount_bps): (u32, u128, u32) = env.invoke_contract(
+            &invoice_contract,
+            &Symbol::new(&env, "get_funding_terms"),
+            args,
+        );
         if invoice_status != 1 {
             panic_with_error!(&env, PoolError::InvoiceNotListed);
         }
@@ -219,21 +222,6 @@ impl PoolContract {
         if invoice_asset != usdc_id {
             panic_with_error!(&env, PoolError::AssetMismatch);
         }
-
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        let face_value: u128 = env.invoke_contract(
-            &invoice_contract,
-            &Symbol::new(&env, "get_face_value"),
-            args,
-        );
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        let discount_bps: u32 = env.invoke_contract(
-            &invoice_contract,
-            &Symbol::new(&env, "get_discount_bps"),
-            args,
-        );
 
         let funded_amount = face_value * (10000 - discount_bps as u128) / 10000;
 

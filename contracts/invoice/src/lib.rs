@@ -423,6 +423,28 @@ impl InvoiceContract {
         invoice.discount_bps
     }
 
+    /// Returns (status, face_value, discount_bps) in a single cross-contract call.
+    ///
+    /// # Arguments
+    /// - `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// - None.
+    ///
+    /// # Panics
+    /// - If the invoice does not exist (`InvoiceError::NotFound`).
+    ///
+    /// # Returns
+    /// A tuple of `(invoice_status as u32, face_value, discount_bps)`.
+    pub fn get_funding_terms(env: Env, invoice_id: BytesN<32>) -> (u32, u128, u32) {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        (invoice.status as u32, invoice.face_value, invoice.discount_bps)
+    }
+
     pub fn get_funding_asset(env: Env, invoice_id: BytesN<32>) -> Address {
         let invoice: Invoice = env
             .storage()
