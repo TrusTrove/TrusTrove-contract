@@ -8,15 +8,13 @@ use soroban_sdk::{
 mod errors;
 mod events;
 mod test;
+mod ttl;
 mod types;
 
 pub use errors::*;
 pub use types::*;
 
-mod storage {
-    pub const TTL_THRESHOLD: u32 = 100;
-    pub const TTL_EXTEND_TO: u32 = 2_000_000;
-}
+use ttl::{THRESHOLD, EXTEND_TO};
 
 /// Upper bound on `Invoice::face_value`, in USDC stroops.
 ///
@@ -41,11 +39,7 @@ pub struct InvoiceContract;
 impl InvoiceContract {
     fn save_invoice(env: &Env, inv_key: DataKey, invoice: &Invoice) {
         env.storage().persistent().set(&inv_key, invoice);
-        env.storage().persistent().extend_ttl(
-            &inv_key,
-            storage::TTL_THRESHOLD,
-            storage::TTL_EXTEND_TO,
-        );
+        env.storage().persistent().extend_ttl(&inv_key, THRESHOLD, EXTEND_TO);
     }
 
     /// Initializes the invoice contract with admin and registry references.
@@ -1283,7 +1277,7 @@ impl InvoiceContract {
     }
 
     fn extend_instance_ttl(env: &Env) {
-        env.storage().instance().extend_ttl(100, 2_000_000);
+        env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO);
     }
 }
 
@@ -1328,10 +1322,10 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
     env.storage().persistent().set(&count_key, &(count + 1));
     env.storage()
         .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
+        .extend_ttl(&entry_key, THRESHOLD, EXTEND_TO);
     env.storage()
         .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+        .extend_ttl(&count_key, THRESHOLD, EXTEND_TO);
 }
 
 /// Adds an invoice ID to the buyer's index if not already present.
@@ -1364,10 +1358,10 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     env.storage().persistent().set(&count_key, &(count + 1));
     env.storage()
         .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
+        .extend_ttl(&entry_key, THRESHOLD, EXTEND_TO);
     env.storage()
         .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+        .extend_ttl(&count_key, THRESHOLD, EXTEND_TO);
 }
 
 /// Adds an invoice ID to the status index if not already present.
@@ -1401,10 +1395,10 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
     env.storage().persistent().set(&count_key, &(count + 1));
     env.storage()
         .persistent()
-        .extend_ttl(&entry_key, 100, 2_000_000);
+        .extend_ttl(&entry_key, THRESHOLD, EXTEND_TO);
     env.storage()
         .persistent()
-        .extend_ttl(&count_key, 100, 2_000_000);
+        .extend_ttl(&count_key, THRESHOLD, EXTEND_TO);
 }
 
 /// Moves an invoice ID from one status index to another, with idempotency for replayed transitions.

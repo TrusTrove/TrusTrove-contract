@@ -8,6 +8,7 @@ use soroban_sdk::{
     Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
 };
 
+use crate::ttl::{EXTEND_TO, THRESHOLD};
 use crate::{DataKey, PoolContract, PoolContractClient};
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -44,7 +45,7 @@ impl MockRegistry {
             .set(&RegKey(address.clone()), &true);
         env.storage()
             .persistent()
-            .extend_ttl(&RegKey(address), 100, 2_000_000);
+            .extend_ttl(&RegKey(address), THRESHOLD, EXTEND_TO);
     }
 }
 
@@ -1569,14 +1570,14 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
     let start_seq = te.env.ledger().sequence();
     // The instance starts with the network's default minimum entry ttl
     // (4096 ledgers). Move just past that so the remaining ttl drops below
-    // the extend_ttl threshold (100 ledgers), while the entry is still live.
+    // the extend_ttl threshold (500_000 ledgers), while the entry is still live.
     te.env.ledger().set_sequence_number(start_seq + 4000);
 
     let ttl_before = te
         .env
         .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
     assert!(
-        ttl_before < 100,
+        ttl_before < THRESHOLD,
         "test setup should place ttl below the extend threshold, got {ttl_before}"
     );
 
@@ -1591,7 +1592,7 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
          threshold, before={ttl_before} after={ttl_after}"
     );
     assert!(
-        ttl_after >= 1_999_000,
+        ttl_after >= EXTEND_TO - 1_000,
         "instance ttl should be extended close to EXTEND_TO, got {ttl_after}"
     );
 }

@@ -2,6 +2,7 @@
 
 extern crate std;
 
+use crate::ttl::{EXTEND_TO, THRESHOLD};
 use crate::{DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus};
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -178,7 +179,7 @@ fn test_revoke_wrong_auth_panics() {
             .set(&DataKey::Profile(issuer.clone()), &profile);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Profile(issuer.clone()), 100, 2_000_000);
+            .extend_ttl(&DataKey::Profile(issuer.clone()), THRESHOLD, EXTEND_TO);
     });
 
     assert!(client.is_verified(&issuer));
@@ -291,7 +292,7 @@ fn test_reinstate_wrong_auth_panics() {
             .set(&DataKey::Profile(issuer.clone()), &profile);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Profile(issuer.clone()), 100, 2_000_000);
+            .extend_ttl(&DataKey::Profile(issuer.clone()), THRESHOLD, EXTEND_TO);
     });
 
     // The issuer is not the admin and env.mock_all_auths() was not called,
@@ -378,7 +379,7 @@ fn test_update_metadata_wrong_auth_panics() {
             .set(&DataKey::Profile(issuer.clone()), &profile);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Profile(issuer.clone()), 100, 2_000_000);
+            .extend_ttl(&DataKey::Profile(issuer.clone()), THRESHOLD, EXTEND_TO);
     });
 
     let updated_metadata = map![
@@ -477,7 +478,7 @@ fn test_update_profile_wrong_auth_panics() {
             .set(&DataKey::Profile(issuer.clone()), &profile);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey::Profile(issuer.clone()), 100, 2_000_000);
+            .extend_ttl(&DataKey::Profile(issuer.clone()), THRESHOLD, EXTEND_TO);
     });
 
     let updated_metadata = map![

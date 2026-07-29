@@ -5,7 +5,10 @@ use soroban_sdk::{contract, contractimpl, panic_with_error, Address, Env, Map, S
 mod errors;
 mod events;
 mod test;
+mod ttl;
 mod types;
+
+use ttl::{EXTEND_TO, THRESHOLD};
 
 pub use errors::*;
 pub use types::*;
@@ -99,7 +102,7 @@ impl RegistryContract {
         );
         let key = DataKey::Profile(address.clone());
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::issuer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -142,7 +145,7 @@ impl RegistryContract {
             );
 
             env.storage().persistent().set(&key, &profile);
-            env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+            env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
             events::issuer_registered(&env, &address);
             registered += 1;
         }
@@ -204,7 +207,7 @@ impl RegistryContract {
         );
         let key = DataKey::Profile(address.clone());
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::buyer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -248,7 +251,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotRegistered));
         profile.metadata = metadata;
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::profile_updated(&env, &address);
         true
     }
@@ -283,7 +286,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         profile.metadata = metadata;
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::metadata_updated(&env, &address);
         true
     }
@@ -413,7 +416,7 @@ impl RegistryContract {
         }
         profile.set_verified(false);
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::address_revoked(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -462,7 +465,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         profile.set_verified(true);
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::address_reinstated(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -483,7 +486,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         profile.set_verified(verify);
         env.storage().persistent().set(&key, &profile);
-        env.storage().persistent().extend_ttl(&key, 100, 2_000_000);
+        env.storage().persistent().extend_ttl(&key, THRESHOLD, EXTEND_TO);
         events::profile_verified(&env, &address, verify);
         Self::extend_instance_ttl(&env);
         true
@@ -560,7 +563,7 @@ impl RegistryContract {
     }
 
     fn extend_instance_ttl(env: &Env) {
-        env.storage().instance().extend_ttl(100, 2_000_000);
+        env.storage().instance().extend_ttl(THRESHOLD, EXTEND_TO);
     }
 
     fn validate_metadata(env: &Env, metadata: &Map<String, String>) {

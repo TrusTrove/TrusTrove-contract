@@ -8,6 +8,7 @@ use soroban_sdk::{
     Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
 };
 
+use crate::ttl::{EXTEND_TO, THRESHOLD};
 use crate::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
 
 #[contract]
@@ -28,7 +29,7 @@ impl MockRegistry {
             .set(&DataKey(address.clone()), &true);
         env.storage()
             .persistent()
-            .extend_ttl(&DataKey(address), 100, 2_000_000);
+            .extend_ttl(&DataKey(address), THRESHOLD, EXTEND_TO);
     }
 }
 
