@@ -1309,7 +1309,7 @@ fn test_get_profile_extends_ttl() {
     let key = DataKey::Profile(issuer.clone());
 
     // Record the initial remaining TTL, then advance the ledger so the
-    // remaining TTL drops below the write-path threshold (100 ledgers).
+    // remaining TTL drops below the write-path threshold (THRESHOLD ledgers).
     let ttl_before_drain: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
     // Advance to leave ~50 ledgers remaining.
@@ -1319,7 +1319,7 @@ fn test_get_profile_extends_ttl() {
     let ttl_before_read: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
     assert!(
-        ttl_before_read < 100,
+        ttl_before_read < THRESHOLD,
         "TTL should be below threshold before read, got {ttl_before_read}"
     );
 
@@ -1351,7 +1351,7 @@ fn test_is_verified_extends_ttl() {
     let contract_id = client.address.clone();
     let key = DataKey::Profile(issuer.clone());
 
-    // Drain TTL below the threshold (100).
+    // Drain TTL below the threshold (THRESHOLD).
     let ttl_before_drain: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
     env.ledger()
@@ -1360,7 +1360,7 @@ fn test_is_verified_extends_ttl() {
     let ttl_before_read: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
     assert!(
-        ttl_before_read < 100,
+        ttl_before_read < THRESHOLD,
         "TTL should be below threshold before read, got {ttl_before_read}"
     );
 
@@ -1405,7 +1405,7 @@ fn test_get_admin_extends_instance_ttl() {
 
     let contract_id = client.address.clone();
 
-    // Drain instance TTL below the threshold (100).
+    // Drain instance TTL below the threshold (THRESHOLD).
     let ttl_before_drain: u32 =
         env.as_contract(&contract_id, || env.storage().instance().get_ttl());
     env.ledger()
@@ -1413,7 +1413,7 @@ fn test_get_admin_extends_instance_ttl() {
 
     let ttl_before_read: u32 = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
     assert!(
-        ttl_before_read < 100,
+        ttl_before_read < THRESHOLD,
         "Instance TTL should be below threshold before read, got {ttl_before_read}"
     );
 
