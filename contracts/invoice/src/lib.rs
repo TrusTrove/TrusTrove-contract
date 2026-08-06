@@ -1197,7 +1197,11 @@ impl InvoiceContract {
             .persistent()
             .get(&DataKey::Invoice(invoice_id))
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        (invoice.status as u32, invoice.face_value, invoice.discount_bps)
+        (
+            invoice.status as u32,
+            invoice.face_value,
+            invoice.discount_bps,
+        )
     }
 
     /// Returns the funding asset for an invoice.
