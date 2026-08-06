@@ -1,18 +1,30 @@
 [package]
 name = "trusttrove-pool"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+trusttrove-ttl = { path = "../ttl" }
 
+# Cross-contract deps (`trusttrove-invoice`, `trusttrove-escrow`) are
+# intentionally `dev-dependencies`: the pool only references the invoice and
+# escrow contracts by `Address` via `env.invoke_contract(...)` and never imports
+# their types in production code. The crates are pulled in solely to wire the
+# real `InvoiceContract` / `EscrowContract` clients into the cross-contract test
+# suite (see `src/test.rs`). Production builds (`cargo build --release`) must
+# not pull them in to keep the WASM binary as small as possible.
+# Refs: issue #309.
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-trusttrove-invoice = { path = "../invoice" }
-trusttrove-escrow = { path = "../escrow" }
+trusttrove-invoice = { workspace = true }
+trusttrove-escrow = { workspace = true }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

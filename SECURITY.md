@@ -56,14 +56,20 @@ Include in your report:
 TrusTrove follows coordinated disclosure. We ask that you give us reasonable
 time to assess and address a vulnerability before public disclosure.
 
-We will credit researchers who report valid vulnerabilities in our changelog
-unless they prefer to remain anonymous.
+We will credit researchers who report valid vulnerabilities in our
+[CHANGELOG.md](./CHANGELOG.md) unless they prefer to remain anonymous.
 
 ## Audit Status
 
 TrusTrove smart contracts have not been formally audited.
 Users interact with testnet contracts at their own risk.
 A security audit is planned prior to any mainnet deployment.
+
+## Further Reading
+
+- [Threat Model](./docs/THREAT_MODEL.md) — detailed trust assumptions, auth gates, and attack vectors
+- [Storage Schema](./docs/STORAGE.md) — on-chain data layout and TTL management
+- [Limitations](./docs/LIMITATIONS.md) — known gaps, testnet constraints, and unhandled edge cases
 
 ## Important Notice
 
