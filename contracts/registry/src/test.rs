@@ -197,6 +197,33 @@ fn test_revoke_wrong_auth_panics() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_verify_profile_wrong_auth_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, RegistryContract);
+    let client = RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    let issuer = Address::generate(&env);
+    let metadata = map![&env];
+    let profile = Profile::new(Role::Issuer, false, env.ledger().timestamp(), metadata);
+
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Profile(issuer.clone()), &profile);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Profile(issuer.clone()),
+            TTL_THRESHOLD,
+            TTL_EXTEND_TO,
+        );
+    });
+
+    client.verify_profile(&issuer, &true);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_re_register_revoked_issuer_panics() {
     let (env, client) = setup();
