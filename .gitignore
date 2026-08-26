@@ -35,3 +35,6 @@ deployments.json
 # Test snapshots (auto-generated)
 test_snapshots/
 contracts/*/test_snapshots/
+
+# Personal local-agent runner state (not repo configuration)
+.gemini/

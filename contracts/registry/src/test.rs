@@ -817,7 +817,7 @@ fn test_verify_profile_updates_status() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Contract, #3)")]
 fn test_verify_profile_unknown_panics() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
@@ -950,7 +950,7 @@ fn test_transfer_admin_changes_admin() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_transfer_admin_by_non_admin_panics() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
@@ -1006,7 +1006,7 @@ fn test_registry_transfer_ownership_changes_admin() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_registry_transfer_ownership_requires_both_auths() {
     let (env, client) = setup();
     let admin = Address::generate(&env);

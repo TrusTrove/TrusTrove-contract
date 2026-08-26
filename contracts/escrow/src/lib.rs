@@ -25,6 +25,8 @@ impl EscrowContract {
     /// * `env` - The Soroban environment.
     /// * `admin` - The admin address for this contract.
     /// * `pool_contract` - The pool contract address.
+    /// * `invoice_contract` - The invoice contract address authorized to call
+    ///   `release_to_pool`.
     /// * `usdc_asset` - The USDC asset address.
     ///
     /// # Auth
@@ -38,9 +40,15 @@ impl EscrowContract {
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin, &pool, &usdc);
+    /// client.initialize(&admin, &pool, &invoice, &usdc);
     /// ```
-    pub fn initialize(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        pool_contract: Address,
+        invoice_contract: Address,
+        usdc_asset: Address,
+    ) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, EscrowError::AlreadyInitialized);
         }
@@ -49,6 +57,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &invoice_contract);
         env.storage()
             .instance()
             .set(&DataKey::UsdcAsset, &usdc_asset);
@@ -206,9 +217,9 @@ impl EscrowContract {
     ///   originally locked amount when the buyer repays the full face value including yield).
     ///
     /// # Auth
-    /// No caller authorization is required. The pool address is read directly
-    /// from instance storage; `lock()` and `release_to_issuer()` retain stricter
-    /// pool/admin auth requirements.
+    /// Requires authorization from the configured invoice contract (via
+    /// `invoice_contract.require_auth()`), so only `invoice.repay()` /
+    /// `invoice.repay_early()` can trigger this release.
     ///
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
@@ -224,8 +235,15 @@ impl EscrowContract {
     /// ```
     pub fn release_to_pool(env: Env, invoice_id: BytesN<32>, repayment_amount: u128) -> bool {
         // This function is called by the invoice contract during buyer repay flows
-        // (buyer → invoice → escrow → pool). Pool authorization is intentionally
-        // not required here; lock() and release_to_issuer() retain stricter auth.
+        // (buyer → invoice → escrow → pool). Only the configured invoice contract
+        // may trigger it.
+        let invoice_contract: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::InvoiceContract)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        invoice_contract.require_auth();
+
         let pool: Address = env
             .storage()
             .instance()
@@ -277,6 +295,23 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized and a lock record exists for the invoice.
     /// * `NotAuthorized` if `caller` is neither the admin nor the pool contract.
     /// * `NotAuthorized` if the record has not been locked long enough to satisfy the grace period.
+    ///
+    /// # Coupling with `invoice.trigger_default`
+    /// This grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from
+    /// [`EscrowRecord::locked_at`]) is independent of, and not known to,
+    /// `invoice.trigger_default`'s own due-date gate (`now >= due_date`).
+    /// `invoice.trigger_default` sets the invoice to `Defaulted` and then calls
+    /// this function transitively via `pool.handle_default`; if an invoice's
+    /// `due_date` is reached less than `DEFAULT_MIN_LOCK_SECONDS` after it was
+    /// funded (i.e. after `locked_at`), this call panics with `NotAuthorized`
+    /// and the whole transaction (including the invoice's status change)
+    /// reverts. There is currently no mechanism for `invoice` to read or
+    /// respect this window ahead of time; callers of very-short-duration
+    /// invoices should expect `trigger_default` to revert until `locked_at +
+    /// DEFAULT_MIN_LOCK_SECONDS` has elapsed. See
+    /// `contracts/invoice/src/test.rs`'s
+    /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed` for
+    /// a pinned repro of this behavior.
     ///
     /// # Returns
     /// * `bool` - `true` if default handling completed, `false` if no lock exists.

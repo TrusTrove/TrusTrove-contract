@@ -80,7 +80,7 @@ fn setup() -> (
     let contract_id = env.register_contract(None, EscrowContract);
     let client = EscrowContractClient::new(&env, &contract_id);
 
-    client.initialize(&admin, &pool, &usdc_id);
+    client.initialize(&admin, &pool, &invoice_contract, &usdc_id);
 
     (
         env,
@@ -170,10 +170,11 @@ fn test_initialize() {
     env.mock_all_auths();
     let admin = Address::generate(&env);
     let pool = Address::generate(&env);
+    let invoice_contract = Address::generate(&env);
     let usdc = env.register_contract(None, MockToken);
     let contract_id = env.register_contract(None, EscrowContract);
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &pool, &usdc);
+    client.initialize(&admin, &pool, &invoice_contract, &usdc);
 
     assert_eq!(client.get_locked(&generate_invoice_id(&env, 1)), 0);
 }
@@ -185,18 +186,20 @@ fn test_initialize_twice_panics() {
     env.mock_all_auths();
     let admin = Address::generate(&env);
     let pool = Address::generate(&env);
+    let invoice_contract = Address::generate(&env);
     let usdc = env.register_contract(None, MockToken);
     let contract_id = env.register_contract(None, EscrowContract);
     let client = EscrowContractClient::new(&env, &contract_id);
 
     // First initialize succeeds
-    client.initialize(&admin, &pool, &usdc);
+    client.initialize(&admin, &pool, &invoice_contract, &usdc);
 
     // Second initialize must panic with AlreadyInitialized (Error #1)
     let admin2 = Address::generate(&env);
     let pool2 = Address::generate(&env);
+    let invoice_contract2 = Address::generate(&env);
     let usdc2 = env.register_contract(None, MockToken);
-    client.initialize(&admin2, &pool2, &usdc2);
+    client.initialize(&admin2, &pool2, &invoice_contract2, &usdc2);
 }
 
 // ============================================================================
@@ -383,6 +386,37 @@ fn test_release_to_pool_transfers_correct_amount() {
     );
 }
 
+#[test]
+fn test_release_to_pool_requires_invoice_contract_auth() {
+    let (env, client, _admin, _pool, invoice_contract, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+    client.release_to_pool(&invoice_id, &amount);
+
+    let auths = env.auths();
+    assert!(auths.iter().any(|(addr, _)| *addr == invoice_contract));
+}
+
+#[test]
+#[should_panic]
+fn test_release_to_pool_rejects_non_invoice_contract_caller() {
+    let (env, client, _admin, _pool, _invoice_contract, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+
+    // Without mocked auths, an arbitrary caller (nothing authorizes the
+    // configured invoice contract) must be rejected before any funds move
+    // or the lock record is touched — proving the previously-possible
+    // escrow/pool/invoice desync can no longer be triggered by anyone
+    // other than the configured invoice contract.
+    env.set_auths(&[]);
+    client.release_to_pool(&invoice_id, &amount);
+}
+
 // ============================================================================
 // Handle Default Tests
 // ============================================================================
@@ -423,15 +457,43 @@ fn test_release_to_pool_unknown_invoice_id_panics() {
 
 #[test]
 fn test_handle_default_returns_funds_to_pool() {
-    let (env, client, _admin, pool, _invoice_contract, _usdc_id, _contract_id) = setup();
+    let (env, client, _admin, pool, _invoice_contract, usdc_id, contract_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
     let amount: u128 = 1_000_000_000;
 
+    let pool_balance_before = get_balance(&env, &usdc_id, &pool);
+    let contract_balance_before = get_balance(&env, &usdc_id, &contract_id);
+
     client.lock(&invoice_id, &amount);
+
+    let pool_balance_after_lock = get_balance(&env, &usdc_id, &pool);
+    let contract_balance_after_lock = get_balance(&env, &usdc_id, &contract_id);
+    assert_eq!(
+        pool_balance_after_lock,
+        pool_balance_before - (amount as i128)
+    );
+    assert_eq!(
+        contract_balance_after_lock,
+        contract_balance_before + (amount as i128)
+    );
+
     env.ledger().set_timestamp(env.ledger().timestamp() + 60);
     // Pool is the normal operational caller for default resolution
     let result = client.handle_default(&invoice_id, &pool);
     assert!(result);
+
+    // Verify funds were actually transferred back to the pool, not just that
+    // the storage record was cleared.
+    let pool_balance_after_default = get_balance(&env, &usdc_id, &pool);
+    let contract_balance_after_default = get_balance(&env, &usdc_id, &contract_id);
+    assert_eq!(
+        pool_balance_after_default,
+        pool_balance_after_lock + (amount as i128)
+    );
+    assert_eq!(
+        contract_balance_after_default,
+        contract_balance_after_lock - (amount as i128)
+    );
 
     // Verify record was removed
     let locked = client.get_locked(&invoice_id);

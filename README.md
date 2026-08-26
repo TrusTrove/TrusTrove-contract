@@ -52,12 +52,14 @@ Join the contributor community: **[t.me/trusttrove](https://t.me/trusttrove)**
 
 ### Maintainer Tooling
 
-Seed-issue generator scripts live in [`scripts/maintainer/`](./scripts/maintainer/):
+Seed-issue generator scripts live in [`scripts/maintainer/`](./scripts/maintainer/), which is the **only supported location** for this tooling:
 
 - `create_issues.py` — generate issues from a template
 - `create-contract-issues.sh` / `create-contract-issues.ps1` — shell/PowerShell helpers
 
 Run any script from the repo root, e.g. `bash scripts/maintainer/create-contract-issues.sh`.
+
+> Any `create_issues.*` files found at the repo root are stale duplicates left over from before this tooling was consolidated under `scripts/maintainer/`. Do not use them — they lack the rate-limit/dedup guards the `scripts/maintainer/` versions have.
 
 ---
 

@@ -1101,6 +1101,21 @@ impl InvoiceContract {
     /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
     ///   has not yet been reached.
     ///
+    /// # Coupling with escrow's minimum lock window
+    /// This function's due-date gate (`now >= due_date`) is independent of,
+    /// and has no awareness of, the escrow contract's own
+    /// `DEFAULT_MIN_LOCK_SECONDS` grace period (60s from the escrow lock
+    /// timestamp, roughly `funded_at`). If `due_date` is reached less than
+    /// that window after the invoice was funded, this call sets the invoice's
+    /// local status to `Defaulted` and then transitively invokes
+    /// `escrow.handle_default()` (via `pool.handle_default`), which panics
+    /// with `EscrowError::NotAuthorized`. The whole transaction reverts, so
+    /// there is no persistent state inconsistency, but the caller sees a
+    /// revert originating from a constraint this contract does not itself
+    /// enforce or expose. See
+    /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed`
+    /// for a pinned repro.
+    ///
     /// # Returns
     /// * `bool` - `true` when default processing succeeds.
     ///

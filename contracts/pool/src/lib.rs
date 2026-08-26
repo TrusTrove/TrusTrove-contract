@@ -70,7 +70,7 @@ impl PoolContract {
     ///
     /// # Example
     /// ```ignore
-    /// escrow_client.initialize(&admin, &pool, &usdc); // escrow first
+    /// escrow_client.initialize(&admin, &pool, &invoice, &usdc); // escrow first
     /// client.initialize(&admin, &invoice, &escrow, &usdc, &registry);
     /// ```
     pub fn initialize(

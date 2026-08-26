@@ -97,6 +97,28 @@ because each contract references others:
 The registry must be deployed first because all other contracts
 call `is_verified()` on it during initialization.
 
+## Agent Registry Wiring
+
+`AGENT_REGISTRY_CONTRACT` in `.env.example` refers to the agent-registry
+contract from the separate `underwrite-contract` repo. Wiring it in is a
+manual, optional step and is **not** performed by `deploy.sh` or
+`deploy.ps1`:
+
+1. Deploy the agent-registry contract from the `underwrite-contract` repo.
+2. Set `AGENT_REGISTRY_CONTRACT` in your `.env` to its address.
+3. Call `invoice.set_agent_registry_contract` with that address:
+
+   ```bash
+   stellar contract invoke \
+     --id "$INVOICE_CONTRACT_ID" \
+     --source "$DEPLOYER_ACCOUNT" \
+     --network "$STELLAR_NETWORK" \
+     -- set_agent_registry_contract --contract "$AGENT_REGISTRY_CONTRACT"
+   ```
+
+This step is only required if agent-attested invoice submission is used;
+skip it otherwise.
+
 ## Mainnet Deployment
 
 Mainnet deployment is not yet supported. Before mainnet:
