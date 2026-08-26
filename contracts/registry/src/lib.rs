@@ -120,12 +120,7 @@ impl RegistryContract {
             panic_with_error!(&env, RegistryError::BatchSizeExceeded);
         }
 
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        admin.require_auth();
+        let admin = Self::require_admin_auth(&env);
 
         let mut skipped: Vec<Address> = Vec::new(&env);
         let mut registered: u32 = 0;
@@ -410,12 +405,7 @@ impl RegistryContract {
     /// let result = client.revoke(&issuer);
     /// ```
     pub fn revoke(env: Env, address: Address) -> bool {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        admin.require_auth();
+        let admin = Self::require_admin_auth(&env);
         let key = DataKey::Profile(address.clone());
         let mut profile: Profile = env
             .storage()
@@ -465,12 +455,7 @@ impl RegistryContract {
     /// let ok = client.reinstate(&issuer);
     /// ```
     pub fn reinstate(env: Env, address: Address) -> bool {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        admin.require_auth();
+        let admin = Self::require_admin_auth(&env);
         let key = DataKey::Profile(address.clone());
         let mut profile: Profile = env
             .storage()
@@ -489,12 +474,7 @@ impl RegistryContract {
     }
 
     pub fn verify_profile(env: Env, address: Address, verify: bool) -> bool {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        admin.require_auth();
+        let admin = Self::require_admin_auth(&env);
         let key = DataKey::Profile(address.clone());
         let mut profile: Profile = env
             .storage()
@@ -533,12 +513,7 @@ impl RegistryContract {
         // ```ignore
         // client.transfer_ownership(&new_admin);
         // ```
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        admin.require_auth();
+        let admin = Self::require_admin_auth(&env);
         new_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         events::ownership_transferred(&env, &admin, &new_admin);
@@ -573,12 +548,7 @@ impl RegistryContract {
     /// client.transfer_admin(&new_admin);
     /// ```
     pub fn transfer_admin(env: Env, new_admin: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        admin.require_auth();
+        let admin = Self::require_admin_auth(&env);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         events::admin_transferred(&env, &admin, &new_admin);
         Self::extend_instance_ttl(&env);
@@ -621,6 +591,16 @@ impl RegistryContract {
 }
 
 impl RegistryContract {
+    fn require_admin_auth(env: &Env) -> Address {
+        let admin = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(env, RegistryError::NotFound));
+        admin.require_auth();
+        admin
+    }
+
     fn require_initialized(env: &Env) {
         if !env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(env, RegistryError::NotInitialized);
