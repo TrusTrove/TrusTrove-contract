@@ -10,4 +10,5 @@ pub enum RegistryError {
     BatchSizeExceeded = 5,
     InvalidMetadata = 6,
     NotRegistered = 7,
+    NotRevoked = 8,
 }

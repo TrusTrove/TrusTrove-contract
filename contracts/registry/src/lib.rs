@@ -376,7 +376,8 @@ impl RegistryContract {
     ///
     /// Reads the profile entry from persistent storage, extends its TTL using
     /// the same threshold and target duration as the write path, and returns
-    /// the stored value.
+    /// a decoded view of the profile with `role`, `verified`, and `revoked`
+    /// fields instead of the raw `packed_flags` bit representation.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -389,13 +390,13 @@ impl RegistryContract {
     /// * `RegistryError::NotFound` if no profile is stored for `address`.
     ///
     /// # Returns
-    /// * `Profile` - The stored profile for the address.
+    /// * `ProfileView` - The decoded profile view for the address.
     ///
     /// # Example
     /// ```ignore
     /// let profile = client.get_profile(&issuer);
     /// ```
-    pub fn get_profile(env: Env, address: Address) -> Profile {
+    pub fn get_profile(env: Env, address: Address) -> ProfileView {
         let key = DataKey::Profile(address.clone());
         let profile = env
             .storage()
@@ -405,7 +406,7 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        profile
+        ProfileView::from_profile(&profile)
     }
 
     /// Checks whether a registered profile is verified.
@@ -531,6 +532,7 @@ impl RegistryContract {
     /// * `RegistryError::NotFound` if the contract admin is not set (contract
     ///   was never initialized).
     /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    /// * `RegistryError::NotRevoked` if the profile has not been revoked.
     ///
     /// # Returns
     /// * `bool` - `true` when the profile is successfully reinstated.
@@ -552,6 +554,9 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        if !profile.revoked() {
+            panic_with_error!(&env, RegistryError::NotRevoked);
+        }
         profile.set_verified(true);
         profile.set_revoked(false);
         env.storage().persistent().set(&key, &profile);

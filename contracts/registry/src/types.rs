@@ -79,6 +79,32 @@ impl Profile {
 }
 
 #[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProfileView {
+    pub role: Role,
+    pub verified: bool,
+    pub revoked: bool,
+    pub registered_at: u64,
+    pub metadata: Map<String, String>,
+}
+
+impl ProfileView {
+    pub fn from_profile(profile: &Profile) -> Self {
+        ProfileView {
+            role: profile.role(),
+            verified: profile.verified(),
+            revoked: profile.revoked(),
+            registered_at: profile.registered_at,
+            metadata: profile.metadata.clone(),
+        }
+    }
+
+    pub fn role(&self) -> Role {
+        self.role.clone()
+    }
+}
+
+#[contracttype]
 pub enum DataKey {
     Admin,
     Profile(Address),
