@@ -387,7 +387,6 @@ fn test_release_to_pool_transfers_correct_amount() {
 }
 
 #[test]
-#[test]
 fn test_release_to_pool_over_repayment_succeeds() {
     let (env, client, _admin, pool, _invoice_contract, usdc_id, contract_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
@@ -427,13 +426,7 @@ fn test_release_to_pool_over_repayment_succeeds() {
 
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
-    assert_last_event_three(
-        &env,
-        "released_to_pool",
-        invoice_id,
-        pool,
-        repayment,
-    );
+    assert_last_event_three(&env, "released_to_pool", invoice_id, pool, repayment);
 }
 
 #[test]
