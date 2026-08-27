@@ -1184,6 +1184,7 @@ impl InvoiceContract {
     ///   returns `false`.
     ///
     /// # Returns
+    /// * `bool` - `true` when early repayment is completed.
     ///
     /// A boolean indicating whether the early repayment was successful.
     pub fn repay_early(env: Env, invoice_id: BytesN<32>) -> bool {
