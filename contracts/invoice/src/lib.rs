@@ -960,7 +960,7 @@ impl InvoiceContract {
     /// # Panics
     /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the invoice has no
     ///   recorded funding pool or funding timestamp.
-    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Confirmed`.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Funded`, `Active`, or `Confirmed`.
     ///
     /// # Returns
     /// * `bool` - `true` when repayment is completed.
@@ -970,26 +970,6 @@ impl InvoiceContract {
     /// client.repay(&invoice_id);
     /// ```
     pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
-        // Repays an invoice from Funded, Active, or Confirmed state,
-        // transferring the face value to the pool.
-        //
-        // # Arguments
-        // * `env` - The Soroban environment.
-        // * `invoice_id` - The invoice being repaid.
-        //
-        // # Returns
-        // * `bool` - `true` when repayment is completed.
-        //
-        // # Auth
-        // * `buyer` - The buyer must authorize the repayment.
-        //
-        // # Panics
-        // * `NotFound` if the invoice cannot be found.
-        // * `InvalidStatusTransition` if invoice status is not `Funded`, `Active`, or `Confirmed`.
-        //
-        // # Example
-        // ```ignore
-        // client.repay(&invoice_id);
         // ```
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
@@ -1194,24 +1174,6 @@ impl InvoiceContract {
     /// ```ignore
     /// client.trigger_default(&invoice_id);
     /// ```
-    /// Triggers default on a past-due invoice.
-    ///
-    /// Default is permitted once `now >= due_date` — the due date has been
-    /// reached or passed. This is consistent with the `create` check that
-    /// rejects `due_date <= now` (due dates must be in the future).
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `invoice_id` - The invoice to default.
-    ///
-    /// # Auth
-    /// Requires authorization from the stored admin address.
-    ///
-    /// # Panics
-    /// * `InvoiceError::NotFound` if the admin, invoice, or funding pool cannot be found.
-    /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
-    ///   has not yet been reached.
     ///
     /// # Coupling with escrow's minimum lock window
     /// This function's due-date gate (`now >= due_date`) is independent of,
@@ -1228,13 +1190,6 @@ impl InvoiceContract {
     /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed`
     /// for a pinned repro.
     ///
-    /// # Returns
-    /// * `bool` - `true` when default processing succeeds.
-    ///
-    /// # Example
-    /// ```ignore
-    /// client.trigger_default(&invoice_id);
-    /// ```
     pub fn trigger_default(env: Env, invoice_id: BytesN<32>) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let mut invoice: Invoice = env
