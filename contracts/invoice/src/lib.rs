@@ -84,6 +84,50 @@ impl InvoiceContract {
         events::contract_initialized(&env, &admin, &registry_contract);
     }
 
+    /// Returns the stored admin address, or `None` if not initialized.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<Address>` - The stored admin address if initialized, or `None`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let admin = client.get_admin();
+    /// ```
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Returns the stored registry contract address, or `None` if not initialized.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<Address>` - The registry contract address if initialized, or `None`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let registry = client.get_registry_contract();
+    /// ```
+    pub fn get_registry_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::RegistryContract)
+    }
+
     /// Sets the pool contract address used by this invoice contract.
     ///
     /// # Arguments
@@ -119,6 +163,28 @@ impl InvoiceContract {
         } else {
             events::pool_contract_updated(&env, &pool_contract, &pool_contract);
         }
+    }
+
+    /// Returns the stored pool contract address, or `None` if not configured.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<Address>` - The pool contract address if configured, or `None`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let pool = client.get_pool_contract();
+    /// ```
+    pub fn get_pool_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::PoolContract)
     }
 
     /// Sets the agent-registry contract address used by `submit_attestation`
@@ -170,6 +236,30 @@ impl InvoiceContract {
         }
     }
 
+    /// Returns the stored agent-registry contract address, or `None` if not configured.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<Address>` - The agent-registry contract address if configured, or `None`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let agent_registry = client.get_agent_registry_contract();
+    /// ```
+    pub fn get_agent_registry_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::AgentRegistryContract)
+    }
+
     /// Sets the escrow contract address used by this invoice contract.
     ///
     /// The escrow address is required so that `repay` and `repay_early` can
@@ -198,6 +288,28 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::EscrowContract, &escrow_contract);
+    }
+
+    /// Returns the stored escrow contract address, or `None` if not configured.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<Address>` - The escrow contract address if configured, or `None`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let escrow = client.get_escrow_contract();
+    /// ```
+    pub fn get_escrow_contract(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::EscrowContract)
     }
 
     pub fn add_supported_asset(env: Env, asset: Address) {
@@ -1657,6 +1769,25 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id).buyer
     }
 
+    /// Transfers admin ownership to a new address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `new_admin` - The address of the new admin.
+    ///
+    /// # Auth
+    /// Requires authorization from both the current admin and the new admin.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the contract is not initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.transfer_ownership(&new_admin);
+    /// ```
     pub fn transfer_ownership(env: Env, new_admin: Address) {
         let admin: Address = env
             .storage()
