@@ -200,6 +200,26 @@ impl InvoiceContract {
             .set(&DataKey::EscrowContract, &escrow_contract);
     }
 
+    /// Adds an asset to the allow-list of funding assets that `create`
+    /// accepts. Adding an already-supported asset is a no-op.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `asset` - The token contract address to allow-list.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.add_supported_asset(&usdc);
+    /// ```
     pub fn add_supported_asset(env: Env, asset: Address) {
         let admin: Address = env
             .storage()
@@ -224,6 +244,29 @@ impl InvoiceContract {
         env.storage().persistent().set(&key, &true);
     }
 
+    /// Removes an asset from the allow-list of funding assets.
+    ///
+    /// Removing an asset that is not currently supported is a no-op. Once
+    /// removed, new invoices can no longer be created with it, though any
+    /// already-funded invoices using it continue unaffected.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `asset` - The token contract address to remove from the allow-list.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.remove_supported_asset(&usdc);
+    /// ```
     pub fn remove_supported_asset(env: Env, asset: Address) {
         let admin: Address = env
             .storage()
@@ -248,12 +291,50 @@ impl InvoiceContract {
         env.storage().persistent().remove(&key);
     }
 
+    /// Checks whether an asset is currently on the funding allow-list.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `asset` - The token contract address to check.
+    ///
+    /// # Auth
+    /// None — this is a public read.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if the asset is allow-listed, `false` otherwise.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let supported = client.is_supported_asset(&usdc);
+    /// ```
     pub fn is_supported_asset(env: Env, asset: Address) -> bool {
         env.storage()
             .persistent()
             .has(&DataKey::SupportedAsset(asset))
     }
 
+    /// Returns the number of assets currently on the funding allow-list.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// None — this is a public read.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The count of supported assets. `0` if none have ever been
+    ///   added.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_supported_asset_count();
+    /// ```
     pub fn get_supported_asset_count(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -651,10 +732,17 @@ impl InvoiceContract {
     /// Requires authorization from `pool_address`.
     ///
     /// # Panics
-    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the
+    ///   pool contract has not been configured via `set_pool_contract`.
+    /// * `InvoiceError::NotAuthorized` if `pool_address` does not match the
+    ///   pool contract configured via `set_pool_contract`. The configured
+    ///   pool is the only address allowed to fund — without this check any
+    ///   address that can self-authorize could hijack an invoice's
+    ///   `funding_pool` (issue #553).
     /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Listed`.
     /// * `InvoiceError::UnsupportedAsset` if the asset does not match the invoice funding asset.
-    /// * `InvoiceError::InvalidAmount` if `funded_amount` is zero.
+    /// * `InvoiceError::InvalidAmount` if `funded_amount` is zero or exceeds
+    ///   the invoice's `face_value` (issue #554).
     ///
     /// # Returns
     /// * `bool` - `true` when funding is recorded.
@@ -670,6 +758,14 @@ impl InvoiceContract {
         asset_address: Address,
         funded_amount: u128,
     ) -> bool {
+        let configured_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        if pool_address != configured_pool {
+            panic_with_error!(&env, InvoiceError::NotAuthorized);
+        }
         pool_address.require_auth();
 
         if funded_amount == 0 {
@@ -687,6 +783,9 @@ impl InvoiceContract {
         }
         if asset_address != invoice.funding_asset {
             panic_with_error!(&env, InvoiceError::UnsupportedAsset);
+        }
+        if funded_amount > invoice.face_value {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
 
         invoice.status = InvoiceStatus::Funded;
@@ -961,6 +1060,38 @@ impl InvoiceContract {
         true
     }
 
+    /// Repays a confirmed invoice before its due date, returning the
+    /// pro-rated discount to the buyer.
+    ///
+    /// Early repayment settles the invoice in full (via escrow → pool, the
+    /// same fund route as [`Self::repay`]) before maturity. Instead of the
+    /// buyer owning the full unbilled discount, the pool only earns the
+    /// discount for the portion of the term that has already elapsed; the
+    /// remaining discount is refunded back to the buyer. This function must
+    /// be called before `due_date` — once the invoice is due, use
+    /// [`Self::repay`] instead.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being repaid early.
+    ///
+    /// # Auth
+    /// Requires authorization from the invoice's buyer.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the
+    ///   invoice has no recorded funding pool or funding timestamp.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not
+    ///   `Confirmed`, or if `now >= due_date` (an early repayment must happen
+    ///   strictly before the due date).
+    ///
+    /// # Returns
+    /// * `bool` - `true` when early repayment is completed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.repay_early(&invoice_id);
+    /// ```
     pub fn repay_early(env: Env, invoice_id: BytesN<32>) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
