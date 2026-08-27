@@ -1004,7 +1004,10 @@ impl InvoiceContract {
         let earned_by_pool = if term == 0 {
             discount
         } else {
-            discount.checked_mul(elapsed as u128).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow)) / (term as u128)
+            discount
+                .checked_mul(elapsed as u128)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
+                / (term as u128)
         };
         let refund_to_buyer = discount.saturating_sub(earned_by_pool);
 
