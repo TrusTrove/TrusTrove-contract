@@ -1091,7 +1091,10 @@ impl InvoiceContract {
         let earned_by_pool = if term == 0 {
             discount
         } else {
-            discount.checked_mul(elapsed as u128).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow)) / (term as u128)
+            discount
+                .checked_mul(elapsed as u128)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
+                / (term as u128)
         };
         let refund_to_buyer = discount.saturating_sub(earned_by_pool);
 
@@ -1556,7 +1559,9 @@ impl InvoiceContract {
         let invoices = hydrate_ids(&env, ids);
         let mut result: Vec<Invoice> = Vec::new(&env);
         for i in 0..invoices.len() {
-            let invoice = invoices.get(i).unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let invoice = invoices
+                .get(i)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
             if invoice.status == status {
                 result.push_back(invoice);
             }
@@ -1812,7 +1817,11 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
     // Check if invoice_id already exists in this issuer index
     for i in 0..count {
         let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let existing_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&entry_key)
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
         if existing_id == *invoice_id {
             return; // Already exists, skip duplicate
         }
@@ -1848,7 +1857,11 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     // Check if invoice_id already exists in this buyer index
     for i in 0..count {
         let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let existing_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&entry_key)
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
         if existing_id == *invoice_id {
             return; // Already exists, skip duplicate
         }
@@ -1885,7 +1898,11 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
     // Check if invoice_id already exists in this status index
     for i in 0..count {
         let entry_key = DataKey::StatusIndexEntry(status_u32, i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let existing_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&entry_key)
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
         if existing_id == *invoice_id {
             return; // Already exists, skip duplicate
         }
@@ -1926,7 +1943,11 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
     for i in 0..count {
         let entry_key = DataKey::StatusIndexEntry(to_u32, i);
-        let existing_id: BytesN<32> = env.storage().persistent().get(&entry_key).unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let existing_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&entry_key)
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
         if existing_id == *invoice_id {
             return; // Already in target index, skip all operations
         }
@@ -1962,7 +1983,9 @@ fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {
 fn hydrate_ids(env: &Env, ids: Vec<BytesN<32>>) -> Vec<Invoice> {
     let mut result: Vec<Invoice> = Vec::new(env);
     for i in 0..ids.len() {
-        let id = ids.get(i).unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let id = ids
+            .get(i)
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
         let invoice: Invoice = env
             .storage()
             .persistent()
