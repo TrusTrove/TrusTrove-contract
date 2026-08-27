@@ -139,11 +139,10 @@ impl PoolContract {
             .set(&DataKey::ActiveInvoiceCount, &0u32);
         env.storage()
             .instance()
-            .set(&DataKey::MaxUtilizationBps, &8500u32);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalLossRealised, &0u128);
+            .set(&DataKey::MaxUtilizationBps, &8500u32);        env.storage().instance().set(&DataKey::TotalLossRealised, &0u128);
         Self::extend_instance_ttl(&env);
+
+        events::pool_initialized(&env, &admin, &invoice_contract, &escrow_contract, &usdc_asset);
     }
 
     /// Returns the USDC asset used by the pool.

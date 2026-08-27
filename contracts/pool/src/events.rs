@@ -1,5 +1,24 @@
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
+pub fn pool_initialized(
+    env: &Env,
+    admin: &Address,
+    invoice_contract: &Address,
+    escrow_contract: &Address,
+    usdc_asset: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "pool_initialized"),
+            admin.clone(),
+            invoice_contract.clone(),
+            escrow_contract.clone(),
+            usdc_asset.clone(),
+        ),
+        (),
+    );
+}
+
 pub fn lp_deposited(env: &Env, lp: &Address, usdc_amount: u128, shares_issued: u128) {
     env.events().publish(
         (Symbol::new(env, "lp_deposited"), lp.clone()),
