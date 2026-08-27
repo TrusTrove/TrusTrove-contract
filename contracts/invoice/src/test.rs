@@ -2158,7 +2158,8 @@ fn test_create_fails_missing_counter() {
     let contract_id = env.register_contract(None, InvoiceContract);
     let client = InvoiceContractClient::new(&env, &contract_id);
 
-    let _admin = Address::generate(&env);
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &registry_id);
 
     let usdc = Address::generate(&env);
     client.add_supported_asset(&usdc);
