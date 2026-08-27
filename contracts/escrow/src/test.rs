@@ -637,7 +637,14 @@ fn test_handle_default_invoked_by_admin_succeeds() {
 
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
-    assert_last_event_four(&env, "default_resolved", invoice_id.clone(), _pool, admin, amount);
+    assert_last_event_four(
+        &env,
+        "default_resolved",
+        invoice_id.clone(),
+        _pool,
+        admin,
+        amount,
+    );
 }
 
 #[test]
@@ -655,7 +662,14 @@ fn test_handle_default_admin_can_trigger() {
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
     // Funds are always returned to the pool address regardless of who triggered
-    assert_last_event_four(&env, "default_resolved", invoice_id.clone(), pool, admin, amount);
+    assert_last_event_four(
+        &env,
+        "default_resolved",
+        invoice_id.clone(),
+        pool,
+        admin,
+        amount,
+    );
 }
 
 #[test]

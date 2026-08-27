@@ -430,7 +430,13 @@ impl EscrowContract {
             .unwrap_or(Vec::new(&env))
     }
 
-    fn append_history(env: &Env, invoice_id: &BytesN<32>, action: EscrowAction, amount: u128, caller: Option<Address>) {
+    fn append_history(
+        env: &Env,
+        invoice_id: &BytesN<32>,
+        action: EscrowAction,
+        amount: u128,
+        caller: Option<Address>,
+    ) {
         let key = DataKey::History(invoice_id.clone());
         let mut history: Vec<EscrowEvent> = env
             .storage()

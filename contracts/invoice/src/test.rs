@@ -299,7 +299,7 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     let agent_id = Symbol::new(&env, "test_agent");
     let registry_id = env.register_contract(None, MockAgentRegistry);
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
-    
+
     // Register agent with a different pubkey than the one we'll use to sign
     let wrong_pubkey_bytes = [42u8; 65];
     let wrong_pubkey = BytesN::from_array(&env, &wrong_pubkey_bytes);
@@ -322,7 +322,7 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
-    
+
     // Sign with the test key (not the registered pubkey)
     let (sig, recid) = test_agent_signing_key()
         .sign_prehash_recoverable(&digest)
@@ -345,7 +345,7 @@ fn test_submit_attestation_inactive_agent() {
     let agent_id = Symbol::new(&env, "test_agent");
     let registry_id = env.register_contract(None, MockAgentRegistry);
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
-    
+
     // Register agent as inactive
     registry_client.register_agent(
         &agent_id,
@@ -387,7 +387,7 @@ fn test_submit_attestation_unregistered_agent() {
     let agent_id = Symbol::new(&env, "test_agent");
     let registry_id = env.register_contract(None, MockAgentRegistry);
     let _registry_client = MockAgentRegistryClient::new(&env, &registry_id);
-    
+
     // Don't register the agent at all
     client.set_agent_registry_contract(&registry_id);
 
@@ -456,7 +456,7 @@ fn test_submit_attestation_replay_rejection() {
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
 }
 
-// Note: Malformed payload testing is limited by Soroban SDK's XDR decoding - 
+// Note: Malformed payload testing is limited by Soroban SDK's XDR decoding -
 // it produces Value errors rather than Contract errors. The contract-level
 // InvalidAmount (#16) error is only hit for valid XDR that fails business logic.
 // The other failure paths below are the ones that can be tested at the contract level.
