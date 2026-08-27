@@ -55,6 +55,8 @@ pub struct EscrowEvent {
     pub amount: u128,
     /// Unix timestamp (seconds) when this event was recorded.
     pub timestamp: u64,
+    /// The caller address that triggered this event (for DefaultHandled events).
+    pub caller: Option<soroban_sdk::Address>,
 }
 
 /// Storage keys used by the escrow contract.

@@ -29,12 +29,19 @@ pub fn released_to_pool(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amou
     );
 }
 
-pub fn default_resolved(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amount: u128) {
+pub fn default_resolved(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    pool: &Address,
+    caller: &Address,
+    amount: u128,
+) {
     env.events().publish(
         (
             Symbol::new(env, "default_resolved"),
             invoice_id.clone(),
             pool.clone(),
+            caller.clone(),
         ),
         amount,
     );

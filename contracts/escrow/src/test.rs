@@ -164,6 +164,37 @@ fn assert_last_event_three<T1, T2>(
     assert_eq!(actual_data, expected_data);
 }
 
+fn assert_last_event_four<T1, T2, T3>(
+    env: &Env,
+    expected_name: &str,
+    expected_topic1: T1,
+    expected_topic2: T2,
+    expected_topic3: T3,
+    expected_data: u128,
+) where
+    T1: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
+    T2: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
+    T3: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
+    <T1 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
+    <T2 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
+    <T3 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
+{
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected at least one event");
+
+    let topic0: Symbol = Symbol::try_from_val(env, &topics.get(0).unwrap()).unwrap();
+    let topic1: T1 = T1::try_from_val(env, &topics.get(1).unwrap()).unwrap();
+    let topic2: T2 = T2::try_from_val(env, &topics.get(2).unwrap()).unwrap();
+    let topic3: T3 = T3::try_from_val(env, &topics.get(3).unwrap()).unwrap();
+    let actual_data: u128 = u128::try_from_val(env, &data).unwrap();
+
+    assert_eq!(topic0, Symbol::new(env, expected_name));
+    assert_eq!(topic1, expected_topic1);
+    assert_eq!(topic2, expected_topic2);
+    assert_eq!(topic3, expected_topic3);
+    assert_eq!(actual_data, expected_data);
+}
+
 #[test]
 fn test_initialize() {
     let env = Env::default();
@@ -320,6 +351,33 @@ fn test_release_to_issuer_pool_address_panics() {
 
     // Releasing to pool contract address must panic with InvalidRecipient (#7)
     client.release_to_issuer(&invoice_id, &pool);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_release_to_issuer_second_call_panics() {
+    let (env, client, _admin, _pool, _invoice_contract, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 8);
+    let issuer = Address::generate(&env);
+    let amount: u128 = 1_000_000_000;
+
+    // Lock funds and release once
+    client.lock(&invoice_id, &amount);
+    client.release_to_issuer(&invoice_id, &issuer);
+
+    // Second release_to_issuer call on the same invoice_id should panic with NotFound (#2)
+    client.release_to_issuer(&invoice_id, &issuer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_release_to_issuer_unknown_invoice_id_panics() {
+    let (env, client, _admin, _pool, _invoice_contract, _usdc_id, _contract_id) = setup();
+    let unknown_id = generate_invoice_id(&env, 999);
+    let issuer = Address::generate(&env);
+
+    // Never locked this invoice_id — should panic with NotFound (#2)
+    client.release_to_issuer(&unknown_id, &issuer);
 }
 
 // ============================================================================
@@ -499,6 +557,21 @@ fn test_release_to_pool_unknown_invoice_id_panics() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_release_to_pool_second_call_panics() {
+    let (env, client, _admin, _pool, _invoice_contract, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    // Lock funds and release once
+    client.lock(&invoice_id, &amount);
+    client.release_to_pool(&invoice_id, &amount);
+
+    // Second release_to_pool call on the same invoice_id should panic with NotFound (#2)
+    client.release_to_pool(&invoice_id, &amount);
+}
+
+#[test]
 fn test_handle_default_returns_funds_to_pool() {
     let (env, client, _admin, pool, _invoice_contract, usdc_id, contract_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
@@ -524,6 +597,12 @@ fn test_handle_default_returns_funds_to_pool() {
     // Pool is the normal operational caller for default resolution
     let result = client.handle_default(&invoice_id, &pool);
     assert!(result);
+
+    // Verify caller is in the event
+    let events = env.events().all();
+    let (_, topics, _) = events.last().expect("expected at least one event");
+    let caller: Address = Address::try_from_val(&env, &topics.get(3).unwrap()).unwrap();
+    assert_eq!(caller, pool);
 
     // Verify funds were actually transferred back to the pool, not just that
     // the storage record was cleared.
@@ -558,7 +637,14 @@ fn test_handle_default_invoked_by_admin_succeeds() {
 
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
-    assert_last_event_three(&env, "default_resolved", invoice_id.clone(), _pool, amount);
+    assert_last_event_four(
+        &env,
+        "default_resolved",
+        invoice_id.clone(),
+        _pool,
+        admin,
+        amount,
+    );
 }
 
 #[test]
@@ -576,7 +662,14 @@ fn test_handle_default_admin_can_trigger() {
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
     // Funds are always returned to the pool address regardless of who triggered
-    assert_last_event_three(&env, "default_resolved", invoice_id.clone(), pool, amount);
+    assert_last_event_four(
+        &env,
+        "default_resolved",
+        invoice_id.clone(),
+        pool,
+        admin,
+        amount,
+    );
 }
 
 #[test]
@@ -629,10 +722,11 @@ fn test_handle_default_second_call_returns_false_without_side_effects() {
     let result1 = client.handle_default(&invoice_id, &pool);
     assert!(result1);
     assert_eq!(client.get_locked(&invoice_id), 0);
-    assert_last_event_three(
+    assert_last_event_four(
         &env,
         "default_resolved",
         invoice_id.clone(),
+        pool.clone(),
         pool.clone(),
         amount,
     );
@@ -653,6 +747,38 @@ fn test_handle_default_second_call_returns_false_without_side_effects() {
         event_count_after_first,
         "second handle_default must not emit any events"
     );
+}
+
+#[test]
+fn test_handle_default_event_includes_caller() {
+    let (env, client, admin, pool, _invoice_contract, _usdc_id, _contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+
+    // Call with admin as caller - verify caller is in event
+    let result = client.handle_default(&invoice_id, &admin);
+    assert!(result);
+
+    let events = env.events().all();
+    let (_, topics, _) = events.last().expect("expected at least one event");
+
+    let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    let topic1: BytesN<32> = BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    let topic2: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
+    let topic3: Address = Address::try_from_val(&env, &topics.get(3).unwrap()).unwrap();
+
+    assert_eq!(topic0, Symbol::new(&env, "default_resolved"));
+    assert_eq!(topic1, invoice_id);
+    assert_eq!(topic2, pool);
+    assert_eq!(topic3, admin);
+
+    // Verify caller is also recorded in history
+    let history = client.get_history(&invoice_id);
+    let last_event = history.last().unwrap();
+    assert_eq!(last_event.caller, Some(admin));
 }
 
 // ============================================================================

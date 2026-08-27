@@ -143,7 +143,7 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        Self::append_history(&env, &invoice_id, EscrowAction::Locked, amount);
+        Self::append_history(&env, &invoice_id, EscrowAction::Locked, amount, None);
         Self::extend_instance_ttl(&env);
         events::funds_locked(&env, &invoice_id, amount);
 
@@ -198,6 +198,7 @@ impl EscrowContract {
             &invoice_id,
             EscrowAction::ReleasedToIssuer,
             record.amount,
+            None,
         );
         env.storage().persistent().remove(&key);
         Self::extend_instance_ttl(&env);
@@ -273,6 +274,7 @@ impl EscrowContract {
             &invoice_id,
             EscrowAction::ReleasedToPool,
             repayment_amount,
+            None,
         );
         env.storage().persistent().remove(&key);
         Self::extend_instance_ttl(&env);
@@ -358,10 +360,11 @@ impl EscrowContract {
             &invoice_id,
             EscrowAction::DefaultHandled,
             record.amount,
+            Some(caller.clone()),
         );
         env.storage().persistent().remove(&key);
         Self::extend_instance_ttl(&env);
-        events::default_resolved(&env, &invoice_id, &pool, record.amount);
+        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount);
         true
     }
 
@@ -427,7 +430,13 @@ impl EscrowContract {
             .unwrap_or(Vec::new(&env))
     }
 
-    fn append_history(env: &Env, invoice_id: &BytesN<32>, action: EscrowAction, amount: u128) {
+    fn append_history(
+        env: &Env,
+        invoice_id: &BytesN<32>,
+        action: EscrowAction,
+        amount: u128,
+        caller: Option<Address>,
+    ) {
         let key = DataKey::History(invoice_id.clone());
         let mut history: Vec<EscrowEvent> = env
             .storage()
@@ -439,6 +448,7 @@ impl EscrowContract {
             action,
             amount,
             timestamp: env.ledger().timestamp(),
+            caller,
         });
         env.storage().persistent().set(&key, &history);
         env.storage()
