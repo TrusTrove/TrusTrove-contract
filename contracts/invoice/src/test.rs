@@ -1106,6 +1106,77 @@ fn test_mark_funded_succeeds_with_matching_asset() {
     assert_eq!(inv.funding_pool, Some(pool));
 }
 
+// #553: mark_funded must only accept the configured pool contract. An
+// address that self-authorizes but isn't the one set via set_pool_contract
+// must be rejected (NotAuthorized, Contract #3), preventing arbitrary pool
+// hijacking.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_mark_funded_fails_for_non_configured_pool() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let configured_pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&configured_pool);
+
+    // A different, self-authorizable address tries to hijack funding.
+    let impostor = mock_pool_with_asset(&env, &usdc);
+    client.mark_funded(&invoice_id, &impostor, &usdc, &DEFAULT_FUNDED_AMOUNT);
+}
+
+// #553: mark_funded from the pre-configured pool still succeeds.
+#[test]
+fn test_mark_funded_succeeds_for_configured_pool() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let result = client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    assert!(result);
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.funding_pool, Some(pool));
+}
+
+// #554: mark_funded panics when funded_amount exceeds face_value.
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_mark_funded_fails_when_amount_exceeds_face_value() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1));
+}
+
+// #554: funded_amount == face_value is the boundary and must succeed.
+#[test]
+fn test_mark_funded_succeeds_when_amount_equals_face_value() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let result = client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FACE_VALUE);
+    assert!(result);
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.funded_amount, DEFAULT_FACE_VALUE);
+    assert_eq!(inv.funding_pool, Some(pool));
+}
+
 #[test]
 fn test_create_invoice_with_xlm_asset() {
     let (env, client, issuer, buyer, _, _usdc) = setup();
