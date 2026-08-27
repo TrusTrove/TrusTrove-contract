@@ -387,6 +387,56 @@ fn test_release_to_pool_transfers_correct_amount() {
 }
 
 #[test]
+#[test]
+fn test_release_to_pool_over_repayment_succeeds() {
+    let (env, client, _admin, pool, _invoice_contract, usdc_id, contract_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+
+    let pool_balance_before = get_balance(&env, &usdc_id, &pool);
+    let contract_balance_before = get_balance(&env, &usdc_id, &contract_id);
+
+    client.lock(&invoice_id, &amount);
+
+    let pool_balance_after_lock = get_balance(&env, &usdc_id, &pool);
+    let contract_balance_after_lock = get_balance(&env, &usdc_id, &contract_id);
+    assert_eq!(
+        pool_balance_after_lock,
+        pool_balance_before - (amount as i128)
+    );
+    assert_eq!(
+        contract_balance_after_lock,
+        contract_balance_before + (amount as i128)
+    );
+
+    // Test the documented over-repayment path (repayment_amount > locked amount)
+    let repayment: u128 = amount + 500_000; // Adding yield/penalty
+    let result = client.release_to_pool(&invoice_id, &repayment);
+    assert!(result);
+
+    let pool_balance_after_release = get_balance(&env, &usdc_id, &pool);
+    let contract_balance_after_release = get_balance(&env, &usdc_id, &contract_id);
+    assert_eq!(
+        pool_balance_after_release,
+        pool_balance_after_lock + (repayment as i128)
+    );
+    assert_eq!(
+        contract_balance_after_release,
+        contract_balance_after_lock - (repayment as i128)
+    );
+
+    let locked = client.get_locked(&invoice_id);
+    assert_eq!(locked, 0);
+    assert_last_event_three(
+        &env,
+        "released_to_pool",
+        invoice_id,
+        pool,
+        repayment,
+    );
+}
+
+#[test]
 fn test_release_to_pool_requires_invoice_contract_auth() {
     let (env, client, _admin, _pool, invoice_contract, _usdc_id, _contract_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
