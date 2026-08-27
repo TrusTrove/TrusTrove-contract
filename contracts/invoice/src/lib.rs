@@ -1769,25 +1769,30 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id).buyer
     }
 
-    /// Transfers admin ownership to a new address.
+    /// Returns the due date of an invoice.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `new_admin` - The address of the new admin.
+    /// * `invoice_id` - The invoice to query.
     ///
     /// # Auth
-    /// Requires authorization from both the current admin and the new admin.
+    /// No authorization is required.
     ///
     /// # Panics
-    /// * `InvoiceError::NotFound` if the contract is not initialized.
+    /// * `InvoiceError::NotInitialized` if the contract has not been initialized.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
     ///
     /// # Returns
-    /// * `()` - No value is returned.
+    /// * `u64` - The invoice due date as a Unix timestamp.
     ///
     /// # Example
     /// ```ignore
-    /// client.transfer_ownership(&new_admin);
+    /// let due = client.get_due_date(&invoice_id);
     /// ```
+    pub fn get_due_date(env: Env, invoice_id: BytesN<32>) -> u64 {
+        Self::get_invoice(&env, invoice_id).due_date
+    }
+
     pub fn transfer_ownership(env: Env, new_admin: Address) {
         let admin: Address = env
             .storage()

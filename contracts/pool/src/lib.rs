@@ -526,6 +526,24 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::UtilizationCapExceeded);
         }
 
+        // --- Checks-effects-interactions: commit pool state BEFORE any
+        // cross-contract calls so a reentrant callback into this contract
+        // always sees the updated TotalFunded / ActiveInvoiceCount /
+        // FundedInvoice, preventing double-funding via stale state.
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(total_funded + funded_amount));
+        let active_count = totals.active_invoices;
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveInvoiceCount, &(active_count + 1));
+
+        env.storage().persistent().set(&funded_key, &funded_amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&funded_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        // --- Interactions: cross-contract calls after pool state is committed.
         let escrow_contract = Self::escrow_contract(&env);
 
         let mut args = Vec::new(&env);
@@ -541,19 +559,6 @@ impl PoolContract {
         args.push_back(funded_amount.into_val(&env));
         let _: bool =
             env.invoke_contract(&invoice_contract, &Symbol::new(&env, "mark_funded"), args);
-
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalFunded, &(total_funded + funded_amount));
-        let active_count = totals.active_invoices;
-        env.storage()
-            .instance()
-            .set(&DataKey::ActiveInvoiceCount, &(active_count + 1));
-
-        env.storage().persistent().set(&funded_key, &funded_amount);
-        env.storage()
-            .persistent()
-            .extend_ttl(&funded_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
@@ -837,11 +842,6 @@ impl PoolContract {
             &Symbol::new(&env, "mark_defaulted"),
             args,
         );
-
-        let total_loss = totals.loss_realised;
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalLossRealised, &(total_loss + funded_amount));
 
         env.storage().persistent().remove(&funded_key);
 

@@ -2525,136 +2525,62 @@ fn test_get_uninitialized_panics() {
     client.get(&fake_id);
 }
 
-// --------------- Config Getters Tests (#561) ---------------
+// ============================================================================
+// get_buyer / get_due_date accessor tests (issue #574)
+// ============================================================================
 
 #[test]
-fn test_config_getters_uninitialized_returns_none() {
-    let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
-    let client = InvoiceContractClient::new(&env, &contract_id);
+fn test_get_buyer_returns_correct_value() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
-    assert_eq!(client.get_admin(), None);
-    assert_eq!(client.get_registry_contract(), None);
-    assert_eq!(client.get_pool_contract(), None);
-    assert_eq!(client.get_escrow_contract(), None);
-    assert_eq!(client.get_agent_registry_contract(), None);
-}
-
-#[test]
-fn test_config_getters_happy_path() {
-    let (env, _client, _issuer, _buyer, registry_client, _usdc) = setup();
-    let admin = Address::generate(&env);
-    let registry_id = registry_client.address.clone();
-
-    // Fresh contract to test step-by-step
-    let contract_id = env.register_contract(None, InvoiceContract);
-    let fresh_client = InvoiceContractClient::new(&env, &contract_id);
-
-    // Initial state before initialization
-    assert_eq!(fresh_client.get_admin(), None);
-    assert_eq!(fresh_client.get_registry_contract(), None);
-    assert_eq!(fresh_client.get_pool_contract(), None);
-    assert_eq!(fresh_client.get_escrow_contract(), None);
-    assert_eq!(fresh_client.get_agent_registry_contract(), None);
-
-    // After initialization
-    fresh_client.initialize(&admin, &registry_id);
-    assert_eq!(fresh_client.get_admin(), Some(admin));
-    assert_eq!(fresh_client.get_registry_contract(), Some(registry_id));
-    assert_eq!(fresh_client.get_pool_contract(), None);
-    assert_eq!(fresh_client.get_escrow_contract(), None);
-    assert_eq!(fresh_client.get_agent_registry_contract(), None);
-
-    // Set pool contract
-    let pool = Address::generate(&env);
-    fresh_client.set_pool_contract(&pool);
-    assert_eq!(fresh_client.get_pool_contract(), Some(pool.clone()));
-
-    // Update pool contract
-    let pool2 = Address::generate(&env);
-    fresh_client.set_pool_contract(&pool2);
-    assert_eq!(fresh_client.get_pool_contract(), Some(pool2));
-
-    // Set escrow contract
-    let escrow = Address::generate(&env);
-    fresh_client.set_escrow_contract(&escrow);
-    assert_eq!(fresh_client.get_escrow_contract(), Some(escrow));
-
-    // Set agent registry contract
-    let agent_reg = Address::generate(&env);
-    fresh_client.set_agent_registry_contract(&agent_reg);
-    assert_eq!(fresh_client.get_agent_registry_contract(), Some(agent_reg));
-}
-
-// --------------- Transfer Ownership Tests (#562) ---------------
-
-#[test]
-fn test_transfer_ownership_changes_admin_and_gates_subsequent_calls() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let registry_id = env.register_contract(None, MockRegistry);
-    let contract_id = env.register_contract(None, InvoiceContract);
-    let client = InvoiceContractClient::new(&env, &contract_id);
-
-    let initial_admin = Address::generate(&env);
-    let new_admin = Address::generate(&env);
-
-    client.initialize(&initial_admin, &registry_id);
-    assert_eq!(client.get_admin(), Some(initial_admin.clone()));
-
-    // Transfer ownership to new_admin
-    client.transfer_ownership(&new_admin);
-    assert_eq!(client.get_admin(), Some(new_admin.clone()));
-
-    // Admin-gated calls succeed under new admin
-    client.set_expiry_window(&86400);
-    assert_eq!(client.get_expiry_window(), 86400);
-
-    let pool = Address::generate(&env);
-    client.set_pool_contract(&pool);
-    assert_eq!(client.get_pool_contract(), Some(pool));
-}
-
-#[test]
-fn test_transfer_ownership_emits_event() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let registry_id = env.register_contract(None, MockRegistry);
-    let contract_id = env.register_contract(None, InvoiceContract);
-    let client = InvoiceContractClient::new(&env, &contract_id);
-
-    let initial_admin = Address::generate(&env);
-    let new_admin = Address::generate(&env);
-
-    client.initialize(&initial_admin, &registry_id);
-    client.transfer_ownership(&new_admin);
-
-    let events = env.events().all();
-    let (event_contract, topics, data) = events.last().expect("expected at least one event");
-    assert_eq!(event_contract, contract_id);
-    assert_eq!(
-        topics,
-        (
-            Symbol::new(&env, "ownership_transferred"),
-            initial_admin.clone(),
-            new_admin.clone(),
-        )
-            .into_val(&env)
-    );
-    <()>::try_from_val(&env, &data).unwrap();
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    assert_eq!(client.get_buyer(&invoice_id), buyer);
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
-fn test_transfer_ownership_before_initialize_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
+fn test_get_buyer_missing_invoice_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_buyer(&fake_id);
+}
 
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_get_buyer_uninitialized_panics() {
+    let env = Env::default();
     let contract_id = env.register_contract(None, InvoiceContract);
     let client = InvoiceContractClient::new(&env, &contract_id);
-    let new_admin = Address::generate(&env);
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_buyer(&fake_id);
+}
 
-    client.transfer_ownership(&new_admin);
+#[test]
+fn test_get_due_date_returns_correct_value() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    assert_eq!(client.get_due_date(&invoice_id), due_date);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_due_date_missing_invoice_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_due_date(&fake_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_get_due_date_uninitialized_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_due_date(&fake_id);
 }

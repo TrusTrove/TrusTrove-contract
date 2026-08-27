@@ -2598,3 +2598,61 @@ mod real_registry_integration {
         invoice.create(&issuer, &buyer, &10_000_000_000u128, &due_date, &usdc_id);
     }
 }
+
+// ============== CHECKS-EFFECTS-INTERACTIONS TESTS (issue #576) ==============
+
+#[test]
+fn test_fund_invoice_commits_state_before_cross_contract_calls() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // Verify initial state
+    let stats_before = te.pool.get_stats();
+    assert_eq!(stats_before.total_funded, 0);
+    assert_eq!(stats_before.active_invoice_count, 0);
+
+    // Fund the invoice
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // Verify pool state is correctly updated after funding.
+    // This test documents that the checks-effects-interactions reorder
+    // produces the same end-state as before: TotalFunded and
+    // ActiveInvoiceCount are updated atomically with FundedInvoice.
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_funded, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(stats_after.active_invoice_count, 1);
+    assert_eq!(
+        stats_after.available_liquidity,
+        stats_before.total_deposits - DEFAULT_FUNDED_AMOUNT
+    );
+}
+
+#[test]
+fn test_fund_invoice_prevents_double_funding_via_funded_key_check() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // First funding succeeds
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // Verify the FundedInvoice entry exists in persistent storage,
+    // which is now committed before cross-contract calls.
+    let funded_amount: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id.clone()))
+            .unwrap_or(0)
+    });
+    assert_eq!(funded_amount, DEFAULT_FUNDED_AMOUNT);
+
+    // Second funding attempt is rejected - the AlreadyFunded guard
+    // reads from persistent storage that was committed before
+    // the cross-contract calls in the first funding.
+    let result = te.pool.try_fund_invoice(&invoice_id);
+    assert!(result.is_err());
+}
