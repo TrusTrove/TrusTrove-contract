@@ -2894,3 +2894,124 @@ fn test_get_due_date_uninitialized_panics() {
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_due_date(&fake_id);
 }
+
+// ============================================================================
+// Negative-Auth (Non-Admin) Tests for Admin-Gated Functions (issue #564)
+// ============================================================================
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_set_pool_contract_non_admin_panics() {
+    let (env, client, _, _, _, usdc) = setup();
+    let pool = mock_pool_with_asset(&env, &usdc);
+    env.set_auths(&[]);
+    client.set_pool_contract(&pool);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_set_agent_registry_contract_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let registry_id = env.register_contract(None, MockAgentRegistry);
+    env.set_auths(&[]);
+    client.set_agent_registry_contract(&registry_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_set_escrow_contract_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let escrow = Address::generate(&env);
+    env.set_auths(&[]);
+    client.set_escrow_contract(&escrow);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_set_expiry_window_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    env.set_auths(&[]);
+    client.set_expiry_window(&86400);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_add_supported_asset_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let new_asset = env.register_contract(None, MockToken);
+    env.set_auths(&[]);
+    client.add_supported_asset(&new_asset);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_remove_supported_asset_non_admin_panics() {
+    let (env, client, _, _, _, usdc) = setup();
+    env.set_auths(&[]);
+    client.remove_supported_asset(&usdc);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_transfer_ownership_non_admin_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let new_admin = Address::generate(&env);
+    env.set_auths(&[]);
+    client.transfer_ownership(&new_admin);
+}
+
+// ============================================================================
+// remove_supported_asset Unit & Edge Case Tests (issue #563)
+// ============================================================================
+
+#[test]
+fn test_remove_supported_asset_decrements_count_and_unsets_flag() {
+    let (env, client, _, _, _, usdc) = setup();
+    assert!(client.is_supported_asset(&usdc));
+    assert_eq!(client.get_supported_asset_count(), 1);
+
+    let eurc = env.register_contract(None, MockToken);
+    client.add_supported_asset(&eurc);
+    assert!(client.is_supported_asset(&eurc));
+    assert_eq!(client.get_supported_asset_count(), 2);
+
+    client.remove_supported_asset(&eurc);
+    assert!(!client.is_supported_asset(&eurc));
+    assert_eq!(client.get_supported_asset_count(), 1);
+    assert!(client.is_supported_asset(&usdc));
+
+    client.remove_supported_asset(&usdc);
+    assert!(!client.is_supported_asset(&usdc));
+    assert_eq!(client.get_supported_asset_count(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_create_with_removed_asset_panics_unsupported_asset() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let inv_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(client.get(&inv_id).status, InvoiceStatus::Created);
+
+    client.remove_supported_asset(&usdc);
+    assert!(!client.is_supported_asset(&usdc));
+
+    // Creating invoice with removed asset must fail with UnsupportedAsset (#13)
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+}
+
+#[test]
+fn test_remove_supported_asset_never_added_is_noop() {
+    let (env, client, _, _, _, usdc) = setup();
+    assert_eq!(client.get_supported_asset_count(), 1);
+    assert!(client.is_supported_asset(&usdc));
+
+    let never_added = env.register_contract(None, MockToken);
+    assert!(!client.is_supported_asset(&never_added));
+
+    client.remove_supported_asset(&never_added);
+    assert_eq!(client.get_supported_asset_count(), 1);
+    assert!(client.is_supported_asset(&usdc));
+    assert!(!client.is_supported_asset(&never_added));
+}

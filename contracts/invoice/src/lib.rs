@@ -1038,36 +1038,14 @@ impl InvoiceContract {
 
         let buyer = invoice.buyer.clone();
 
-        // Route repayment through escrow so escrow remains the secure
-        // intermediary for all fund movements (fixes issue #59).
-        // Flow: buyer → escrow → pool (via escrow::release_to_pool)
-        let escrow: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::EscrowContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        let token = token::Client::new(&env, &funding_asset);
-        // Step 1: buyer transfers face_value into escrow
-        token.transfer(&buyer, &escrow, &(face_value as i128));
-
-        // Step 2: escrow releases face_value back to pool
-        let mut escrow_args = Vec::new(&env);
-        escrow_args.push_back(invoice_id.clone().into_val(&env));
-        escrow_args.push_back(face_value.into_val(&env));
-        let _: bool =
-            env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
-
-        // Step 3: notify pool to update its internal accounting
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(face_value.into_val(&env));
-        args.push_back(refund_to_buyer.into_val(&env));
-        args.push_back(buyer.into_val(&env));
-        let _: bool = env.invoke_contract(
+        Self::settle_repayment(
+            &env,
+            &invoice_id,
+            &buyer,
+            &funding_asset,
+            face_value,
+            refund_to_buyer,
             &pool,
-            &Symbol::new(&env, "receive_repayment_with_refund"),
-            args,
         );
 
         let mut updated = invoice;
@@ -1089,7 +1067,6 @@ impl InvoiceContract {
             .get(&inv_key)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
         invoice.buyer.require_auth();
-        let _prev_status = invoice.status;
         if invoice.status != InvoiceStatus::Confirmed {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
@@ -1112,7 +1089,6 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
 
-        let _prev_status = invoice.status;
         let term = invoice.due_date.saturating_sub(funded_at);
         let elapsed = now.saturating_sub(funded_at);
 
@@ -1129,36 +1105,14 @@ impl InvoiceContract {
         let buyer = invoice.buyer.clone();
         let funding_asset = invoice.funding_asset.clone();
 
-        // Route repayment through escrow so escrow remains the secure
-        // intermediary for all fund movements (fixes issue #59).
-        // Flow: buyer → escrow → pool (via escrow::release_to_pool)
-        let escrow: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::EscrowContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-
-        let token = token::Client::new(&env, &funding_asset);
-        // Step 1: buyer transfers face_value into escrow
-        token.transfer(&buyer, &escrow, &(face_value as i128));
-
-        // Step 2: escrow releases face_value back to pool
-        let mut escrow_args = Vec::new(&env);
-        escrow_args.push_back(invoice_id.clone().into_val(&env));
-        escrow_args.push_back(face_value.into_val(&env));
-        let _: bool =
-            env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
-
-        // Step 3: notify pool to update its internal accounting
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(face_value.into_val(&env));
-        args.push_back(refund_to_buyer.into_val(&env));
-        args.push_back(buyer.into_val(&env));
-        let _: bool = env.invoke_contract(
+        Self::settle_repayment(
+            &env,
+            &invoice_id,
+            &buyer,
+            &funding_asset,
+            face_value,
+            refund_to_buyer,
             &pool,
-            &Symbol::new(&env, "receive_repayment_with_refund"),
-            args,
         );
 
         let mut updated = invoice;
@@ -1175,6 +1129,48 @@ impl InvoiceContract {
         );
         events::invoice_repaid(&env, &invoice_id, updated.face_value);
         true
+    }
+
+    fn settle_repayment(
+        env: &Env,
+        invoice_id: &BytesN<32>,
+        buyer: &Address,
+        funding_asset: &Address,
+        face_value: u128,
+        refund_to_buyer: u128,
+        pool: &Address,
+    ) {
+        // Route repayment through escrow so escrow remains the secure
+        // intermediary for all fund movements (fixes issue #59).
+        // Flow: buyer → escrow → pool (via escrow::release_to_pool)
+        let escrow: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::EscrowContract)
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+
+        let token = token::Client::new(env, funding_asset);
+        // Step 1: buyer transfers face_value into escrow
+        token.transfer(buyer, &escrow, &(face_value as i128));
+
+        // Step 2: escrow releases face_value back to pool
+        let mut escrow_args = Vec::new(env);
+        escrow_args.push_back(invoice_id.clone().into_val(env));
+        escrow_args.push_back(face_value.into_val(env));
+        let _: bool =
+            env.invoke_contract(&escrow, &Symbol::new(env, "release_to_pool"), escrow_args);
+
+        // Step 3: notify pool to update its internal accounting
+        let mut args = Vec::new(env);
+        args.push_back(invoice_id.clone().into_val(env));
+        args.push_back(face_value.into_val(env));
+        args.push_back(refund_to_buyer.into_val(env));
+        args.push_back(buyer.clone().into_val(env));
+        let _: bool = env.invoke_contract(
+            pool,
+            &Symbol::new(env, "receive_repayment_with_refund"),
+            args,
+        );
     }
 
     /// Triggers default on a past-due invoice.
