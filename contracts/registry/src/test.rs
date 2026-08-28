@@ -1179,6 +1179,24 @@ fn test_batch_register_issuers_exceeds_limit() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_batch_register_issuers_wrong_auth_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, RegistryContract);
+    let client = RegistryContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+
+    // Seed admin directly — no mock_all_auths, so require_auth will fail.
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+    });
+
+    let entries = vec![&env, (Address::generate(&env), map![&env])];
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
 fn test_profile_packing_correctness() {
     let env = Env::default();
     let _addr = Address::generate(&env);
