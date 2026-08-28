@@ -1197,6 +1197,21 @@ fn test_batch_register_issuers_wrong_auth_panics() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_batch_register_issuers_no_admin_panics() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    
+    // Clear auth mocking to simulate a non-admin caller
+    env.set_auths(&[]);
+    
+    let issuer = Address::generate(&env);
+    let entries = vec![&env, (issuer.clone(), map![&env])];
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
 fn test_profile_packing_correctness() {
     let env = Env::default();
     let _addr = Address::generate(&env);
