@@ -3108,6 +3108,7 @@ fn test_mark_funded_fails_zero_amount() {
     client.set_pool_contract(&pool);
     client.mark_funded(&invoice_id, &pool, &usdc, &0);
 }
+
 #[test]
 fn test_remove_supported_asset() {
     let (env, client, _, _, _, usdc) = setup();
