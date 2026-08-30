@@ -36,40 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "F2VnaIYr5"
-                      },
-                      "val": {
-                        "string": "Y00g5jZ9Jqwf9B_lyo9G"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "V2FzC"
-                      },
-                      "val": {
-                        "string": "_s_6H_fGXN8wQ6QF_"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_"
-                      },
-                      "val": {
-                        "string": "b_g"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "tA"
-                      },
-                      "val": {
-                        "string": "5_WoFxcOJN43Od_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -196,40 +163,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "F2VnaIYr5"
-                            },
-                            "val": {
-                              "string": "Y00g5jZ9Jqwf9B_lyo9G"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "V2FzC"
-                            },
-                            "val": {
-                              "string": "_s_6H_fGXN8wQ6QF_"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "_"
-                            },
-                            "val": {
-                              "string": "b_g"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "tA"
-                            },
-                            "val": {
-                              "string": "5_WoFxcOJN43Od_"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -583,40 +517,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "F2VnaIYr5"
-                      },
-                      "val": {
-                        "string": "Y00g5jZ9Jqwf9B_lyo9G"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "V2FzC"
-                      },
-                      "val": {
-                        "string": "_s_6H_fGXN8wQ6QF_"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_"
-                      },
-                      "val": {
-                        "string": "b_g"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "tA"
-                      },
-                      "val": {
-                        "string": "5_WoFxcOJN43Od_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
