@@ -526,22 +526,10 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::UtilizationCapExceeded);
         }
 
-        let escrow_contract = Self::escrow_contract(&env);
-
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(funded_amount.into_val(&env));
-        let _: bool = env.invoke_contract(&escrow_contract, &Symbol::new(&env, "lock"), args);
-
-        let pool_address = env.current_contract_address();
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(pool_address.into_val(&env));
-        args.push_back(usdc_id.into_val(&env));
-        args.push_back(funded_amount.into_val(&env));
-        let _: bool =
-            env.invoke_contract(&invoice_contract, &Symbol::new(&env, "mark_funded"), args);
-
+        // --- Checks-effects-interactions: commit pool state BEFORE any
+        // cross-contract calls so a reentrant callback into this contract
+        // always sees the updated TotalFunded / ActiveInvoiceCount /
+        // FundedInvoice, preventing double-funding via stale state.
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &(total_funded + funded_amount));
@@ -554,6 +542,24 @@ impl PoolContract {
         env.storage()
             .persistent()
             .extend_ttl(&funded_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        // --- Interactions: cross-contract calls after pool state is committed.
+        let escrow_contract = Self::escrow_contract(&env);
+
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        args.push_back(funded_amount.into_val(&env));
+        args.push_back(issuer.into_val(&env));
+        let _: bool = env.invoke_contract(&escrow_contract, &Symbol::new(&env, "lock"), args);
+
+        let pool_address = env.current_contract_address();
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        args.push_back(pool_address.into_val(&env));
+        args.push_back(usdc_id.into_val(&env));
+        args.push_back(funded_amount.into_val(&env));
+        let _: bool =
+            env.invoke_contract(&invoice_contract, &Symbol::new(&env, "mark_funded"), args);
 
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
@@ -837,11 +843,6 @@ impl PoolContract {
             &Symbol::new(&env, "mark_defaulted"),
             args,
         );
-
-        let total_loss = totals.loss_realised;
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalLossRealised, &(total_loss + funded_amount));
 
         env.storage().persistent().remove(&funded_key);
 

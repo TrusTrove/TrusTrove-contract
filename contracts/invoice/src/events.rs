@@ -142,3 +142,28 @@ pub fn contract_initialized(env: &Env, admin: &Address, registry_contract: &Addr
         (),
     );
 }
+
+pub fn supported_asset_added(env: &Env, asset: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "supported_asset_added"), asset.clone()),
+        (),
+    );
+}
+
+pub fn supported_asset_removed(env: &Env, asset: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "supported_asset_removed"), asset.clone()),
+        (),
+    );
+}
+
+pub fn escrow_contract_updated(env: &Env, old: &Address, new: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "escrow_contract_updated"),
+            old.clone(),
+            new.clone(),
+        ),
+        (),
+    );
+}

@@ -223,7 +223,7 @@ fn setup() -> TestEnv {
     invoice.initialize(&admin, &registry_id);
 
     let escrow = RealEscrowClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    escrow.initialize(&admin, &pool_id, &usdc_id);
 
     let pool = PoolContractClient::new(&env, &pool_id);
     pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
@@ -908,7 +908,7 @@ fn test_default_max_utilization_in_stats() {
     let usdc_id = env.register_contract(None, MockToken);
     RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
     let pool_id = env.register_contract(None, PoolContract);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
     let pool = PoolContractClient::new(&env, &pool_id);
     pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
     let stats = pool.get_stats();
@@ -1230,7 +1230,7 @@ fn test_receive_repayment_exact_funded_amount_has_no_yield() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_receive_repayment_requires_invoice_contract_authorization() {
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
@@ -1406,6 +1406,7 @@ fn test_handle_default_active_count_underflow_panics() {
                 invoice_id: phantom_id.clone(),
                 amount: funded_amount,
                 locked_at: te.env.ledger().timestamp(),
+                issuer: Address::generate(&te.env),
             },
         );
     });
@@ -1666,7 +1667,7 @@ fn test_handle_default_rejects_when_escrow_reports_no_release() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_handle_default_requires_invoice_contract_authorization() {
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
@@ -2262,7 +2263,7 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
     RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
 
     let pool_id = env.register_contract(None, PoolContract);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
 
     // Before initialize: TTL is the default of ~4096 ledgers.
     let ttl_before = env.as_contract(&pool_id, || env.storage().instance().get_ttl());
@@ -2315,17 +2316,11 @@ fn test_double_initialize_panics() {
         invoke: &MockAuthInvoke {
             contract: &escrow_id,
             fn_name: "initialize",
-            args: (
-                admin.clone(),
-                pool_id.clone(),
-                invoice_id.clone(),
-                usdc_id.clone(),
-            )
-                .into_val(&env),
+            args: (admin.clone(), pool_id.clone(), usdc_id.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
 
     // First pool initialize — succeeds with explicit auth
     env.mock_auths(&[MockAuth {
@@ -2496,7 +2491,7 @@ mod real_registry_integration {
         invoice.initialize(&admin, &registry_id);
 
         let escrow = RealEscrowClient::new(&env, &escrow_id);
-        escrow.initialize(&admin, &pool_id, &invoice_id_addr, &usdc_id);
+        escrow.initialize(&admin, &pool_id, &usdc_id);
 
         let pool = PoolContractClient::new(&env, &pool_id);
         pool.initialize(&admin, &invoice_id_addr, &escrow_id, &usdc_id, &registry_id);
@@ -2597,4 +2592,62 @@ mod real_registry_integration {
         let due_date = env.ledger().timestamp() + 86400;
         invoice.create(&issuer, &buyer, &10_000_000_000u128, &due_date, &usdc_id);
     }
+}
+
+// ============== CHECKS-EFFECTS-INTERACTIONS TESTS (issue #576) ==============
+
+#[test]
+fn test_fund_invoice_commits_state_before_cross_contract_calls() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // Verify initial state
+    let stats_before = te.pool.get_stats();
+    assert_eq!(stats_before.total_funded, 0);
+    assert_eq!(stats_before.active_invoice_count, 0);
+
+    // Fund the invoice
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // Verify pool state is correctly updated after funding.
+    // This test documents that the checks-effects-interactions reorder
+    // produces the same end-state as before: TotalFunded and
+    // ActiveInvoiceCount are updated atomically with FundedInvoice.
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_funded, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(stats_after.active_invoice_count, 1);
+    assert_eq!(
+        stats_after.available_liquidity,
+        stats_before.total_deposits - DEFAULT_FUNDED_AMOUNT
+    );
+}
+
+#[test]
+fn test_fund_invoice_prevents_double_funding_via_funded_key_check() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // First funding succeeds
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // Verify the FundedInvoice entry exists in persistent storage,
+    // which is now committed before cross-contract calls.
+    let funded_amount: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id.clone()))
+            .unwrap_or(0)
+    });
+    assert_eq!(funded_amount, DEFAULT_FUNDED_AMOUNT);
+
+    // Second funding attempt is rejected - the AlreadyFunded guard
+    // reads from persistent storage that was committed before
+    // the cross-contract calls in the first funding.
+    let result = te.pool.try_fund_invoice(&invoice_id);
+    assert!(result.is_err());
 }
