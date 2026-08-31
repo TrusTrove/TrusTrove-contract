@@ -6,6 +6,7 @@ members = [
     "contracts/escrow",
     "contracts/pool",
     "contracts/ttl",
+    "fuzz",
 ]
 
 [workspace.package]
@@ -18,6 +19,7 @@ repository = "https://github.com/TrusTrove/TrusTrove-contract"
 [workspace.dependencies]
 soroban-sdk = { version = "21.7.6" }
 proptest = "1.0.0"
+arbitrary = { version = "1.3", features = ["derive"] }
 trusttrove-registry = { path = "contracts/registry" }
 trusttrove-invoice = { path = "contracts/invoice" }
 trusttrove-escrow = { path = "contracts/escrow" }

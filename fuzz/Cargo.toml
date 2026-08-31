@@ -1,0 +1,75 @@
+[package]
+name = "trusttrove-fuzz"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[lib]
+name = "trusttrove_fuzz"
+path = "fuzz_targets/lib.rs"
+
+[[bin]]
+name = "fuzz_deposit"
+path = "fuzz_targets/fuzz_deposit.rs"
+
+[[bin]]
+name = "fuzz_withdraw"
+path = "fuzz_targets/fuzz_withdraw.rs"
+
+[[bin]]
+name = "fuzz_fund_invoice"
+path = "fuzz_targets/fuzz_fund_invoice.rs"
+
+[[bin]]
+name = "fuzz_invoice_create"
+path = "fuzz_targets/fuzz_invoice_create.rs"
+
+[[bin]]
+name = "fuzz_invoice_list"
+path = "fuzz_targets/fuzz_invoice_list.rs"
+
+[[bin]]
+name = "fuzz_invoice_mark_funded"
+path = "fuzz_targets/fuzz_invoice_mark_funded.rs"
+
+[[bin]]
+name = "fuzz_escrow_lock"
+path = "fuzz_targets/fuzz_escrow_lock.rs"
+
+[[bin]]
+name = "fuzz_escrow_release"
+path = "fuzz_targets/fuzz_escrow_release.rs"
+
+[[bin]]
+name = "fuzz_escrow_handle_default"
+path = "fuzz_targets/fuzz_escrow_handle_default.rs"
+
+[[bin]]
+name = "fuzz_registry_register"
+path = "fuzz_targets/fuzz_registry_register.rs"
+
+[[bin]]
+name = "fuzz_registry_verify"
+path = "fuzz_targets/fuzz_registry_verify.rs"
+
+[dependencies]
+soroban-sdk = { version = "21.7.6", features = ["testutils"] }
+trusttrove-pool = { path = "../contracts/pool" }
+trusttrove-invoice = { path = "../contracts/invoice" }
+trusttrove-escrow = { path = "../contracts/escrow" }
+trusttrove-registry = { path = "../contracts/registry" }
+trusttrove-ttl = { path = "../contracts/ttl" }
+arbitrary = { version = "1.3", features = ["derive"] }
+k256 = { version = "0.13", features = ["ecdsa", "pkcs8"] }
+
+[profile.release]
+debug = true
+overflow-checks = true
+
+[profile.fuzz]
+inherits = "release"
+debug = true
+overflow-checks = true
