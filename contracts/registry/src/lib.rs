@@ -294,6 +294,7 @@ impl RegistryContract {
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         events::metadata_updated(&env, &address);
+        Self::extend_instance_ttl(&env);
         true
     }
 

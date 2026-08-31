@@ -1652,3 +1652,61 @@ fn test_get_admin_extends_instance_ttl() {
         "Instance TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_read}"
     );
 }
+
+// ============== ISSUE #447: update_metadata extends instance TTL ==============
+
+#[test]
+fn test_update_metadata_extends_instance_ttl() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(
+        &issuer,
+        &map![
+            &env,
+            (
+                String::from_str(&env, "name"),
+                String::from_str(&env, "Acme Corp")
+            )
+        ],
+    );
+
+    let contract_id = client.address.clone();
+
+    // Drain instance TTL below the threshold (100).
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_update: u32 =
+        env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_update < TTL_THRESHOLD,
+        "Instance TTL should be below threshold before update, got {ttl_before_update}"
+    );
+
+    // Update metadata — this should extend the instance TTL.
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme LLC")
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let ttl_after_update: u32 =
+        env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+
+    assert!(
+        ttl_after_update > ttl_before_update,
+        "update_metadata should extend instance TTL: before={ttl_before_update}, after={ttl_after_update}"
+    );
+    assert!(
+        ttl_after_update >= 1_999_000,
+        "Instance TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_update}"
+    );
+}
