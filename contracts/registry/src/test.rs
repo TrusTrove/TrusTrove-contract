@@ -786,6 +786,140 @@ fn test_batch_register_issuers_mixed() {
     assert!(!client.is_verified(&issuer3));
 }
 
+// ============== BATCH REGISTER BUYERS (#448) ==============
+
+#[test]
+fn test_batch_register_buyers_empty_vec() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let entries = Vec::new(&env);
+    let skipped = client.batch_register_buyers(&entries);
+    assert_eq!(skipped.len(), 0);
+}
+
+#[test]
+fn test_batch_register_buyers_all_new() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    let buyer3 = Address::generate(&env);
+
+    let metadata1 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer 1")
+        )
+    ];
+    let metadata2 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer 2")
+        )
+    ];
+    let metadata3 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer 3")
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), metadata1),
+        (buyer2.clone(), metadata2),
+        (buyer3.clone(), metadata3),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    assert!(!client.is_verified(&buyer1));
+    assert!(!client.is_verified(&buyer2));
+    assert!(!client.is_verified(&buyer3));
+
+    assert_eq!(client.get_profile(&buyer1).role(), crate::Role::Buyer);
+    assert_eq!(client.get_profile(&buyer2).role(), crate::Role::Buyer);
+    assert_eq!(client.get_profile(&buyer3).role(), crate::Role::Buyer);
+}
+
+#[test]
+fn test_batch_register_buyers_all_duplicate() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+
+    client.register_buyer(&buyer1, &map![&env]);
+    client.register_buyer(&buyer2, &map![&env]);
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), map![&env]),
+        (buyer2.clone(), map![&env]),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    // Both were already registered — both are reported as skipped.
+    assert_eq!(skipped.len(), 2);
+    assert!(skipped.contains(&buyer1));
+    assert!(skipped.contains(&buyer2));
+}
+
+#[test]
+fn test_batch_register_buyers_mixed() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env); // existing
+    let buyer2 = Address::generate(&env); // new
+    let buyer3 = Address::generate(&env); // new
+
+    client.register_buyer(&buyer1, &map![&env]);
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), map![&env]),
+        (buyer2.clone(), map![&env]),
+        (buyer3.clone(), map![&env]),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    // Only buyer1 was already registered.
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped.contains(&buyer1));
+
+    assert!(!client.is_verified(&buyer1));
+    assert!(!client.is_verified(&buyer2));
+    assert!(!client.is_verified(&buyer3));
+
+    assert_eq!(client.get_profile(&buyer2).role(), crate::Role::Buyer);
+    assert_eq!(client.get_profile(&buyer3).role(), crate::Role::Buyer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_batch_register_buyers_exceeds_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+    client.batch_register_buyers(&entries);
+}
+
 #[test]
 fn test_verify_profile_updates_status() {
     let (env, client) = setup();

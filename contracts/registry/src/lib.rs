@@ -157,6 +157,73 @@ impl RegistryContract {
         skipped
     }
 
+    /// Batch-registers buyer profiles.
+    ///
+    /// Mirrors [`batch_register_issuers`](Self::batch_register_issuers) but
+    /// creates `Role::Buyer` profiles. The admin must be authorized and the
+    /// batch size must not exceed 50 entries.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `entries` - A vector of `(Address, Map<String, String>)` pairs, each
+    ///   representing a buyer address and its metadata.
+    ///
+    /// # Auth
+    /// * Requires `admin.require_auth()` — only the stored contract admin may
+    ///   batch-register buyers.
+    ///
+    /// # Panics
+    /// * `RegistryError::BatchSizeExceeded` if `entries.len() > 50`.
+    /// * `RegistryError::NotFound` if the contract admin is not set.
+    ///
+    /// # Returns
+    /// * `Vec<Address>` - The list of addresses that were skipped (already
+    ///   registered).
+    pub fn batch_register_buyers(
+        env: Env,
+        entries: Vec<(Address, Map<String, String>)>,
+    ) -> Vec<Address> {
+        if entries.len() > 50 {
+            panic_with_error!(&env, RegistryError::BatchSizeExceeded);
+        }
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        admin.require_auth();
+
+        let mut skipped: Vec<Address> = Vec::new(&env);
+        let mut registered: u32 = 0;
+        for entry in entries.iter() {
+            let (address, metadata) = entry;
+            Self::validate_metadata(&env, &metadata);
+            let key = DataKey::Profile(address.clone());
+            if env.storage().persistent().has(&key) {
+                skipped.push_back(address.clone());
+                continue;
+            }
+
+            // #130: new profiles start unverified; admin must verify via verify_profile.
+            let profile = Profile::new(Role::Buyer, false, env.ledger().timestamp(), metadata);
+
+            env.storage().persistent().set(&key, &profile);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            events::buyer_registered(&env, &address);
+            registered += 1;
+        }
+
+        events::batch_registered(&env, registered, skipped.len());
+
+        if registered > 0 {
+            Self::extend_instance_ttl(&env);
+        }
+        skipped
+    }
+
     /// Registers a new buyer profile with initial metadata.
     ///
     /// The profile is stored under `DataKey::Profile(address)` in persistent
