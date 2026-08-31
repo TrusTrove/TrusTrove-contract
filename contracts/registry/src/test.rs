@@ -786,6 +786,88 @@ fn test_batch_register_issuers_mixed() {
     assert!(!client.is_verified(&issuer3));
 }
 
+// ============== ISSUE #446: PRE-VALIDATION ==============
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_invalid_metadata_rejects_all() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env); // would be valid
+    let issuer2 = Address::generate(&env); // would be valid
+    let issuer3 = Address::generate(&env); // has invalid metadata (oversized)
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Good Issuer")
+        )
+    ];
+
+    let mut oversized_metadata = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized_metadata.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata.clone()),
+        (issuer2.clone(), valid_metadata.clone()),
+        (issuer3.clone(), oversized_metadata),
+    ];
+
+    // This should panic because issuer3 has invalid metadata.
+    // With pre-validation, issuer1 and issuer2 are NOT persisted.
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_invalid_metadata_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env); // would be valid
+    let issuer2 = Address::generate(&env); // has invalid metadata (empty key)
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Good Issuer")
+        )
+    ];
+
+    let bad_metadata = map![
+        &env,
+        (String::from_str(&env, ""), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), bad_metadata),
+    ];
+
+    // Panic expected because issuer2 has invalid metadata.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err(), "batch_register_issuers should panic on invalid metadata");
+
+    // Verify that issuer1 was NOT registered — the entire batch was rejected.
+    assert!(!client.is_verified(&issuer1));
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+}
+
 // ============== BATCH REGISTER BUYERS (#448) ==============
 
 #[test]
