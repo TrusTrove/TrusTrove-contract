@@ -247,7 +247,7 @@ impl PoolTestEnv {
         invoice.initialize(&admin, &registry_id);
 
         let escrow = EscrowContractClient::new(&env, &escrow_id);
-        escrow.initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+        escrow.initialize(&admin, &pool_id, &usdc_id);
 
         let pool = PoolContractClient::new(&env, &pool_id);
         pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
