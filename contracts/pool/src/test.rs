@@ -2418,6 +2418,19 @@ fn test_withdraw_before_initialize_panics() {
     pool.withdraw(&lp, &1_000);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_fund_invoice_before_initialize_panics() {
+    let env = Env::default();
+
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let invoice_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    // Pool is not initialized → should panic with NotInitialized (#2)
+    pool.fund_invoice(&invoice_id);
+}
+
 // --------------- Real Registry Integration ---------------
 //
 // Every other test in this file uses MockRegistry, a hand-rolled stand-in

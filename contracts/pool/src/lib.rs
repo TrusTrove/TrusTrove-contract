@@ -191,9 +191,7 @@ impl PoolContract {
     /// let shares = client.deposit(&lp, 10_000_000);
     /// ```
     pub fn deposit(env: Env, lp: Address, usdc_amount: u128) -> u128 {
-        if !env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, PoolError::NotInitialized);
-        }
+        Self::require_initialized(&env);
         lp.require_auth();
         if usdc_amount == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
@@ -301,9 +299,7 @@ impl PoolContract {
     /// let returned = client.withdraw(&lp, 500);
     /// ```
     pub fn withdraw(env: Env, lp: Address, shares: u128) -> u128 {
-        if !env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, PoolError::NotInitialized);
-        }
+        Self::require_initialized(&env);
         lp.require_auth();
         if shares == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
@@ -438,6 +434,7 @@ impl PoolContract {
     /// client.fund_invoice(&invoice_id);
     /// ```
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
+        Self::require_initialized(&env);
         let invoice_contract = Self::invoice_contract(&env);
 
         let mut args = Vec::new(&env);
@@ -994,6 +991,12 @@ impl PoolContract {
             .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
 
         scaled_funded.checked_div(total_deposits).unwrap_or(0) as u32
+    }
+
+    fn require_initialized(env: &Env) {
+        if !env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(env, PoolError::NotInitialized);
+        }
     }
 
     fn admin(env: &Env) -> Option<Address> {
