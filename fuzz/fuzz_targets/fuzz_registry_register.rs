@@ -18,9 +18,9 @@ fn main() {
 
 fn fuzz_registry_register(input: RegisterInput) {
     let te = RegistryTestEnv::new();
-    
+
     let address = Address::generate(&te.env);
-    
+
     // Generate metadata
     let mut metadata = Map::new(&te.env);
     let size = (input.metadata_size % 20) as u32;
@@ -29,18 +29,18 @@ fn fuzz_registry_register(input: RegisterInput) {
         let value = String::from_str(&te.env, &format!("value_{}", i));
         metadata.set(key, value);
     }
-    
+
     // Try register
     let result = if input.is_buyer {
         te.registry.try_register_buyer(&address, &metadata)
     } else {
         te.registry.try_register_issuer(&address, &metadata)
     };
-    
+
     // Verify invariants
     if let Ok(Ok(registered)) = result {
         assert!(registered, "register returned false but didn't error");
-        
+
         let profile = te.registry.get_profile(&address);
         if input.is_buyer {
             assert_eq!(profile.role(), Role::Buyer);
@@ -49,7 +49,7 @@ fn fuzz_registry_register(input: RegisterInput) {
         }
         assert!(!profile.verified());
         assert_eq!(profile.metadata, metadata);
-        
+
         // Verify cannot re-register
         let result2 = if input.is_buyer {
             te.registry.try_register_buyer(&address, &metadata)

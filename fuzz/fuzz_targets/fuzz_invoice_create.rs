@@ -17,15 +17,17 @@ fn main() {
 
 fn fuzz_invoice_create(input: CreateInvoiceInput) {
     let te = InvoiceTestEnv::new();
-    
+
     // Generate reasonable values
     let face_value = (input.face_value % 100_000_000_000).max(1);
     let due_offset = (input.due_offset % 31_536_000).max(1); // Max 1 year
     let due_date = te.env.ledger().timestamp() + due_offset;
-    
+
     // Try create
-    let result = te.invoice.try_create(&te.issuer, &te.buyer, &face_value, &due_date, &te.usdc_id);
-    
+    let result = te
+        .invoice
+        .try_create(&te.issuer, &te.buyer, &face_value, &due_date, &te.usdc_id);
+
     // Verify invariants
     if let Ok(Ok(invoice_id)) = result {
         let invoice = te.invoice.get(&invoice_id);

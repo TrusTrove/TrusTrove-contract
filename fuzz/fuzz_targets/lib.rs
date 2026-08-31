@@ -1,5 +1,6 @@
 //! Shared fuzzing utilities for TrusTrove contracts
 
+use k256::ecdsa::SigningKey;
 use soroban_sdk::{
     testutils::{Address as _, Ledger},
     xdr::ToXdr,
@@ -7,11 +8,10 @@ use soroban_sdk::{
 };
 use trusttrove_escrow::{EscrowContract, EscrowContractClient};
 use trusttrove_invoice::{
-    AttestationPayload, ATTESTATION_DOMAIN_SEPARATOR, Agent, InvoiceContract, InvoiceContractClient,
+    Agent, AttestationPayload, InvoiceContract, InvoiceContractClient, ATTESTATION_DOMAIN_SEPARATOR,
 };
 use trusttrove_pool::{PoolContract, PoolContractClient};
 use trusttrove_registry::{RegistryContract, RegistryContractClient};
-use k256::ecdsa::SigningKey;
 
 /// Mock token for testing
 #[soroban_sdk::contract]
@@ -24,12 +24,17 @@ impl MockToken {
         let to_key = BalanceKey(to.clone());
         let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
         let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
-        env.storage().persistent().set(&from_key, &(from_bal - amount));
+        env.storage()
+            .persistent()
+            .set(&from_key, &(from_bal - amount));
         env.storage().persistent().set(&to_key, &(to_bal + amount));
     }
 
     pub fn balance(env: Env, addr: Address) -> i128 {
-        env.storage().persistent().get(&BalanceKey(addr)).unwrap_or(0)
+        env.storage()
+            .persistent()
+            .get(&BalanceKey(addr))
+            .unwrap_or(0)
     }
 
     pub fn mint(env: Env, to: Address, amount: i128) {
@@ -93,14 +98,18 @@ impl MockRegistry {
     }
 
     pub fn register(env: Env, address: Address) {
-        env.storage().persistent().set(&RegKey(address.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&RegKey(address.clone()), &true);
         env.storage()
             .persistent()
             .extend_ttl(&RegKey(address), 1000, 2000);
     }
 
     pub fn revoke(env: Env, address: Address) {
-        env.storage().persistent().set(&RegKey(address.clone()), &false);
+        env.storage()
+            .persistent()
+            .set(&RegKey(address.clone()), &false);
         env.storage()
             .persistent()
             .extend_ttl(&RegKey(address), 1000, 2000);
@@ -158,11 +167,7 @@ pub fn mock_pool_with_asset(env: &Env, asset: &Address) -> Address {
 }
 
 /// Submits a validly signed attestation for `invoice_id`
-pub fn attest_invoice(
-    env: &Env,
-    invoice: &InvoiceContractClient,
-    invoice_id: &BytesN<32>,
-) {
+pub fn attest_invoice(env: &Env, invoice: &InvoiceContractClient, invoice_id: &BytesN<32>) {
     let payload = AttestationPayload {
         domain_separator: BytesN::from_array(env, &ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
@@ -383,7 +388,11 @@ impl RegistryTestEnv {
         let contract_id = env.register_contract(None, RegistryContract);
         let registry = RegistryContractClient::new(&env, &contract_id);
         registry.initialize(&admin);
-        RegistryTestEnv { env, registry, admin }
+        RegistryTestEnv {
+            env,
+            registry,
+            admin,
+        }
     }
 }
 

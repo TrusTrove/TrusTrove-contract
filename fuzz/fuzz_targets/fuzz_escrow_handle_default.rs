@@ -1,8 +1,11 @@
 //! Fuzz target for EscrowContract::handle_default
 
 use arbitrary::Arbitrary;
-use soroban_sdk::{testutils::{Address as _, Ledger}, Address, Env};
-use trusttrove_fuzz::{EscrowTestEnv, generate_invoice_id};
+use soroban_sdk::{
+    testutils::{Address as _, Ledger},
+    Address, Env,
+};
+use trusttrove_fuzz::{generate_invoice_id, EscrowTestEnv};
 
 #[derive(Arbitrary, Debug)]
 struct HandleDefaultInput {
@@ -18,28 +21,30 @@ fn main() {
 
 fn fuzz_escrow_handle_default(input: HandleDefaultInput) {
     let te = EscrowTestEnv::new();
-    
+
     // Generate reasonable amount
     let amount = (input.amount % 1_000_000_000_000).max(1);
     let invoice_id = generate_invoice_id(&te.env, 1);
-    
+
     // Lock funds
     let _ = te.escrow.try_lock(&invoice_id, &amount);
-    
+
     // Advance time (grace period is 60 seconds)
     let time_advance = (input.time_advance % 300).max(0);
-    te.env.ledger().set_timestamp(te.env.ledger().timestamp() + time_advance);
-    
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + time_advance);
+
     // Choose caller
     let caller = if input.caller_is_pool {
         te.pool.clone()
     } else {
         te.env.current_contract_address()
     };
-    
+
     // Try handle_default
     let result = te.escrow.try_handle_default(&invoice_id, &caller);
-    
+
     // Verify invariants
     if let Ok(Ok(handled)) = result {
         if time_advance >= 60 {

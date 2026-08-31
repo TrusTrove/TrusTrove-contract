@@ -19,9 +19,9 @@ fn main() {
 
 fn fuzz_registry_verify(input: VerifyInput) {
     let te = RegistryTestEnv::new();
-    
+
     let address = Address::generate(&te.env);
-    
+
     // Generate metadata
     let mut metadata = Map::new(&te.env);
     let size = (input.metadata_size % 20) as u32;
@@ -30,14 +30,14 @@ fn fuzz_registry_verify(input: VerifyInput) {
         let value = String::from_str(&te.env, &format!("value_{}", i));
         metadata.set(key, value);
     }
-    
+
     // Register first
     let _ = if input.is_buyer {
         te.registry.register_buyer(&address, &metadata)
     } else {
         te.registry.register_issuer(&address, &metadata)
     };
-    
+
     // Perform verify/revoke cycles
     let cycles = (input.verify_cycles % 5) as u32 + 1;
     for _ in 0..cycles {
@@ -51,7 +51,7 @@ fn fuzz_registry_verify(input: VerifyInput) {
                 VerificationStatus::Verified
             );
         }
-        
+
         // Revoke
         let result = te.registry.try_revoke(&address);
         if let Ok(Ok(revoked)) = result {
@@ -63,14 +63,14 @@ fn fuzz_registry_verify(input: VerifyInput) {
             );
         }
     }
-    
+
     // Final state should be revoked
     assert!(!te.registry.is_verified(&address));
     assert_eq!(
         te.registry.get_verification_status(&address),
         VerificationStatus::Revoked
     );
-    
+
     // Test reinstate
     let result = te.registry.try_reinstate(&address);
     if let Ok(Ok(reinstated)) = result {
