@@ -36,24 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "Wn"
-                      },
-                      "val": {
-                        "string": "OfB"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "k8_"
-                      },
-                      "val": {
-                        "string": "_yvyIUjI___8Ijztfs"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -117,24 +100,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "Wn"
-                            },
-                            "val": {
-                              "string": "OfB"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "k8_"
-                            },
-                            "val": {
-                              "string": "_yvyIUjI___8Ijztfs"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -389,24 +355,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "Wn"
-                      },
-                      "val": {
-                        "string": "OfB"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "k8_"
-                      },
-                      "val": {
-                        "string": "_yvyIUjI___8Ijztfs"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
