@@ -3072,3 +3072,53 @@ fn test_fund_invoice_prevents_double_funding_via_funded_key_check() {
     let result = te.pool.try_fund_invoice(&invoice_id);
     assert!(result.is_err());
 }
+
+// ============== PUBLIC GETTER TESTS (issue #578) ==============
+
+#[test]
+fn test_get_admin_returns_correct_address() {
+    let te = setup();
+    assert_eq!(te.pool.get_admin(), te.admin);
+}
+
+#[test]
+fn test_get_invoice_contract_returns_correct_address() {
+    let te = setup();
+    assert_eq!(te.pool.get_invoice_contract(), te.invoice.address);
+}
+
+#[test]
+fn test_get_escrow_contract_returns_correct_address() {
+    let te = setup();
+    assert_eq!(te.pool.get_escrow_contract(), te.escrow_id);
+}
+
+#[test]
+#[should_panic(expected = "pool is not initialized: admin missing")]
+fn test_get_admin_panics_when_uninitialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let _ = pool.get_admin();
+}
+
+#[test]
+#[should_panic(expected = "pool is not initialized: invoice contract missing")]
+fn test_get_invoice_contract_panics_when_uninitialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let _ = pool.get_invoice_contract();
+}
+
+#[test]
+#[should_panic(expected = "pool is not initialized: escrow contract missing")]
+fn test_get_escrow_contract_panics_when_uninitialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let _ = pool.get_escrow_contract();
+}
