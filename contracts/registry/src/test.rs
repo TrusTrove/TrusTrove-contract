@@ -3,8 +3,8 @@
 extern crate std;
 
 use crate::{
-    DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    DataKey, Profile, ProfileView, RegistryContract, RegistryContractClient, Role,
+    VerificationStatus, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -312,6 +312,21 @@ fn test_reinstate_wrong_auth_panics() {
 
     // The issuer is not the admin and env.mock_all_auths() was not called,
     // so calling reinstate should panic with an auth error.
+    client.reinstate(&issuer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_reinstate_not_revoked_panics() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert!(!client.is_verified(&issuer));
+
+    // Attempting to reinstate a profile that was never revoked should panic
+    // with NotRevoked (#8).
     client.reinstate(&issuer);
 }
 
