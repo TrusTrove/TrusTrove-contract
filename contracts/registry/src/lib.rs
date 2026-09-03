@@ -127,11 +127,18 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         admin.require_auth();
 
+        // Pre-validate ALL entries' metadata before processing any of them.
+        // This ensures atomicity: if any entry has invalid metadata, the
+        // entire batch is rejected and no entries are persisted (#446).
+        for entry in entries.iter() {
+            let (_address, metadata) = entry;
+            Self::validate_metadata(&env, &metadata);
+        }
+
         let mut skipped: Vec<Address> = Vec::new(&env);
         let mut registered: u32 = 0;
         for entry in entries.iter() {
-            let (address, metadata) = entry;
-            Self::validate_metadata(&env, &metadata);
+            let (address, _metadata) = entry;
             let key = DataKey::Profile(address.clone());
             if env.storage().persistent().has(&key) {
                 skipped.push_back(address.clone());

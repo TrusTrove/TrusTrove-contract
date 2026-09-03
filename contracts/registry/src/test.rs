@@ -1858,3 +1858,124 @@ fn test_update_metadata_extends_instance_ttl() {
         "Instance TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_update}"
     );
 }
+
+// ============== PROPERTY-BASED TESTS: METADATA BOUNDARY (Issue #449) ==============
+
+/// Strategy that generates metadata entries with valid key/value patterns.
+fn valid_metadata_entries(
+) -> impl Strategy<Value = std::vec::Vec<(std::string::String, std::string::String)>> {
+    prop::collection::vec(("[a-zA-Z_][a-zA-Z0-9_]{0,9}", "[a-zA-Z0-9_]{1,20}"), 0..=5)
+}
+
+/// Strategy that generates metadata entries that may contain empty keys or
+/// values (approximately 30% chance per entry).
+fn metadata_entries_with_empty_field(
+) -> impl Strategy<Value = std::vec::Vec<(std::string::String, std::string::String)>> {
+    prop::collection::vec(
+        (
+            prop_oneof![
+                Just(std::string::String::new()),
+                "[a-zA-Z][a-zA-Z0-9_]{0,9}"
+            ],
+            prop_oneof![Just(std::string::String::new()), "[a-zA-Z0-9_]{1,20}"],
+        ),
+        1..=5,
+    )
+}
+
+/// Proptest: metadata maps with sizes in 0..=20 are accepted, sizes in
+/// 21..=25 are rejected with `InvalidMetadata`.
+#[test]
+fn prop_metadata_size_boundary_accepted_and_rejected() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(0u32..=25, valid_metadata_entries()),
+            |(target_size, entries)| {
+                let (env, client) = setup();
+                let admin = Address::generate(&env);
+                client.initialize(&admin);
+                let address = Address::generate(&env);
+
+                // Build a metadata map with exactly `target_size` entries.
+                let mut metadata = map![&env];
+                for i in 0..target_size {
+                    if let Some((k, v)) = entries.get(i as usize) {
+                        metadata.set(
+                            String::from_str(&env, k.as_str()),
+                            String::from_str(&env, v.as_str()),
+                        );
+                    } else {
+                        // Generate a fallback key/value pair when the
+                        // strategy provided fewer entries than target_size.
+                        metadata.set(
+                            String::from_str(&env, &std::format!("key_{i}")),
+                            String::from_str(&env, &std::format!("value_{i}")),
+                        );
+                    }
+                }
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.register_issuer(&address, &metadata);
+                }));
+
+                if target_size <= 20 {
+                    prop_assert!(
+                        result.is_ok(),
+                        "metadata with {} entries should be accepted, but panicked",
+                        target_size
+                    );
+                    // Verify the profile was registered successfully.
+                    prop_assert_eq!(client.get_profile(&address).role(), Role::Issuer);
+                } else {
+                    prop_assert!(
+                        result.is_err(),
+                        "metadata with {} entries should be rejected, but succeeded",
+                        target_size
+                    );
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+/// Proptest: metadata containing at least one empty key or empty value is
+/// always rejected with `InvalidMetadata`, regardless of total size.
+#[test]
+fn prop_metadata_empty_key_or_value_always_rejected() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(&metadata_entries_with_empty_field(), |entries| {
+            let (env, client) = setup();
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+            let address = Address::generate(&env);
+
+            let metadata = build_metadata(&env, &entries);
+
+            let has_empty = entries.iter().any(|(k, v)| k.is_empty() || v.is_empty());
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.register_issuer(&address, &metadata);
+            }));
+
+            if has_empty {
+                prop_assert!(
+                    result.is_err(),
+                    "metadata with empty key/value should be rejected, but succeeded"
+                );
+            }
+            // When all keys/values are non-empty the registration must
+            // succeed (the strategy can generate up to 5 entries, well
+            // below MAX_METADATA_SIZE).
+            if !has_empty {
+                prop_assert!(
+                    result.is_ok(),
+                    "metadata with all non-empty fields should be accepted, but panicked"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+}
