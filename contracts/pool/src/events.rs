@@ -35,6 +35,13 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
     );
 }
 
+pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "max_utilization_updated"),),
+        (old_cap_bps, new_cap_bps),
+    );
+}
+
 #[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(

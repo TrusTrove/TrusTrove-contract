@@ -562,15 +562,29 @@ fn test_release_to_pool_fails_amount_exceeds_i128_max() {
 
 #[test]
 fn test_release_to_pool_partial_repayment_succeeds() {
-    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount, &issuer);
+
+    // Capture balances before release
+    let pool_balance_before = get_balance(&env, &usdc_id, &pool);
+    let escrow_balance_before = get_balance(&env, &usdc_id, &client.address);
+
     let partial: u128 = 500_000_000;
     let result = client.release_to_pool(&invoice_id, &partial);
     assert!(result);
     assert_eq!(client.get_locked(&invoice_id), 0);
+
+    // Verify pool received exactly `partial`, not the full locked `amount`
+    let pool_balance_after = get_balance(&env, &usdc_id, &pool);
+    let escrow_balance_after = get_balance(&env, &usdc_id, &client.address);
+    assert_eq!(pool_balance_after - pool_balance_before, partial as i128);
+    assert_eq!(
+        escrow_balance_before - escrow_balance_after,
+        partial as i128
+    );
 }
 
 #[test]
