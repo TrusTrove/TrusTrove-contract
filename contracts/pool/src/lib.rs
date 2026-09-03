@@ -176,6 +176,72 @@ impl PoolContract {
         Self::usdc(&env)
     }
 
+    /// Returns the admin address for the pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `Admin`).
+    ///
+    /// # Returns
+    /// * `Address` - The admin address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let admin = client.get_admin();
+    /// ```
+    pub fn get_admin(env: Env) -> Address {
+        Self::admin(&env).expect("pool is not initialized: admin missing")
+    }
+
+    /// Returns the invoice contract address configured for the pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `InvoiceContract`).
+    ///
+    /// # Returns
+    /// * `Address` - The invoice contract address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoice = client.get_invoice_contract();
+    /// ```
+    pub fn get_invoice_contract(env: Env) -> Address {
+        Self::invoice_contract(&env).expect("pool is not initialized: invoice contract missing")
+    }
+
+    /// Returns the escrow contract address configured for the pool.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `EscrowContract`).
+    ///
+    /// # Returns
+    /// * `Address` - The escrow contract address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let escrow = client.get_escrow_contract();
+    /// ```
+    pub fn get_escrow_contract(env: Env) -> Address {
+        Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing")
+    }
+
     /// Deposits USDC from an LP and issues pool shares.
     ///
     /// # Arguments
@@ -457,7 +523,8 @@ impl PoolContract {
     /// ```
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
         Self::require_initialized(&env);
-        let invoice_contract = Self::invoice_contract(&env);
+        let invoice_contract = Self::invoice_contract(&env)
+            .expect("pool is not initialized: invoice contract missing");
 
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
@@ -569,7 +636,8 @@ impl PoolContract {
             .extend_ttl(&funded_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         // --- Interactions: cross-contract calls after pool state is committed.
-        let escrow_contract = Self::escrow_contract(&env);
+        let escrow_contract =
+            Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing");
 
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
@@ -618,7 +686,8 @@ impl PoolContract {
     /// client.receive_repayment(&invoice_id, 1_050);
     /// ```
     pub fn receive_repayment(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
-        let invoice_contract = Self::invoice_contract(&env);
+        let invoice_contract = Self::invoice_contract(&env)
+            .expect("pool is not initialized: invoice contract missing");
         invoice_contract.require_auth();
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
@@ -712,7 +781,8 @@ impl PoolContract {
         refund: u128,
         buyer: Address,
     ) -> bool {
-        let invoice_contract = Self::invoice_contract(&env);
+        let invoice_contract = Self::invoice_contract(&env)
+            .expect("pool is not initialized: invoice contract missing");
         invoice_contract.require_auth();
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
@@ -810,7 +880,8 @@ impl PoolContract {
     /// client.handle_default(&invoice_id);
     /// ```
     pub fn handle_default(env: Env, invoice_id: BytesN<32>) -> bool {
-        let invoice_contract = Self::invoice_contract(&env);
+        let invoice_contract = Self::invoice_contract(&env)
+            .expect("pool is not initialized: invoice contract missing");
         invoice_contract.require_auth();
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
@@ -819,7 +890,8 @@ impl PoolContract {
         }
         let funded_amount: u128 = env.storage().persistent().get(&funded_key).unwrap();
 
-        let escrow_contract = Self::escrow_contract(&env);
+        let escrow_contract =
+            Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing");
         let pool_address = env.current_contract_address();
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
@@ -1070,18 +1142,12 @@ impl PoolContract {
         env.storage().instance().get(&DataKey::Admin)
     }
 
-    fn invoice_contract(env: &Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::InvoiceContract)
-            .expect("pool is not initialized: invoice contract missing")
+    fn invoice_contract(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::InvoiceContract)
     }
 
-    fn escrow_contract(env: &Env) -> Address {
-        env.storage()
-            .instance()
-            .get(&DataKey::EscrowContract)
-            .expect("pool is not initialized: escrow contract missing")
+    fn escrow_contract(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::EscrowContract)
     }
 
     fn usdc(env: &Env) -> Address {
