@@ -36,48 +36,29 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "E_7L"
-                      },
-                      "val": {
-                        "string": "0DKJMG"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "JCNH1N"
-                      },
-                      "val": {
-                        "string": "3HzEWG7fa"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "V_H"
-                      },
-                      "val": {
-                        "string": "_RFH5EJzlO_v43J"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "Y_a_Vu_Zg"
-                      },
-                      "val": {
-                        "string": "___JC4V_VX8ofwg1Lb"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_n_WF_k1Q"
-                      },
-                      "val": {
-                        "string": "Eiw0Ab60UDA"
-                      }
-                    }
-                  ]
+                  "map": []
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "verify_profile",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "bool": true
                 }
               ]
             }
@@ -204,48 +185,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "E_7L"
-                            },
-                            "val": {
-                              "string": "0DKJMG"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "JCNH1N"
-                            },
-                            "val": {
-                              "string": "3HzEWG7fa"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "V_H"
-                            },
-                            "val": {
-                              "string": "_RFH5EJzlO_v43J"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "Y_a_Vu_Zg"
-                            },
-                            "val": {
-                              "string": "___JC4V_VX8ofwg1Lb"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "_n_WF_k1Q"
-                            },
-                            "val": {
-                              "string": "Eiw0Ab60UDA"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -406,6 +346,39 @@
                 "key": {
                   "ledger_key_nonce": {
                     "nonce": 2032731177588607455
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 4270020994084947596
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 4270020994084947596
                   }
                 },
                 "durability": "temporary",
@@ -599,48 +572,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "E_7L"
-                      },
-                      "val": {
-                        "string": "0DKJMG"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "JCNH1N"
-                      },
-                      "val": {
-                        "string": "3HzEWG7fa"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "V_H"
-                      },
-                      "val": {
-                        "string": "_RFH5EJzlO_v43J"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "Y_a_Vu_Zg"
-                      },
-                      "val": {
-                        "string": "___JC4V_VX8ofwg1Lb"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_n_WF_k1Q"
-                      },
-                      "val": {
-                        "string": "Eiw0Ab60UDA"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -683,6 +615,85 @@
               },
               {
                 "symbol": "register_buyer"
+              }
+            ],
+            "data": {
+              "bool": true
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": null,
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_call"
+              },
+              {
+                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
+              },
+              {
+                "symbol": "verify_profile"
+              }
+            ],
+            "data": {
+              "vec": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                },
+                {
+                  "bool": true
+                }
+              ]
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "profile_verified"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+              }
+            ],
+            "data": {
+              "bool": true
+            }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
+        "type_": "diagnostic",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "fn_return"
+              },
+              {
+                "symbol": "verify_profile"
               }
             ],
             "data": {

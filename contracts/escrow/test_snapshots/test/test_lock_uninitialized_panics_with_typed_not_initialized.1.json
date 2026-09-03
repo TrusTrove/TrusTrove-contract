@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 1,
+    "address": 2,
     "nonce": 0
   },
   "auth": [
@@ -100,6 +100,9 @@
                     "hi": 0,
                     "lo": 1000000000
                   }
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 }
               ]
             }
@@ -225,6 +228,9 @@
                         "hi": 0,
                         "lo": 1000000000
                       }
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     }
                   ]
                 }

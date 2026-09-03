@@ -160,6 +160,89 @@ impl MockToken {
 #[contracttype]
 pub struct TKey(Address);
 
+// --------------- Mock Invoice (unbounded face value) ---------------
+//
+// Stands in for the pool's configured invoice contract to prove that
+// fund_invoice's funded-amount multiplication rejects a pathologically large
+// cross-contract face_value with the typed PoolError::Overflow rather than an
+// untyped arithmetic abort (issue #585). The real invoice contract caps
+// face_value at MAX_FACE_VALUE = u128::MAX / 10_000, which cannot overflow
+// the (10000 - discount_bps) scaling; the pool must not rely on that
+// external bound.
+
+#[contract]
+pub struct MockHugeFaceInvoice;
+
+#[contractimpl]
+impl MockHugeFaceInvoice {
+    pub fn configure(
+        env: Env,
+        issuer: Address,
+        buyer: Address,
+        funding_asset: Address,
+        face_value: u128,
+        discount_bps: u32,
+    ) {
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "issuer")), &issuer);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "buyer")), &buyer);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "asset")), &funding_asset);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "face")), &face_value);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "disc")), &discount_bps);
+    }
+
+    pub fn get_status(_env: Env, _invoice_id: BytesN<32>) -> u32 {
+        1 // Listed
+    }
+
+    pub fn get_issuer(env: Env, _invoice_id: BytesN<32>) -> Address {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "issuer")))
+            .unwrap()
+    }
+
+    pub fn get_buyer(env: Env, _invoice_id: BytesN<32>) -> Address {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "buyer")))
+            .unwrap()
+    }
+
+    pub fn get_funding_asset(env: Env, _invoice_id: BytesN<32>) -> Address {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "asset")))
+            .unwrap()
+    }
+
+    pub fn get_face_value(env: Env, _invoice_id: BytesN<32>) -> u128 {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "face")))
+            .unwrap()
+    }
+
+    pub fn get_discount_bps(env: Env, _invoice_id: BytesN<32>) -> u32 {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "disc")))
+            .unwrap()
+    }
+}
+
+#[contracttype]
+pub struct InvKey(Symbol);
+
 struct TestEnv {
     env: Env,
     pool: PoolContractClient<'static>,
@@ -223,7 +306,7 @@ fn setup() -> TestEnv {
     invoice.initialize(&admin, &registry_id);
 
     let escrow = RealEscrowClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    escrow.initialize(&admin, &pool_id, &usdc_id);
 
     let pool = PoolContractClient::new(&env, &pool_id);
     pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
@@ -332,14 +415,25 @@ fn test_second_deposit_issues_proportional_shares() {
 
 #[test]
 fn test_second_deposit_scales_by_share_price() {
+    // Rewritten per #586: the previous body was byte-for-byte identical to
+    // test_second_deposit_issues_proportional_shares (second deposit still at
+    // share price 1.0). Here the second deposit happens AFTER a repayment has
+    // raised the share price to 1.02 (10.2B deposits backing 10B shares), so
+    // the returned share count must scale down precisely.
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
 
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 10_200_000_000);
+    assert_eq!(stats.total_shares, 10_000_000_000);
+
+    // 5_000_000_000 * 10_000_000_000 / 10_200_000_000 = 4_901_960_784 (floored)
     let shares = te.pool.deposit(&te.lp, &5_000_000_000);
-    assert_eq!(shares, 5_000_000_000);
+    assert_eq!(shares, 4_901_960_784);
 
     let pos = te.pool.get_lp_position(&te.lp);
-    assert_eq!(pos.shares, 15_000_000_000);
+    assert_eq!(pos.shares, 14_901_960_784);
     assert_eq!(pos.deposit_count, 2);
 }
 
@@ -814,6 +908,91 @@ fn test_get_stats_rejects_utilization_overflow() {
     let _ = te.pool.get_stats();
 }
 
+// ============== SHARE-PRICE OVERFLOW TESTS (issue #584) ==============
+//
+// The share-price multiplications in deposit/withdraw/get_lp_position must
+// panic with the typed PoolError::Overflow (#13) instead of a raw Rust
+// arithmetic-overflow abort (the workspace release profile sets
+// overflow-checks = true), matching utilization_bps_or_panic. The boundary is
+// driven by injecting u128-scaled storage values — the same technique the
+// get_stats/get_utilization_rate/fund_invoice overflow tests use.
+
+// `usdc_amount * total_shares` overflows u128 when total_shares is inflated
+// to u128::MAX, so deposit must panic with Overflow (#13). The check runs
+// before the token transfer, so the depositor's USDC is never pulled.
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_deposit_rejects_share_price_overflow() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &u128::MAX);
+    });
+
+    te.pool.deposit(&te.lp, &10_000_000_000);
+}
+
+// Boundary complement: the largest representable product (2 * (u128::MAX / 2)
+// == u128::MAX - 1) must still be accepted — checked_mul must not over-reject
+// legal share-price math.
+#[test]
+fn test_deposit_accepts_multiplication_at_overflow_boundary() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &(u128::MAX / 2));
+    });
+
+    let shares = te.pool.deposit(&te.lp, &2);
+    assert_eq!(shares, 2 * (u128::MAX / 2) / 10_000_000_000);
+}
+
+// `shares * total_deposits` overflows u128 when total_deposits is inflated to
+// u128::MAX, so withdraw must panic with Overflow (#13) before transferring
+// or burning anything.
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_withdraw_rejects_share_price_overflow() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &u128::MAX);
+    });
+
+    te.pool.withdraw(&te.lp, &10_000_000_000);
+}
+
+// `lp_shares * total_deposits` overflows u128 when total_deposits is inflated
+// to u128::MAX, so get_lp_position must panic with Overflow (#13) rather than
+// report a wrapped-around position value.
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_get_lp_position_rejects_share_price_overflow() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &u128::MAX);
+    });
+
+    let _ = te.pool.get_lp_position(&te.lp);
+}
+
 // ============== LP POSITION TESTS ==============
 
 #[test]
@@ -908,7 +1087,7 @@ fn test_default_max_utilization_in_stats() {
     let usdc_id = env.register_contract(None, MockToken);
     RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
     let pool_id = env.register_contract(None, PoolContract);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
     let pool = PoolContractClient::new(&env, &pool_id);
     pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
     let stats = pool.get_stats();
@@ -921,6 +1100,37 @@ fn test_updated_max_utilization_reflected_in_stats() {
     te.pool.set_max_utilization(&te.admin, &9000);
     let stats = te.pool.get_stats();
     assert_eq!(stats.max_utilization_bps, 9000);
+}
+
+// set_max_utilization must emit a max_utilization_updated event carrying the
+// old and new caps so off-chain indexers can observe risk-parameter changes
+// without polling get_stats() (issue #582).
+#[test]
+fn test_set_max_utilization_emits_event() {
+    let te = setup();
+    // setup() already raised the cap to 10000, so the old cap here is 10000.
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "max_utilization_updated")
+    );
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (10000, 8500)
+    );
+
+    // The storage update itself is still reflected in get_stats.
+    assert_eq!(te.pool.get_stats().max_utilization_bps, 8500);
+
+    // A rejected update (> 10000) must not emit the event.
+    assert!(te.pool.try_set_max_utilization(&te.admin, &10001).is_err());
+    let events_after = te.env.events().all();
+    assert_eq!(events_after.len(), events.len());
 }
 
 #[test]
@@ -943,6 +1153,41 @@ fn test_fund_invoice_rejects_utilization_overflow() {
     });
 
     let _ = te.pool.fund_invoice(&invoice_id);
+}
+
+// A pathologically large face_value read from the invoice contract (the pool
+// does not bound cross-contract values itself) must trigger the typed
+// PoolError::Overflow (#13) in the funded_amount multiplication rather than
+// an untyped arithmetic-overflow abort (#585).
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_fund_invoice_rejects_funded_amount_overflow() {
+    let te = setup();
+
+    // Stand-in invoice contract reporting a face_value that overflows u128
+    // when scaled by (10000 - discount_bps). The issuer/buyer it reports are
+    // the ones already verified in the pool's registry, so the overflow is
+    // the first failure the funding path hits.
+    let mock_id = te.env.register_contract(None, MockHugeFaceInvoice);
+    MockHugeFaceInvoiceClient::new(&te.env, &mock_id).configure(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &u128::MAX,
+        &0,
+    );
+
+    // Point the pool's configured invoice contract at the stand-in — same
+    // storage-injection technique as the other overflow tests in this file.
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_id);
+    });
+
+    let invoice_id = BytesN::from_array(&te.env, &[7u8; 32]);
+    te.pool.fund_invoice(&invoice_id);
 }
 
 #[test]
@@ -969,20 +1214,18 @@ fn test_fund_invoice_allowed_when_below_cap() {
 #[test]
 fn test_fund_invoice_is_permissionless() {
     // Verify that fund_invoice can be called by any address without admin authorization.
-    // Setup normally (with mock_all_auths) so initialization succeeds, then test with a non-admin caller.
+    // Setup normally (with mock_all_auths) so initialization succeeds, then test with no auths.
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
     let invoice_id = create_and_list(&te, &te.usdc_id);
 
-    // The default setup already tested that admin can call fund_invoice.
-    // What we're verifying is that the auth requirement was REMOVED.
-    // If admin.require_auth() was still in the code, it would fail.
-    // Since we're calling it in a setup that uses mock_all_auths, if it works,
-    // the auth requirement is gone.
+    // Clear all mocked auths so that any require_auth() call would fail.
+    // If admin.require_auth() was still in the code, this would panic.
+    te.env.set_auths(&[]);
     let result = te.pool.fund_invoice(&invoice_id);
     assert!(
         result,
-        "fund_invoice should succeed (no admin auth required)"
+        "fund_invoice should succeed without any mocked auths (no admin auth required)"
     );
 
     // Verify the invoice was actually funded
@@ -996,6 +1239,21 @@ fn test_fund_invoice_is_permissionless() {
 fn test_set_max_utilization_above_10000_panics() {
     let te = setup();
     te.pool.set_max_utilization(&te.admin, &10001);
+}
+
+// set_max_utilization must reject callers other than the admin (#581). The
+// admin-authorized path is already covered by
+// test_updated_max_utilization_reflected_in_stats and
+// test_set_max_utilization_emits_event.
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_utilization_requires_admin_authorization() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+
+    // Clear all mocked auths so the non-admin's require_auth() fails.
+    te.env.set_auths(&[]);
+    te.pool.set_max_utilization(&non_admin, &9000);
 }
 
 #[test]
@@ -1230,7 +1488,7 @@ fn test_receive_repayment_exact_funded_amount_has_no_yield() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_receive_repayment_requires_invoice_contract_authorization() {
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
@@ -1302,6 +1560,156 @@ fn test_receive_repayment_with_refund_accepts_time_inconsistent_split() {
     assert_eq!(after.total_funded, 0);
     let buyer_usdc_after = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
     assert_eq!(buyer_usdc_after, buyer_usdc_before);
+}
+
+// Happy path for receive_repayment_with_refund (#583): the buyer receives
+// exactly `refund` via the USDC transfer, only the remaining yield slice is
+// credited to the pool, and the repayment_received event carries
+// (amount, yield_amount).
+#[test]
+fn test_receive_repayment_with_refund_happy_path() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    // face_value=10_000_000_000, discount_bps=200 → funded=9_800_000_000.
+    // Split the 200_000_000 surplus: 120_000_000 to the buyer, 80_000_000 to LPs.
+    let amount = DEFAULT_FACE_VALUE;
+    let refund = 120_000_000u128;
+    let yield_amount = amount - DEFAULT_FUNDED_AMOUNT - refund;
+
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+    let buyer_before = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+
+    let result = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(result);
+
+    // Pool accounting reflects only the yield slice, not the refunded portion.
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(after.total_deposits, before.total_deposits + yield_amount);
+    assert_eq!(
+        after.total_yield_distributed,
+        before.total_yield_distributed + yield_amount
+    );
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(after.active_invoice_count, before.active_invoice_count - 1);
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value + yield_amount
+    );
+
+    // The buyer's USDC balance increased by exactly the refund.
+    let buyer_after = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+    assert_eq!(buyer_after, buyer_before + refund as i128);
+
+    // The funded-invoice entry must be removed.
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    assert!(!te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().has(&funded_key)
+    }));
+
+    // Event payload/topics for this entry point.
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, yield_amount)
+    );
+}
+
+// `refund` above the maximum (amount - funded_amount) must be rejected with
+// InvalidAmount (#4): the bound keeps the pool's yield non-negative and stops
+// invoice_contract from refunding more than the repayment surplus.
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_receive_repayment_with_refund_rejects_refund_above_max() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let amount = DEFAULT_FACE_VALUE;
+    // max refund = amount - funded = 200_000_000; send one stroop more.
+    let refund = amount - DEFAULT_FUNDED_AMOUNT + 1;
+
+    te.pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+}
+
+// refund == 0 must behave exactly like receive_repayment: the whole surplus
+// goes to LP yield, the buyer receives nothing (the `if refund > 0` guard
+// skips only the token transfer), and the repayment_received event still fires.
+#[test]
+fn test_receive_repayment_with_refund_zero_refund_matches_receive_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let amount = DEFAULT_FACE_VALUE;
+
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+    let buyer_before = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+
+    let result = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &0u128, &te.buyer);
+    assert!(result);
+
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(
+        after.total_deposits,
+        before.total_deposits + DEFAULT_YIELD_AMOUNT
+    );
+    assert_eq!(
+        after.total_yield_distributed,
+        before.total_yield_distributed + DEFAULT_YIELD_AMOUNT
+    );
+    assert_eq!(after.total_funded, 0);
+    assert_eq!(after.active_invoice_count, 0);
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value + DEFAULT_YIELD_AMOUNT
+    );
+
+    let buyer_after = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+    assert_eq!(buyer_after, buyer_before);
+
+    // The event still fires even though no refund transfer happened.
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, DEFAULT_YIELD_AMOUNT)
+    );
 }
 
 // Mismatched repayment (active_count already zero) must NOT silently underflow the
@@ -1406,6 +1814,7 @@ fn test_handle_default_active_count_underflow_panics() {
                 invoice_id: phantom_id.clone(),
                 amount: funded_amount,
                 locked_at: te.env.ledger().timestamp(),
+                issuer: Address::generate(&te.env),
             },
         );
     });
@@ -1666,7 +2075,7 @@ fn test_handle_default_rejects_when_escrow_reports_no_release() {
 }
 
 #[test]
-#[should_panic]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_handle_default_requires_invoice_contract_authorization() {
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
@@ -2262,7 +2671,7 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
     RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
 
     let pool_id = env.register_contract(None, PoolContract);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
 
     // Before initialize: TTL is the default of ~4096 ledgers.
     let ttl_before = env.as_contract(&pool_id, || env.storage().instance().get_ttl());
@@ -2315,17 +2724,11 @@ fn test_double_initialize_panics() {
         invoke: &MockAuthInvoke {
             contract: &escrow_id,
             fn_name: "initialize",
-            args: (
-                admin.clone(),
-                pool_id.clone(),
-                invoice_id.clone(),
-                usdc_id.clone(),
-            )
-                .into_val(&env),
+            args: (admin.clone(), pool_id.clone(), usdc_id.clone()).into_val(&env),
             sub_invokes: &[],
         },
     }]);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &invoice_id, &usdc_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
 
     // First pool initialize — succeeds with explicit auth
     env.mock_auths(&[MockAuth {
@@ -2423,6 +2826,19 @@ fn test_withdraw_before_initialize_panics() {
     pool.withdraw(&lp, &1_000);
 }
 
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_fund_invoice_before_initialize_panics() {
+    let env = Env::default();
+
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let invoice_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    // Pool is not initialized → should panic with NotInitialized (#2)
+    pool.fund_invoice(&invoice_id);
+}
+
 // --------------- Real Registry Integration ---------------
 //
 // Every other test in this file uses MockRegistry, a hand-rolled stand-in
@@ -2496,7 +2912,7 @@ mod real_registry_integration {
         invoice.initialize(&admin, &registry_id);
 
         let escrow = RealEscrowClient::new(&env, &escrow_id);
-        escrow.initialize(&admin, &pool_id, &invoice_id_addr, &usdc_id);
+        escrow.initialize(&admin, &pool_id, &usdc_id);
 
         let pool = PoolContractClient::new(&env, &pool_id);
         pool.initialize(&admin, &invoice_id_addr, &escrow_id, &usdc_id, &registry_id);
@@ -2597,6 +3013,64 @@ mod real_registry_integration {
         let due_date = env.ledger().timestamp() + 86400;
         invoice.create(&issuer, &buyer, &10_000_000_000u128, &due_date, &usdc_id);
     }
+}
+
+// ============== CHECKS-EFFECTS-INTERACTIONS TESTS (issue #576) ==============
+
+#[test]
+fn test_fund_invoice_commits_state_before_cross_contract_calls() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // Verify initial state
+    let stats_before = te.pool.get_stats();
+    assert_eq!(stats_before.total_funded, 0);
+    assert_eq!(stats_before.active_invoice_count, 0);
+
+    // Fund the invoice
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // Verify pool state is correctly updated after funding.
+    // This test documents that the checks-effects-interactions reorder
+    // produces the same end-state as before: TotalFunded and
+    // ActiveInvoiceCount are updated atomically with FundedInvoice.
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_funded, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(stats_after.active_invoice_count, 1);
+    assert_eq!(
+        stats_after.available_liquidity,
+        stats_before.total_deposits - DEFAULT_FUNDED_AMOUNT
+    );
+}
+
+#[test]
+fn test_fund_invoice_prevents_double_funding_via_funded_key_check() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    // First funding succeeds
+    let result = te.pool.fund_invoice(&invoice_id);
+    assert!(result);
+
+    // Verify the FundedInvoice entry exists in persistent storage,
+    // which is now committed before cross-contract calls.
+    let funded_amount: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id.clone()))
+            .unwrap_or(0)
+    });
+    assert_eq!(funded_amount, DEFAULT_FUNDED_AMOUNT);
+
+    // Second funding attempt is rejected - the AlreadyFunded guard
+    // reads from persistent storage that was committed before
+    // the cross-contract calls in the first funding.
+    let result = te.pool.try_fund_invoice(&invoice_id);
+    assert!(result.is_err());
 }
 
 // ============== PUBLIC GETTER TESTS (issue #578) ==============
