@@ -558,7 +558,6 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::Counter, &next_counter);
 
-        let now = env.ledger().timestamp();
         let mut hash_input = Bytes::new(&env);
         let issuer_xdr = issuer.clone().to_xdr(&env);
         let buyer_xdr = buyer.clone().to_xdr(&env);

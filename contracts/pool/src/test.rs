@@ -160,6 +160,89 @@ impl MockToken {
 #[contracttype]
 pub struct TKey(Address);
 
+// --------------- Mock Invoice (unbounded face value) ---------------
+//
+// Stands in for the pool's configured invoice contract to prove that
+// fund_invoice's funded-amount multiplication rejects a pathologically large
+// cross-contract face_value with the typed PoolError::Overflow rather than an
+// untyped arithmetic abort (issue #585). The real invoice contract caps
+// face_value at MAX_FACE_VALUE = u128::MAX / 10_000, which cannot overflow
+// the (10000 - discount_bps) scaling; the pool must not rely on that
+// external bound.
+
+#[contract]
+pub struct MockHugeFaceInvoice;
+
+#[contractimpl]
+impl MockHugeFaceInvoice {
+    pub fn configure(
+        env: Env,
+        issuer: Address,
+        buyer: Address,
+        funding_asset: Address,
+        face_value: u128,
+        discount_bps: u32,
+    ) {
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "issuer")), &issuer);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "buyer")), &buyer);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "asset")), &funding_asset);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "face")), &face_value);
+        env.storage()
+            .instance()
+            .set(&InvKey(Symbol::new(&env, "disc")), &discount_bps);
+    }
+
+    pub fn get_status(_env: Env, _invoice_id: BytesN<32>) -> u32 {
+        1 // Listed
+    }
+
+    pub fn get_issuer(env: Env, _invoice_id: BytesN<32>) -> Address {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "issuer")))
+            .unwrap()
+    }
+
+    pub fn get_buyer(env: Env, _invoice_id: BytesN<32>) -> Address {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "buyer")))
+            .unwrap()
+    }
+
+    pub fn get_funding_asset(env: Env, _invoice_id: BytesN<32>) -> Address {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "asset")))
+            .unwrap()
+    }
+
+    pub fn get_face_value(env: Env, _invoice_id: BytesN<32>) -> u128 {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "face")))
+            .unwrap()
+    }
+
+    pub fn get_discount_bps(env: Env, _invoice_id: BytesN<32>) -> u32 {
+        env.storage()
+            .instance()
+            .get(&InvKey(Symbol::new(&env, "disc")))
+            .unwrap()
+    }
+}
+
+#[contracttype]
+pub struct InvKey(Symbol);
+
 struct TestEnv {
     env: Env,
     pool: PoolContractClient<'static>,
@@ -332,14 +415,25 @@ fn test_second_deposit_issues_proportional_shares() {
 
 #[test]
 fn test_second_deposit_scales_by_share_price() {
+    // Rewritten per #586: the previous body was byte-for-byte identical to
+    // test_second_deposit_issues_proportional_shares (second deposit still at
+    // share price 1.0). Here the second deposit happens AFTER a repayment has
+    // raised the share price to 1.02 (10.2B deposits backing 10B shares), so
+    // the returned share count must scale down precisely.
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
 
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_deposits, 10_200_000_000);
+    assert_eq!(stats.total_shares, 10_000_000_000);
+
+    // 5_000_000_000 * 10_000_000_000 / 10_200_000_000 = 4_901_960_784 (floored)
     let shares = te.pool.deposit(&te.lp, &5_000_000_000);
-    assert_eq!(shares, 5_000_000_000);
+    assert_eq!(shares, 4_901_960_784);
 
     let pos = te.pool.get_lp_position(&te.lp);
-    assert_eq!(pos.shares, 15_000_000_000);
+    assert_eq!(pos.shares, 14_901_960_784);
     assert_eq!(pos.deposit_count, 2);
 }
 
@@ -1061,6 +1155,41 @@ fn test_fund_invoice_rejects_utilization_overflow() {
     let _ = te.pool.fund_invoice(&invoice_id);
 }
 
+// A pathologically large face_value read from the invoice contract (the pool
+// does not bound cross-contract values itself) must trigger the typed
+// PoolError::Overflow (#13) in the funded_amount multiplication rather than
+// an untyped arithmetic-overflow abort (#585).
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_fund_invoice_rejects_funded_amount_overflow() {
+    let te = setup();
+
+    // Stand-in invoice contract reporting a face_value that overflows u128
+    // when scaled by (10000 - discount_bps). The issuer/buyer it reports are
+    // the ones already verified in the pool's registry, so the overflow is
+    // the first failure the funding path hits.
+    let mock_id = te.env.register_contract(None, MockHugeFaceInvoice);
+    MockHugeFaceInvoiceClient::new(&te.env, &mock_id).configure(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &u128::MAX,
+        &0,
+    );
+
+    // Point the pool's configured invoice contract at the stand-in — same
+    // storage-injection technique as the other overflow tests in this file.
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_id);
+    });
+
+    let invoice_id = BytesN::from_array(&te.env, &[7u8; 32]);
+    te.pool.fund_invoice(&invoice_id);
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #12)")]
 fn test_fund_invoice_rejects_above_cap() {
@@ -1110,6 +1239,21 @@ fn test_fund_invoice_is_permissionless() {
 fn test_set_max_utilization_above_10000_panics() {
     let te = setup();
     te.pool.set_max_utilization(&te.admin, &10001);
+}
+
+// set_max_utilization must reject callers other than the admin (#581). The
+// admin-authorized path is already covered by
+// test_updated_max_utilization_reflected_in_stats and
+// test_set_max_utilization_emits_event.
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_utilization_requires_admin_authorization() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+
+    // Clear all mocked auths so the non-admin's require_auth() fails.
+    te.env.set_auths(&[]);
+    te.pool.set_max_utilization(&non_admin, &9000);
 }
 
 #[test]

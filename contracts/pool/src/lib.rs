@@ -437,7 +437,8 @@ impl PoolContract {
     /// * `InvalidAmount` if the computed funded amount is zero.
     /// * `InsufficientLiquidity` if the pool does not have enough funds.
     /// * `UtilizationCapExceeded` if funding would push utilization above the cap.
-    /// * `Overflow` if the resulting utilization calculation overflows `u128`.
+    /// * `Overflow` if `face_value * (10000 - discount_bps)` or the resulting
+    ///   utilization calculation overflows `u128`.
     ///
     /// # Returns
     /// * `bool` - `true` when the invoice is funded.
@@ -515,7 +516,13 @@ impl PoolContract {
             args,
         );
 
-        let funded_amount = face_value * (10000 - discount_bps as u128) / 10000;
+        // `face_value` is read from the invoice contract via a cross-contract
+        // call and is not bounded by this pool, so the scaling multiplication
+        // must be guarded just like the utilization check below (#585).
+        let funded_amount = face_value
+            .checked_mul(10000 - discount_bps as u128)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))
+            / 10000;
         if funded_amount == 0 {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
