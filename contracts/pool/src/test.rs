@@ -3,7 +3,8 @@
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{
-        storage::Instance as _, Address as _, Events as _, Ledger, MockAuth, MockAuthInvoke,
+        storage::Instance as _, storage::Persistent as _, Address as _, Events as _, Ledger,
+        MockAuth, MockAuthInvoke,
     },
     xdr::ToXdr,
     Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
@@ -1131,6 +1132,27 @@ fn test_set_max_utilization_emits_event() {
     assert!(te.pool.try_set_max_utilization(&te.admin, &10001).is_err());
     let events_after = te.env.events().all();
     assert_eq!(events_after.len(), events.len());
+}
+
+// ============== GET_USDC_ASSET TESTS ==============
+
+#[test]
+fn test_get_usdc_asset_returns_configured_asset() {
+    let te = setup();
+    assert_eq!(te.pool.get_usdc_asset(), te.usdc_id);
+}
+
+// get_usdc_asset delegates to Self::usdc(), whose instance read is
+// `.expect()`-guarded ("pool is not initialized: USDC asset missing") rather
+// than a typed PoolError. This test documents that untyped panic when the
+// pool has never been initialized (issues #591).
+#[test]
+#[should_panic(expected = "pool is not initialized: USDC asset missing")]
+fn test_get_usdc_asset_panics_when_uninitialized() {
+    let env = Env::default();
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    pool.get_usdc_asset();
 }
 
 #[test]
@@ -2688,6 +2710,102 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
     assert!(
         ttl_after >= 1_999_000,
         "instance ttl should be extended close to EXTEND_TO, got {ttl_after}"
+    );
+}
+
+// ============== ISSUE #588: LP ENTRY TTL EXTENSION ON get_lp_position ==============
+
+// A deposit-and-hold LP only ever has LPShares/LPDepositCount/LPInitialDeposit
+// TTLs set at deposit time. get_lp_position must refresh those entries on
+// read, otherwise they lapse and become archival-eligible even though the
+// position is still live from the pool's economic perspective.
+#[test]
+fn test_get_lp_position_extends_ttl_for_deposit_and_hold_lp() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let keys = [
+        DataKey::LPShares(te.lp.clone()),
+        DataKey::LPDepositCount(te.lp.clone()),
+        DataKey::LPInitialDeposit(te.lp.clone()),
+    ];
+
+    // Drive the entries below the write-path threshold. All three were set at
+    // the same deposit, so one key's remaining TTL gauges the drain for all.
+    let ttl_before_drain: u32 = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get_ttl(&keys[0])
+    });
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + ttl_before_drain - 50);
+
+    for key in &keys {
+        let ttl_before_read: u32 = te
+            .env
+            .as_contract(&te.pool_id, || te.env.storage().persistent().get_ttl(key));
+        assert!(
+            ttl_before_read < TTL_THRESHOLD,
+            "TTL should be below threshold before read, got {ttl_before_read}"
+        );
+    }
+
+    // The read refreshes every surviving LP entry, not just LPShares.
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert_eq!(pos.shares, 10_000_000_000);
+
+    for key in &keys {
+        let ttl_after_read: u32 = te
+            .env
+            .as_contract(&te.pool_id, || te.env.storage().persistent().get_ttl(key));
+        assert!(
+            ttl_after_read >= 1_999_000,
+            "get_lp_position should extend TTL close to EXTEND_TO, got {ttl_after_read}"
+        );
+    }
+}
+
+// LPYieldEarned only appears after a withdrawal realizes yield, so the
+// deposit-and-hold case above cannot cover it. Verify it is refreshed too.
+#[test]
+fn test_get_lp_position_extends_ttl_for_yield_earned_entry() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    fund_and_repay_invoice(&te);
+    // Reap 10M of realized yield (5B shares @ 1.002 price) so the
+    // LPYieldEarned entry is created.
+    te.pool.withdraw(&te.lp, &5_000_000_000);
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert!(
+        pos.yield_earned > 0,
+        "expected realized yield, got {}",
+        pos.yield_earned
+    );
+
+    let yield_key = DataKey::LPYieldEarned(te.lp.clone());
+    let ttl_before_drain: u32 = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get_ttl(&yield_key)
+    });
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_read: u32 = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get_ttl(&yield_key)
+    });
+    assert!(
+        ttl_before_read < TTL_THRESHOLD,
+        "TTL should be below threshold before read, got {ttl_before_read}"
+    );
+
+    let pos = te.pool.get_lp_position(&te.lp);
+    assert!(pos.yield_earned > 0);
+
+    let ttl_after_read: u32 = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get_ttl(&yield_key)
+    });
+    assert!(
+        ttl_after_read >= 1_999_000,
+        "get_lp_position should extend LPYieldEarned TTL close to EXTEND_TO, got {ttl_after_read}"
     );
 }
 
