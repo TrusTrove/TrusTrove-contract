@@ -3073,6 +3073,57 @@ fn test_fund_invoice_prevents_double_funding_via_funded_key_check() {
     assert!(result.is_err());
 }
 
+// ============== INITIALIZE EVENT TESTS (issue #575) ==============
+
+#[test]
+fn test_initialize_emits_pool_initialized_event() {
+    let env = Env::default();
+    env.mock_all_auths_allowing_non_root_auth();
+
+    let admin = Address::generate(&env);
+    let registry_id = env.register_contract(None, MockRegistry);
+    let invoice_id = env.register_contract(None, RealInvoice);
+    let escrow_id = env.register_contract(None, RealEscrow);
+    let usdc_id = env.register_contract(None, MockToken);
+
+    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
+    let pool_addr = env.register_contract(None, PoolContract);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_addr, &usdc_id);
+
+    let pool = PoolContractClient::new(&env, &pool_addr);
+    pool.initialize(&admin, &invoice_id, &escrow_id, &usdc_id, &registry_id);
+
+    let events = env.events().all();
+    let mut found = false;
+    for i in 0..events.len() {
+        let (contract, topics, _data) = events.get(i).unwrap();
+        if contract == pool_addr {
+            let symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+            if symbol == Symbol::new(&env, "pool_initialized") {
+                assert_eq!(
+                    Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+                    admin
+                );
+                assert_eq!(
+                    Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap(),
+                    invoice_id
+                );
+                assert_eq!(
+                    Address::try_from_val(&env, &topics.get(3).unwrap()).unwrap(),
+                    escrow_id
+                );
+                assert_eq!(
+                    Address::try_from_val(&env, &topics.get(4).unwrap()).unwrap(),
+                    usdc_id
+                );
+                found = true;
+                break;
+            }
+        }
+    }
+    assert!(found, "pool_initialized event not found");
+}
+
 // ============== PUBLIC GETTER TESTS (issue #578) ==============
 
 #[test]

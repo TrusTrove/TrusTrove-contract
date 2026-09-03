@@ -144,6 +144,14 @@ impl PoolContract {
             .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
         Self::extend_instance_ttl(&env);
+
+        events::pool_initialized(
+            &env,
+            &admin,
+            &invoice_contract,
+            &escrow_contract,
+            &usdc_asset,
+        );
     }
 
     /// Returns the USDC asset used by the pool.
