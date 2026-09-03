@@ -786,6 +786,140 @@ fn test_batch_register_issuers_mixed() {
     assert!(!client.is_verified(&issuer3));
 }
 
+// ============== BATCH REGISTER BUYERS (#448) ==============
+
+#[test]
+fn test_batch_register_buyers_empty_vec() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let entries = Vec::new(&env);
+    let skipped = client.batch_register_buyers(&entries);
+    assert_eq!(skipped.len(), 0);
+}
+
+#[test]
+fn test_batch_register_buyers_all_new() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    let buyer3 = Address::generate(&env);
+
+    let metadata1 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer 1")
+        )
+    ];
+    let metadata2 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer 2")
+        )
+    ];
+    let metadata3 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer 3")
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), metadata1),
+        (buyer2.clone(), metadata2),
+        (buyer3.clone(), metadata3),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    assert!(!client.is_verified(&buyer1));
+    assert!(!client.is_verified(&buyer2));
+    assert!(!client.is_verified(&buyer3));
+
+    assert_eq!(client.get_profile(&buyer1).role(), crate::Role::Buyer);
+    assert_eq!(client.get_profile(&buyer2).role(), crate::Role::Buyer);
+    assert_eq!(client.get_profile(&buyer3).role(), crate::Role::Buyer);
+}
+
+#[test]
+fn test_batch_register_buyers_all_duplicate() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+
+    client.register_buyer(&buyer1, &map![&env]);
+    client.register_buyer(&buyer2, &map![&env]);
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), map![&env]),
+        (buyer2.clone(), map![&env]),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    // Both were already registered — both are reported as skipped.
+    assert_eq!(skipped.len(), 2);
+    assert!(skipped.contains(&buyer1));
+    assert!(skipped.contains(&buyer2));
+}
+
+#[test]
+fn test_batch_register_buyers_mixed() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env); // existing
+    let buyer2 = Address::generate(&env); // new
+    let buyer3 = Address::generate(&env); // new
+
+    client.register_buyer(&buyer1, &map![&env]);
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), map![&env]),
+        (buyer2.clone(), map![&env]),
+        (buyer3.clone(), map![&env]),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    // Only buyer1 was already registered.
+    assert_eq!(skipped.len(), 1);
+    assert!(skipped.contains(&buyer1));
+
+    assert!(!client.is_verified(&buyer1));
+    assert!(!client.is_verified(&buyer2));
+    assert!(!client.is_verified(&buyer3));
+
+    assert_eq!(client.get_profile(&buyer2).role(), crate::Role::Buyer);
+    assert_eq!(client.get_profile(&buyer3).role(), crate::Role::Buyer);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_batch_register_buyers_exceeds_limit() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+    client.batch_register_buyers(&entries);
+}
+
 #[test]
 fn test_verify_profile_updates_status() {
     let (env, client) = setup();
@@ -824,6 +958,20 @@ fn test_verify_profile_unknown_panics() {
     client.initialize(&admin);
     let unknown = Address::generate(&env);
     client.verify_profile(&unknown, &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_verify_profile_wrong_auth_panics() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    // Clear all mocked auths — a non-admin caller should be rejected
+    env.set_auths(&[]);
+    client.verify_profile(&issuer, &true);
 }
 
 #[test]
@@ -1651,4 +1799,183 @@ fn test_get_admin_extends_instance_ttl() {
         ttl_after_read >= 1_999_000,
         "Instance TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_read}"
     );
+}
+
+// ============== ISSUE #447: update_metadata extends instance TTL ==============
+
+#[test]
+fn test_update_metadata_extends_instance_ttl() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(
+        &issuer,
+        &map![
+            &env,
+            (
+                String::from_str(&env, "name"),
+                String::from_str(&env, "Acme Corp")
+            )
+        ],
+    );
+
+    let contract_id = client.address.clone();
+
+    // Drain instance TTL below the threshold (100).
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_update: u32 =
+        env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_update < TTL_THRESHOLD,
+        "Instance TTL should be below threshold before update, got {ttl_before_update}"
+    );
+
+    // Update metadata — this should extend the instance TTL.
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme LLC")
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let ttl_after_update: u32 =
+        env.as_contract(&contract_id, || env.storage().instance().get_ttl());
+
+    assert!(
+        ttl_after_update > ttl_before_update,
+        "update_metadata should extend instance TTL: before={ttl_before_update}, after={ttl_after_update}"
+    );
+    assert!(
+        ttl_after_update >= 1_999_000,
+        "Instance TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_update}"
+    );
+}
+
+// ============== PROPERTY-BASED TESTS: METADATA BOUNDARY (Issue #449) ==============
+
+/// Strategy that generates metadata entries with valid key/value patterns.
+fn valid_metadata_entries(
+) -> impl Strategy<Value = std::vec::Vec<(std::string::String, std::string::String)>> {
+    prop::collection::vec(("[a-zA-Z_][a-zA-Z0-9_]{0,9}", "[a-zA-Z0-9_]{1,20}"), 0..=5)
+}
+
+/// Strategy that generates metadata entries that may contain empty keys or
+/// values (approximately 30% chance per entry).
+fn metadata_entries_with_empty_field(
+) -> impl Strategy<Value = std::vec::Vec<(std::string::String, std::string::String)>> {
+    prop::collection::vec(
+        (
+            prop_oneof![
+                Just(std::string::String::new()),
+                "[a-zA-Z][a-zA-Z0-9_]{0,9}"
+            ],
+            prop_oneof![Just(std::string::String::new()), "[a-zA-Z0-9_]{1,20}"],
+        ),
+        1..=5,
+    )
+}
+
+/// Proptest: metadata maps with sizes in 0..=20 are accepted, sizes in
+/// 21..=25 are rejected with `InvalidMetadata`.
+#[test]
+fn prop_metadata_size_boundary_accepted_and_rejected() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(0u32..=25, valid_metadata_entries()),
+            |(target_size, entries)| {
+                let (env, client) = setup();
+                let admin = Address::generate(&env);
+                client.initialize(&admin);
+                let address = Address::generate(&env);
+
+                // Build a metadata map with exactly `target_size` entries.
+                let mut metadata = map![&env];
+                for i in 0..target_size {
+                    if let Some((k, v)) = entries.get(i as usize) {
+                        metadata.set(
+                            String::from_str(&env, k.as_str()),
+                            String::from_str(&env, v.as_str()),
+                        );
+                    } else {
+                        // Generate a fallback key/value pair when the
+                        // strategy provided fewer entries than target_size.
+                        metadata.set(
+                            String::from_str(&env, &std::format!("key_{i}")),
+                            String::from_str(&env, &std::format!("value_{i}")),
+                        );
+                    }
+                }
+
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    client.register_issuer(&address, &metadata);
+                }));
+
+                if target_size <= 20 {
+                    prop_assert!(
+                        result.is_ok(),
+                        "metadata with {} entries should be accepted, but panicked",
+                        target_size
+                    );
+                    // Verify the profile was registered successfully.
+                    prop_assert_eq!(client.get_profile(&address).role(), Role::Issuer);
+                } else {
+                    prop_assert!(
+                        result.is_err(),
+                        "metadata with {} entries should be rejected, but succeeded",
+                        target_size
+                    );
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+/// Proptest: metadata containing at least one empty key or empty value is
+/// always rejected with `InvalidMetadata`, regardless of total size.
+#[test]
+fn prop_metadata_empty_key_or_value_always_rejected() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(&metadata_entries_with_empty_field(), |entries| {
+            let (env, client) = setup();
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+            let address = Address::generate(&env);
+
+            let metadata = build_metadata(&env, &entries);
+
+            let has_empty = entries.iter().any(|(k, v)| k.is_empty() || v.is_empty());
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                client.register_issuer(&address, &metadata);
+            }));
+
+            if has_empty {
+                prop_assert!(
+                    result.is_err(),
+                    "metadata with empty key/value should be rejected, but succeeded"
+                );
+            }
+            // When all keys/values are non-empty the registration must
+            // succeed (the strategy can generate up to 5 entries, well
+            // below MAX_METADATA_SIZE).
+            if !has_empty {
+                prop_assert!(
+                    result.is_ok(),
+                    "metadata with all non-empty fields should be accepted, but panicked"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
 }
