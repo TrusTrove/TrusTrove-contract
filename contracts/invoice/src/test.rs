@@ -10,7 +10,10 @@ use soroban_sdk::{
     Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
 };
 
-use crate::{InvoiceContract, InvoiceContractClient, InvoiceStatus, TTL_EXTEND_TO, TTL_THRESHOLD};
+use crate::{
+    InvoiceContract, InvoiceContractClient, InvoiceStatus, MAX_FACE_VALUE, TTL_EXTEND_TO,
+    TTL_THRESHOLD,
+};
 
 // Default invoice parameters used across tests.
 // These computed constants eliminate magic numbers in test assertions
@@ -714,6 +717,26 @@ fn test_create_fails_zero_face_value() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     client.create(&issuer, &buyer, &0, &due_date, &usdc);
+}
+
+#[test]
+fn test_create_succeeds_at_max_face_value() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &MAX_FACE_VALUE, &due_date, &usdc);
+
+    assert_eq!(client.get(&invoice_id).face_value, MAX_FACE_VALUE);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_create_fails_above_max_face_value() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let above_max = MAX_FACE_VALUE.checked_add(1).unwrap();
+
+    client.create(&issuer, &buyer, &above_max, &due_date, &usdc);
 }
 
 #[test]
