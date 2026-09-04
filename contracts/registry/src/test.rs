@@ -858,7 +858,10 @@ fn test_batch_register_issuers_invalid_metadata_leaves_state_clean() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.batch_register_issuers(&entries);
     }));
-    assert!(result.is_err(), "batch_register_issuers should panic on invalid metadata");
+    assert!(
+        result.is_err(),
+        "batch_register_issuers should panic on invalid metadata"
+    );
 
     // Verify that issuer1 was NOT registered — the entire batch was rejected.
     assert!(!client.is_verified(&issuer1));
