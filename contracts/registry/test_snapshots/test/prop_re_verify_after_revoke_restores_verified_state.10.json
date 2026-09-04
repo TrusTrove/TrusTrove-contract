@@ -36,32 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "Q_W_Mm_0J"
-                      },
-                      "val": {
-                        "string": "Y_"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "u7"
-                      },
-                      "val": {
-                        "string": "_KYa88Nz7zYc2N_a"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "vq8_NOdU8T"
-                      },
-                      "val": {
-                        "string": "g"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -277,32 +252,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "Q_W_Mm_0J"
-                            },
-                            "val": {
-                              "string": "Y_"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "u7"
-                            },
-                            "val": {
-                              "string": "_KYa88Nz7zYc2N_a"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "vq8_NOdU8T"
-                            },
-                            "val": {
-                              "string": "g"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -788,32 +738,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "Q_W_Mm_0J"
-                      },
-                      "val": {
-                        "string": "Y_"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "u7"
-                      },
-                      "val": {
-                        "string": "_KYa88Nz7zYc2N_a"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "vq8_NOdU8T"
-                      },
-                      "val": {
-                        "string": "g"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
