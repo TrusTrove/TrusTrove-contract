@@ -15,11 +15,6 @@ pub use constants::*;
 pub use errors::*;
 pub use types::*;
 
-/// Minimum initial deposit floor (1 USDC = 10_000_000 stroops).
-/// Prevents share-price griefing by requiring the initial deposit in an empty pool
-/// to be at least this floor.
-pub const MIN_INITIAL_DEPOSIT: u128 = 10_000_000;
-
 /// Default maximum utilization cap (in basis points) written at
 /// `initialize()` time. 8500 bps = 85%. This is the single source of truth for
 /// the default: `totals()`'s fallback reads the same constant, so the two call
