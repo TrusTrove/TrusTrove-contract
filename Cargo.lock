@@ -682,6 +682,7 @@ dependencies = [
  "elliptic-curve",
  "once_cell",
  "sha2",
+ "signature",
 ]
 
 [[package]]
@@ -1524,6 +1525,20 @@ name = "trusttrove-escrow"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",
+ "trusttrove-ttl",
+]
+
+[[package]]
+name = "trusttrove-fuzz"
+version = "0.1.0"
+dependencies = [
+ "arbitrary",
+ "k256",
+ "soroban-sdk",
+ "trusttrove-escrow",
+ "trusttrove-invoice",
+ "trusttrove-pool",
+ "trusttrove-registry",
  "trusttrove-ttl",
 ]
 
