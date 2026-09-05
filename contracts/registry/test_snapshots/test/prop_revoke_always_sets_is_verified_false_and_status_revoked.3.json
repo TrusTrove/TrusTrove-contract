@@ -36,24 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "Ws_Y_3T_"
-                      },
-                      "val": {
-                        "string": "Qbl_Z_bOqmuV_u"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "WtD"
-                      },
-                      "val": {
-                        "string": "1qgcnw"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -158,24 +141,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "Ws_Y_3T_"
-                            },
-                            "val": {
-                              "string": "Qbl_Z_bOqmuV_u"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "WtD"
-                            },
-                            "val": {
-                              "string": "1qgcnw"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -496,24 +462,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "Ws_Y_3T_"
-                      },
-                      "val": {
-                        "string": "Qbl_Z_bOqmuV_u"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "WtD"
-                      },
-                      "val": {
-                        "string": "1qgcnw"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }

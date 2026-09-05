@@ -20,6 +20,12 @@ pub use types::*;
 /// to be at least this floor.
 pub const MIN_INITIAL_DEPOSIT: u128 = 10_000_000;
 
+/// Default maximum utilization cap (in basis points) written at
+/// `initialize()` time. 8500 bps = 85%. This is the single source of truth for
+/// the default: `totals()`'s fallback reads the same constant, so the two call
+/// sites can never silently desync if the default is ever changed.
+pub const DEFAULT_MAX_UTILIZATION_BPS: u32 = 8500;
+
 #[contract]
 pub struct PoolContract;
 
@@ -139,7 +145,7 @@ impl PoolContract {
             .set(&DataKey::ActiveInvoiceCount, &0u32);
         env.storage()
             .instance()
-            .set(&DataKey::MaxUtilizationBps, &8500u32);
+            .set(&DataKey::MaxUtilizationBps, &DEFAULT_MAX_UTILIZATION_BPS);
         env.storage()
             .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
@@ -690,45 +696,10 @@ impl PoolContract {
             .expect("pool is not initialized: invoice contract missing");
         invoice_contract.require_auth();
 
-        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        let funded_amount: u128 = env
-            .storage()
-            .persistent()
-            .get(&funded_key)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
-        if amount < funded_amount {
-            panic_with_error!(&env, PoolError::InvalidAmount);
-        }
+        // Shared settlement path; `refund` is 0 so the whole surplus
+        // (amount - funded_amount) is credited to LPs as yield.
+        Self::settle_repayment(&env, &invoice_id, amount, 0);
 
-        let yield_amount = amount - funded_amount;
-        let totals = Self::totals(&env);
-        let total_deposits = totals.deposits;
-        let total_funded = totals.funded;
-        let total_yield = totals.yield_distributed;
-
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
-        env.storage().instance().set(
-            &DataKey::TotalYieldDistributed,
-            &(total_yield + yield_amount),
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
-
-        let active_count = totals.active_invoices;
-        let new_active_count = active_count
-            .checked_sub(1)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::ActiveCountUnderflow));
-        env.storage()
-            .instance()
-            .set(&DataKey::ActiveInvoiceCount, &new_active_count);
-
-        env.storage().persistent().remove(&funded_key);
-
-        events::repayment_received(&env, &invoice_id, amount, yield_amount);
-        Self::extend_instance_ttl(&env);
         true
     }
 
@@ -785,57 +756,21 @@ impl PoolContract {
             .expect("pool is not initialized: invoice contract missing");
         invoice_contract.require_auth();
 
-        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        let funded_amount: u128 = env
-            .storage()
-            .persistent()
-            .get(&funded_key)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
-        if amount < funded_amount {
-            panic_with_error!(&env, PoolError::InvalidAmount);
-        }
+        // Shared settlement path: `settle_repayment` owns the funded-entry
+        // lookup, the `amount >= funded_amount` and refund-bound validation,
+        // the totals update, the funded-entry removal, the event, and the
+        // instance TTL bump. Only the refund's USDC transfer is specific to
+        // this entry point and is layered on top here.
+        Self::settle_repayment(&env, &invoice_id, amount, refund);
 
-        let max_refund = amount.saturating_sub(funded_amount);
-        if refund > max_refund {
-            panic_with_error!(&env, PoolError::InvalidAmount);
-        }
-
-        let yield_amount = amount - funded_amount - refund;
-        let totals = Self::totals(&env);
-        let total_deposits = totals.deposits;
-        let total_funded = totals.funded;
-        let total_yield = totals.yield_distributed;
-
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
-        env.storage().instance().set(
-            &DataKey::TotalYieldDistributed,
-            &(total_yield + yield_amount),
-        );
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
-
-        let active_count = totals.active_invoices;
-        let new_active_count = active_count
-            .checked_sub(1)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::ActiveCountUnderflow));
-        env.storage()
-            .instance()
-            .set(&DataKey::ActiveInvoiceCount, &new_active_count);
-
-        env.storage().persistent().remove(&funded_key);
-
-        // transfer refund back to buyer from pool's USDC balance
+        // Transfer the buyer's refund out of the pool's USDC balance. Skipped
+        // entirely when the refund is zero.
         let usdc_id = Self::usdc(&env);
         let usdc = token::Client::new(&env, &usdc_id);
         if refund > 0 {
             usdc.transfer(&env.current_contract_address(), &buyer, &(refund as i128));
         }
 
-        events::repayment_received(&env, &invoice_id, amount, yield_amount);
-        Self::extend_instance_ttl(&env);
         true
     }
 
@@ -1006,6 +941,17 @@ impl PoolContract {
     /// All storage reads default to `0` when the LP has no recorded position,
     /// so an LP without a position simply reports zeros.
     ///
+    /// # TTL maintenance
+    /// `get_lp_position` is a read that keeps a live position alive: every
+    /// surviving LP-scoped persistent entry it reads (`LPShares`,
+    /// `LPYieldEarned`, `LPDepositCount`, and `LPInitialDeposit`) has its TTL
+    /// extended using the same threshold/target as the deposit/withdraw write
+    /// paths. This matters for deposit-and-hold LPs who never call
+    /// `deposit`/`withdraw` again — without the read-triggered bump their
+    /// entries would lapse and become archival-eligible even though the
+    /// position is still economically live (#588). Entries that do not exist
+    /// are skipped, so reads for an LP with no position perform no writes.
+    ///
     /// # Returns
     /// * `LPPosition` - The LP position details.
     ///
@@ -1042,6 +988,31 @@ impl PoolContract {
             .persistent()
             .get(&DataKey::LPDepositCount(lp.clone()))
             .unwrap_or(0);
+
+        // Read-triggered TTL bump (#588): deposit/withdraw are the only write
+        // paths that extend the LP-scoped persistent entries, so a
+        // deposit-and-hold LP's entries would otherwise lapse and become
+        // archival-eligible even though their position is still live. Refresh
+        // every surviving LP entry here, same raw policy as the write path.
+        // LPInitialDeposit has no field on `LPPosition`, but it is part of the
+        // same deposit-time write bundle, so it is refreshed too.
+        //
+        // The `has()` guard keeps reads for an LP with no recorded position
+        // (or a fully withdrawn one) from calling `extend_ttl` on keys that do
+        // not exist, which would host-panic. Entries whose TTL is already at or
+        // beyond the extend target are no-ops on chain, so this is cheap.
+        for key in [
+            DataKey::LPShares(lp.clone()),
+            DataKey::LPYieldEarned(lp.clone()),
+            DataKey::LPDepositCount(lp.clone()),
+            DataKey::LPInitialDeposit(lp.clone()),
+        ] {
+            if env.storage().persistent().has(&key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            }
+        }
 
         LPPosition {
             shares: lp_shares,
@@ -1200,8 +1171,76 @@ impl PoolContract {
                 .storage()
                 .instance()
                 .get(&DataKey::MaxUtilizationBps)
-                .unwrap_or(8500),
+                .unwrap_or(DEFAULT_MAX_UTILIZATION_BPS),
         }
+    }
+
+    /// Shared settlement path for invoice repayments, called by both
+    /// `receive_repayment` and `receive_repayment_with_refund`.
+    ///
+    /// Owns every bookkeeping step the two entry points have in common, so a
+    /// future fix to the settlement logic only needs to be applied here:
+    /// 1. Looks up the `FundedInvoice` entry, panicking with `InvoiceNotFound`
+    ///    if the invoice was never funded.
+    /// 2. Panics with `InvalidAmount` if `amount` does not cover the funded
+    ///    amount, or if `refund` would exceed the repayment surplus
+    ///    (`amount - funded_amount`). The refund bound is enforced here rather
+    ///    than only in the refund entry point so the helper itself guarantees
+    ///    the LP yield slice (`amount - funded_amount - refund`) is never
+    ///    negative; `receive_repayment` calls this with `refund = 0`, for which
+    ///    the bound is trivially satisfied.
+    /// 3. Credits `yield_amount` to `TotalDeposits` / `TotalYieldDistributed`,
+    ///    removes the funded principal from `TotalFunded`, and decrements
+    ///    `ActiveInvoiceCount` (panicking with `ActiveCountUnderflow` if it
+    ///    would go negative).
+    /// 4. Removes the funded entry, emits `repayment_received`, and extends
+    ///    the instance TTL.
+    ///
+    /// Refund-specific logic (the USDC transfer back to the buyer) is layered
+    /// on top in `receive_repayment_with_refund`.
+    fn settle_repayment(env: &Env, invoice_id: &BytesN<32>, amount: u128, refund: u128) {
+        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+        let funded_amount: u128 = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::InvoiceNotFound));
+        if amount < funded_amount {
+            panic_with_error!(env, PoolError::InvalidAmount);
+        }
+        if refund > amount - funded_amount {
+            panic_with_error!(env, PoolError::InvalidAmount);
+        }
+
+        let yield_amount = amount - funded_amount - refund;
+        let totals = Self::totals(env);
+        let total_deposits = totals.deposits;
+        let total_funded = totals.funded;
+        let total_yield = totals.yield_distributed;
+
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &(total_deposits + yield_amount));
+        env.storage().instance().set(
+            &DataKey::TotalYieldDistributed,
+            &(total_yield + yield_amount),
+        );
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(total_funded - funded_amount));
+
+        let active_count = totals.active_invoices;
+        let new_active_count = active_count
+            .checked_sub(1)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::ActiveCountUnderflow));
+        env.storage()
+            .instance()
+            .set(&DataKey::ActiveInvoiceCount, &new_active_count);
+
+        env.storage().persistent().remove(&funded_key);
+
+        events::repayment_received(env, invoice_id, amount, yield_amount);
+        Self::extend_instance_ttl(env);
     }
 
     fn extend_instance_ttl(env: &Env) {
