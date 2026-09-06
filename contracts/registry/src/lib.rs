@@ -579,7 +579,6 @@ impl RegistryContract {
     /// that intentionally need unilateral key rotation may use
     /// [`transfer_admin`](Self::transfer_admin), but it does not provide this
     /// dual-authorization safety guarantee.
-
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `new_admin` - The address that will become the new admin.
