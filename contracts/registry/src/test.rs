@@ -94,6 +94,41 @@ fn test_register_buyer_before_initialize_panics() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_batch_register_issuers_before_initialize_panics() {
+    let (env, client) = setup();
+    client.batch_register_issuers(&vec![&env]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_revoke_before_initialize_panics() {
+    let (env, client) = setup();
+    client.revoke(&Address::generate(&env));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_reinstate_before_initialize_panics() {
+    let (env, client) = setup();
+    client.reinstate(&Address::generate(&env));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_verify_profile_before_initialize_panics() {
+    let (env, client) = setup();
+    client.verify_profile(&Address::generate(&env), &true);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_transfer_ownership_before_initialize_panics() {
+    let (env, client) = setup();
+    client.transfer_ownership(&Address::generate(&env));
+}
+
+#[test]
 fn test_is_verified_returns_false_for_registered_but_unverified() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
@@ -355,7 +390,7 @@ fn test_update_metadata_self_succeeds() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #7)")]
 fn test_update_metadata_unregistered_panics() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
@@ -1183,6 +1218,49 @@ fn test_transfer_admin_changes_admin() {
 }
 
 #[test]
+fn test_transfer_admin_bypasses_transfer_ownership_dual_auth() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, RegistryContract);
+    let client = RegistryContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+    let new_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "transfer_ownership",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_transfer_ownership(&new_admin).is_err());
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "transfer_admin",
+            args: (new_admin.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.transfer_admin(&new_admin);
+    assert_eq!(client.get_admin(), new_admin);
+}
+
+#[test]
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_transfer_admin_by_non_admin_panics() {
     let (env, client) = setup();
@@ -1194,7 +1272,7 @@ fn test_transfer_admin_by_non_admin_panics() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #3)")]
+#[should_panic(expected = "Error(Contract, #4)")]
 fn test_transfer_admin_before_initialize_panics() {
     let (env, client) = setup();
     let new_admin = Address::generate(&env);

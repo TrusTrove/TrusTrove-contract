@@ -1224,6 +1224,16 @@ fn test_fund_invoice_rejects_above_cap() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_fund_invoice_rejects_when_utilization_cap_is_zero() {
+    let te = setup();
+    te.pool.set_max_utilization(&te.admin, &0);
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+}
+
+#[test]
 fn test_fund_invoice_allowed_when_below_cap() {
     let te = setup();
     te.pool.set_max_utilization(&te.admin, &10000);
