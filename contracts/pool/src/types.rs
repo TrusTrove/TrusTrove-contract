@@ -65,6 +65,7 @@ pub struct LPPosition {
 }
 
 #[contracttype]
+#[derive(Clone, Debug)]
 pub enum DataKey {
     Admin,
     InvoiceContract,

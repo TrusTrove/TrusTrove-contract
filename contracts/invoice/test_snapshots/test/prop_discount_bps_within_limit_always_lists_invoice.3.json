@@ -115,7 +115,7 @@
                   "bytes": "7a9794648d8060423bc0d613fa2bc13fcaf622ac49310751e2a3cb4ee32c6e43"
                 },
                 {
-                  "u32": 4934
+                  "u32": 4964
                 }
               ]
             }
@@ -552,7 +552,7 @@
                         "symbol": "discount_bps"
                       },
                       "val": {
-                        "u32": 4934
+                        "u32": 4964
                       }
                     },
                     {
@@ -1631,6 +1631,27 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000004",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "supported_asset_added"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000004",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -2164,7 +2185,7 @@
                   "bytes": "7a9794648d8060423bc0d613fa2bc13fcaf622ac49310751e2a3cb4ee32c6e43"
                 },
                 {
-                  "u32": 4934
+                  "u32": 4964
                 }
               ]
             }
@@ -2287,7 +2308,7 @@
               }
             ],
             "data": {
-              "u32": 4934
+              "u32": 4964
             }
           }
         }
@@ -2389,7 +2410,7 @@
                     "symbol": "discount_bps"
                   },
                   "val": {
-                    "u32": 4934
+                    "u32": 4964
                   }
                 },
                 {

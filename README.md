@@ -104,6 +104,7 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 
 ```
 create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
+submit_attestation(invoice_id, payload, signature) → bool
 list_for_financing(invoice_id, discount_bps) → bool
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
@@ -111,8 +112,10 @@ confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
 repay(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
+get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
+set_agent_registry_contract(agent_registry_contract) → bool
 ```
 
 ### escrow_contract
@@ -189,6 +192,8 @@ Pool ──[shares]──► LP
 
 #### Step 2 — Create & List (no funds move)
 The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` expressing the yield they will give up in exchange for immediate liquidity.
+
+Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice.
 
 ```
 No fund movement. Invoice status: Created → Listed.
@@ -459,3 +464,4 @@ MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 ## Contributors
 
 [![Contributors](https://contrib.rocks/image?repo=TrusTrove/TrusTrove-contract)](https://github.com/TrusTrove/TrusTrove-contract/graphs/contributors)
+// fix
