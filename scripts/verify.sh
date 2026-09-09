@@ -9,13 +9,20 @@ if [ ! -f "$STELLAR" ]; then
   STELLAR="stellar"
 fi
 
-# Load environment configuration
+# Load environment configuration safely without sourcing .env as shell code.
+# Only simple KEY=VALUE lines are parsed; comments and blank lines are skipped.
 if [ ! -f .env ]; then
   echo "Error: .env file not found." >&2
   echo "Run ./scripts/deploy.sh first to create the .env file with contract IDs." >&2
   exit 1
 fi
-source .env
+while IFS='=' read -r key value; do
+  # Skip blank lines and comments
+  [[ -z "$key" || "$key" =~ ^[[:space:]]*# ]] && continue
+  # Skip lines containing no '=' or invalid identifiers
+  [[ "$key" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] || continue
+  export "$key=$value"
+done < .env
 
 # Tracking execution status
 FAILED=0
