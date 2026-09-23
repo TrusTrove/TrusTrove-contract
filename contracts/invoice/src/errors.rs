@@ -13,7 +13,7 @@ pub enum InvoiceError {
     InvalidStatusTransition = 8,
     DiscountTooHigh = 9,
     AlreadyConfirmed = 10,
-    DueDateNotPassed = 11,
+    GracePeriodNotPassed = 12,
     UnsupportedAsset = 13,
     ListingNotExpired = 14,
     MathOverflow = 15,

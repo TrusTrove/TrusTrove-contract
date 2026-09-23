@@ -81,7 +81,6 @@ impl InvoiceContract {
             .set(&DataKey::RegistryContract, &registry_contract);
         env.storage().instance().set(&DataKey::Counter, &0u64);
         Self::extend_instance_ttl(&env);
-        events::contract_initialized(&env, &admin, &registry_contract);
     }
 
     /// Returns the stored admin address, or `None` if not initialized.
@@ -535,14 +534,7 @@ impl InvoiceContract {
         if face_value > MAX_FACE_VALUE {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
-        let now = env.ledger().timestamp();
-        if due_date <= now {
-            panic_with_error!(&env, InvoiceError::InvalidDueDate);
-        }
-        let max_due_date = now
-            .checked_add(MAX_INVOICE_LIFETIME_SECONDS)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
-        if due_date > max_due_date {
+        if due_date <= env.ledger().timestamp() {
             panic_with_error!(&env, InvoiceError::InvalidDueDate);
         }
 
@@ -1291,9 +1283,11 @@ impl InvoiceContract {
 
     /// Triggers default on a past-due invoice.
     ///
-    /// Default is permitted once `now >= due_date` — the due date has been
-    /// reached or passed. This is consistent with the `create` check that
-    /// rejects `due_date <= now` (due dates must be in the future).
+    /// Default is permitted once `now > due_date + grace_period` — the due
+    /// date plus any configured grace period must have passed.  The grace
+    /// period gives buyers a window to repay after confirmation before being
+    /// defaulted.  It is configured via [`set_default_grace_seconds`] and
+    /// defaults to `0` (no extra wait).
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1350,8 +1344,13 @@ impl InvoiceContract {
         if !valid_transition {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        if env.ledger().timestamp() < invoice.due_date {
-            panic_with_error!(&env, InvoiceError::DueDateNotPassed);
+        let grace: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(0);
+        if env.ledger().timestamp() <= invoice.due_date.saturating_add(grace) {
+            panic_with_error!(&env, InvoiceError::GracePeriodNotPassed);
         }
 
         let prev_status = invoice.status;
@@ -1493,12 +1492,77 @@ impl InvoiceContract {
             .unwrap_or(7 * 24 * 60 * 60)
     }
 
+    /// Sets the default grace period (in seconds) after the due date before an
+    /// invoice can be defaulted. During this window the buyer can still repay.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `seconds` - The grace period in seconds (0 to disable).
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin is not initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    pub fn set_default_grace_seconds(env: Env, seconds: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultGraceSeconds, &seconds);
+        events::default_grace_seconds_set(&env, seconds);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the current default grace period in seconds.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u64` - The grace period in seconds. Defaults to `0` if unset.
+    pub fn get_default_grace_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(0)
+    }
+
     /// Helper to check authorization for a given address.
-    /// This is invoked dynamically via `try_invoke_contract` in `expire_listing`.
-    /// Rust's dead-code analysis can't see the dynamic dispatch via `Symbol`, so
-    /// the `#[allow(dead_code)]` keeps it in the WASM dispatch table.
-    #[allow(dead_code)]
-    fn check_auth(_env: Env, address: Address) {
+    ///
+    /// Invoked dynamically by `expire_listing` via `try_invoke_contract` with
+    /// `Symbol("check_auth")`. It must remain `pub` so that Soroban's
+    /// `#[contractimpl]` macro exports it to the WASM contract-method
+    /// dispatch table; without that, the dynamic call would fail because the
+    /// target method would not be reachable in the WASM export list.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The address whose authorization should be checked.
+    ///
+    /// # Auth
+    /// Requires authorization from `address`.
+    ///
+    /// # Panics
+    /// Does not panic directly; propagates the auth failure from
+    /// `address.require_auth()` back to the dynamic caller.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    pub fn check_auth(_env: Env, address: Address) {
         address.require_auth();
     }
 
@@ -1979,18 +2043,6 @@ fn require_verified(env: &Env, registry_id: &Address, addr: &Address, err: Invoi
     }
 }
 
-/// Adds an invoice ID to the issuer's index if not already present.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `issuer` - The issuer address.
-/// * `invoice_id` - The invoice ID to add.
-///
-/// # Panics
-/// Does not panic.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
     let count_key = DataKey::IssuerIndexCount(issuer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -2019,18 +2071,6 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
-/// Adds an invoice ID to the buyer's index if not already present.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `buyer` - The buyer address.
-/// * `invoice_id` - The invoice ID to add.
-///
-/// # Panics
-/// Does not panic.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     let count_key = DataKey::BuyerIndexCount(buyer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
@@ -2059,18 +2099,6 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
-/// Adds an invoice ID to the status index if not already present.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `status` - The invoice status.
-/// * `invoice_id` - The invoice ID to add.
-///
-/// # Panics
-/// Does not panic.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
     let status_u32 = status as u32;
     let count_key = DataKey::StatusIndexCount(status_u32);
@@ -2100,23 +2128,6 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
-/// Moves an invoice ID from one status index to another, with idempotency for replayed transitions.
-///
-/// This function checks if the invoice is already in the target status index before performing
-/// any operations. If already present, it returns early without modifying counts or indexes,
-/// making replayed transitions a no-op.
-///
-/// # Arguments
-/// * `env` - The Soroban environment.
-/// * `invoice_id` - The invoice ID to move.
-/// * `from` - The source status.
-/// * `to` - The target status.
-///
-/// # Panics
-/// * `InvoiceError::InvalidStatusTransition` if the source status count underflows.
-///
-/// # Returns
-/// * `()` - No value is returned.
 fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to: InvoiceStatus) {
     // Check if invoice is already in the target status index (idempotency for replayed transitions)
     let to_u32 = to as u32;

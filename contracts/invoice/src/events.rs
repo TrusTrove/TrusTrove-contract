@@ -83,6 +83,11 @@ pub fn expiry_window_set(env: &Env, window: u64) {
         .publish((Symbol::new(env, "expiry_window_set"),), window);
 }
 
+pub fn default_grace_seconds_set(env: &Env, seconds: u64) {
+    env.events()
+        .publish((Symbol::new(env, "default_grace_seconds_set"),), seconds);
+}
+
 pub fn ownership_transferred(env: &Env, from: &Address, to: &Address) {
     env.events().publish(
         (
