@@ -1361,3 +1361,40 @@ impl PoolContract {
         remaining_shares
     }
 }
+
+/// Transfers shares from one account to another.
+///
+/// # Arguments
+/// * `env` - The Soroban environment.
+/// * `from` - The source address.
+/// * `to` - The destination address.
+/// * `amount` - The amount of shares to transfer.
+///
+/// # Returns
+/// * `bool` - True if the transfer was successful, false otherwise.
+///
+pub fn transfer(env: Env, from: Address, to: Address, amount: u128) -> bool {
+    // Check that the invoker is the sender
+    if env.invoker() != from {
+        return false;
+    }
+
+    // Check that the sender has enough shares
+    let from_shares_key = DataKey::LPShares(from.clone());
+    let from_shares: u128 = env.storage().persistent().get(&from_shares_key).unwrap_or(0);
+    if from_shares < amount {
+        return false;
+    }
+
+    // Burn shares from sender
+    let from_remaining = from_shares - amount;
+    env.storage().persistent().set(&from_shares_key, &from_remaining);
+
+    // Mint shares to receiver
+    let to_shares_key = DataKey::LPShares(to.clone());
+    let to_shares: u128 = env.storage().persistent().get(&to_shares_key).unwrap_or(0);
+    env.storage().persistent().set(&to_shares_key, &(to_shares + amount));
+
+    // Note: total shares remains the same, so we don't need to update TotalShares
+    true
+}
