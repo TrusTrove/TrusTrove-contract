@@ -1,0 +1,22 @@
+[package]
+name = "trusttrove-integration-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]
+soroban-sdk = { workspace = true }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }
+trusttrove-registry = { workspace = true }
+trusttrove-invoice = { workspace = true }
+trusttrove-escrow = { workspace = true }
+trusttrove-pool = { workspace = true }
+k256 = { version = "0.13.1", default-features = false, features = ["ecdsa"] }

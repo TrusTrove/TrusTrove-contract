@@ -36,7 +36,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "__M8eT_q"
+                      },
+                      "val": {
+                        "string": "qh"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "tB_2rL6"
+                      },
+                      "val": {
+                        "string": "_I93_R"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "v_h1_"
+                      },
+                      "val": {
+                        "string": "CDY_v_8R"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -164,7 +189,32 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "__M8eT_q"
+                            },
+                            "val": {
+                              "string": "qh"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "tB_2rL6"
+                            },
+                            "val": {
+                              "string": "_I93_R"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "v_h1_"
+                            },
+                            "val": {
+                              "string": "CDY_v_8R"
+                            }
+                          }
+                        ]
                       }
                     },
                     {
@@ -518,7 +568,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "__M8eT_q"
+                      },
+                      "val": {
+                        "string": "qh"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "tB_2rL6"
+                      },
+                      "val": {
+                        "string": "_I93_R"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "v_h1_"
+                      },
+                      "val": {
+                        "string": "CDY_v_8R"
+                      }
+                    }
+                  ]
                 }
               ]
             }

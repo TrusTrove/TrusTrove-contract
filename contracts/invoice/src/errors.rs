@@ -26,4 +26,5 @@ pub enum InvoiceError {
     UntrustedSigner = 21,
     AlreadyAttested = 22,
     VerificationRequired = 23,
+    CrossContractCallFailed = 24,
 }

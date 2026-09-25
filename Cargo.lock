@@ -1528,6 +1528,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "trusttrove-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "k256",
+ "soroban-sdk",
+ "trusttrove-escrow",
+ "trusttrove-invoice",
+ "trusttrove-pool",
+ "trusttrove-registry",
+]
+
+[[package]]
 name = "trusttrove-invoice"
 version = "0.1.0"
 dependencies = [
@@ -1545,6 +1557,7 @@ name = "trusttrove-pool"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "proptest",
  "soroban-sdk",
  "trusttrove-escrow",
  "trusttrove-invoice",

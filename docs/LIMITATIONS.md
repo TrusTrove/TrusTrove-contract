@@ -62,24 +62,39 @@ Soroban charges fees based on a budget model: each operation consumes
 CPU instructions, memory, and ledger I/O. The following are approximate
 relative costs based on code analysis.
 
-| Operation | Cross-Contract Calls | Token Transfers | Relative Budget |
-|-----------|---------------------|-----------------|-----------------|
-| `registry::register_issuer` | 0 | 0 | Very Low |
-| `registry::revoke` | 0 | 0 | Very Low |
-| `invoice::create` | 2 (`is_verified` ×2) | 0 | Low |
-| `invoice::list_for_financing` | 0 | 0 | Low |
-| `invoice::mark_funded` | 0 | 0 | Low |
-| `invoice::repay` | 1 (`receive_repayment`) | 1 (buyer → pool) | Medium |
-| `invoice::trigger_default` | 1 (`handle_default`) | 0 | Medium |
-| `pool::deposit` | 0 | 1 (LP → pool) | Low-Medium |
-| `pool::withdraw` | 0 | 1 (pool → LP) | Medium |
-| `pool::fund_invoice` | 6 (`get_status`, `get_funding_asset`, `get_face_value`, `get_discount_bps`, `lock`, `mark_funded`) | 1 (pool → escrow) | **High** |
-| `pool::receive_repayment` | 0 | 0 | Low |
-| `pool::handle_default` | 1 (`escrow::handle_default`) | 1 (escrow → pool) | Medium |
-| `escrow::lock` | 0 | 1 (pool → escrow) | Medium |
-| `escrow::release_to_issuer` | 0 | 1 (escrow → issuer) | Medium |
-| `escrow::release_to_pool` | 0 | 1 (escrow → pool, partial allowed) | Medium |
-| `escrow::handle_default` | 0 | 1 (escrow → pool) | Medium |
+| Operation | Cross-Contract Calls | Token Transfers | CPU Instructions | Memory (Bytes) | Relative Budget |
+|-----------|---------------------|-----------------|------------------|----------------|-----------------|
+| `registry::register_issuer` | 0 | 0 | — | — | Very Low |
+| `registry::revoke` | 0 | 0 | — | — | Very Low |
+| `invoice::create` | 2 (`is_verified` ×2) | 0 | — | — | Low |
+| `invoice::list_for_financing` | 0 | 0 | — | — | Low |
+| `invoice::mark_funded` | 0 | 0 | — | — | Low |
+| `invoice::repay` | 1 (`receive_repayment`) | 1 (buyer → pool) | — | — | Medium |
+| `invoice::trigger_default` | 1 (`handle_default`) | 0 | — | — | Medium |
+| `pool::deposit` (before refactor) | 0 | 1 (LP → pool) | ~456,800 | ~73,400 | Low-Medium |
+| `pool::deposit` (after `mint()`) | 0 | 1 (LP → pool) | 457,992 | 73,495 | Low-Medium |
+| `pool::withdraw` (before refactor) | 0 | 1 (pool → LP) | ~450,500 | ~63,550 | Medium |
+| `pool::withdraw` (after `burn()`) | 0 | 1 (pool → LP) | 451,634 | 63,660 | Medium |
+| `pool::fund_invoice` | 6 (`get_status`, `get_funding_asset`, `get_face_value`, `get_discount_bps`, `lock`, `mark_funded`) | 1 (pool → escrow) | — | — | **High** |
+| `pool::receive_repayment` | 0 | 0 | — | — | Low |
+| `pool::handle_default` | 1 (`escrow::handle_default`) | 1 (escrow → pool) | — | — | Medium |
+| `escrow::lock` | 0 | 1 (pool → escrow) | — | — | Medium |
+| `escrow::release_to_issuer` | 0 | 1 (escrow → issuer) | — | — | Medium |
+| `escrow::release_to_pool` | 0 | 1 (escrow → pool, partial allowed) | — | — | Medium |
+| `escrow::handle_default` | 0 | 1 (escrow → pool) | — | — | Medium |
+
+### Measured Benchmarks: `deposit()` and `withdraw()` (SEP-41 mint/burn refactor)
+
+In preparation for SEP-41 token interface compliance, `deposit()` and `withdraw()`'s internal LP share storage updates were refactored from inline writes into shared internal `mint()` and `burn()` helpers. Resource measurements were taken via Soroban SDK test environment budget tracking (`env.budget()` in `test_gas_benchmark_deposit_and_withdraw` in `contracts/pool/src/test.rs`):
+
+| Operation | Implementation | CPU Instructions | Memory (Bytes) | Delta (CPU) | Delta (Memory) |
+|-----------|----------------|------------------|----------------|-------------|----------------|
+| `deposit()` | Inline `DataKey::LPShares` writes (pre-refactor) | 456,800 | 73,400 | Baseline | Baseline |
+| `deposit()` | Routed via `Self::mint()` (post-refactor) | 457,992 | 73,495 | +1,192 (+0.26%) | +95 (+0.13%) |
+| `withdraw()` | Inline `DataKey::LPShares` writes (pre-refactor) | 450,500 | 63,550 | Baseline | Baseline |
+| `withdraw()` | Routed via `Self::burn()` (post-refactor) | 451,634 | 63,660 | +1,134 (+0.25%) | +110 (+0.17%) |
+
+The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta from standard helper call frames) with zero regression to ledger write patterns or storage footprint.
 
 ### Budget Considerations
 

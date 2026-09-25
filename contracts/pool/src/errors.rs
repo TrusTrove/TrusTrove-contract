@@ -22,4 +22,6 @@ pub enum PoolError {
     BuyerNotVerified = 19,
     EscrowAssetMismatch = 20,
     EscrowDefaultNotReleased = 21,
+    /// Protocol fee basis points exceed `MAX_PROTOCOL_FEE_BPS` (2000 bps = 20%).
+    FeeTooHigh = 22,
 }

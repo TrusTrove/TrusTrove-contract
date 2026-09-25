@@ -32,6 +32,7 @@ trusttrove-registry = { workspace = true }
 # Test-only: signs attestation payloads with a real secp256k1 key so the
 # invoice contract's submit_attestation gate can be satisfied in pool tests.
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa", "std"] }
+proptest = { workspace = true }
 
 [features]
 testutils = ["soroban-sdk/testutils"]

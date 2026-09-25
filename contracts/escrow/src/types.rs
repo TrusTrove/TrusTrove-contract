@@ -22,6 +22,10 @@ pub struct EscrowRecord {
     /// Used to enforce the minimum lock period (grace period) before
     /// a [`default`](EscrowAction::DefaultHandled) can be triggered.
     pub locked_at: u64,
+    /// The invoice issuer address that is authorized to receive released funds.
+    /// Set from the `issuer` argument of [`EscrowContract::lock`] and validated
+    /// in [`EscrowContract::release_to_issuer`].
+    pub issuer: soroban_sdk::Address,
 }
 
 /// Actions that can be recorded in the escrow event history.
@@ -55,6 +59,8 @@ pub struct EscrowEvent {
     pub amount: u128,
     /// Unix timestamp (seconds) when this event was recorded.
     pub timestamp: u64,
+    /// The caller address that triggered this event (for DefaultHandled events).
+    pub caller: Option<soroban_sdk::Address>,
 }
 
 /// Storage keys used by the escrow contract.
@@ -72,8 +78,6 @@ pub enum DataKey {
     Admin,
     /// Address of the pool contract that can lock / release / default escrow.
     PoolContract,
-    /// Address of the invoice contract used for recipient validation.
-    InvoiceContract,
     /// Address of the USDC token contract held in escrow.
     UsdcAsset,
     /// Active escrow lock for a given invoice. The inner `BytesN<32>` is the

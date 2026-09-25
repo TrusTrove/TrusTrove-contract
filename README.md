@@ -104,6 +104,7 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 
 ```
 create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
+submit_attestation(invoice_id, payload, signature) → bool
 list_for_financing(invoice_id, discount_bps) → bool
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
@@ -111,8 +112,10 @@ confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
 repay(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
+get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
+set_agent_registry_contract(agent_registry_contract) → bool
 ```
 
 ### escrow_contract
@@ -136,7 +139,11 @@ deposit(lp, usdc_amount) → shares
 withdraw(lp, shares) → usdc_amount
 fund_invoice(invoice_id) → bool         ← re-verifies issuer & buyer against registry_contract
 receive_repayment(invoice_id, amount) → bool  ← invoice_contract only
+receive_repayment_with_refund(invoice_id, amount, refund, buyer) → bool ← invoice_contract only
 handle_default(invoice_id) → bool
+set_protocol_fee(fee_bps, treasury) → bool   ← admin only
+get_protocol_fee_bps() → u32
+get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 ```
@@ -190,6 +197,8 @@ Pool ──[shares]──► LP
 #### Step 2 — Create & List (no funds move)
 The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` expressing the yield they will give up in exchange for immediate liquidity.
 
+Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice.
+
 ```
 No fund movement. Invoice status: Created → Listed.
 ```
@@ -227,10 +236,15 @@ The buyer calls `invoice.repay(invoice_id)`, which transfers `face_value` USDC *
 
 ```
 Buyer ──[face_value USDC]──► Pool
-  Pool books yield: face_value − funded_amount = discount earned
-  TotalDeposits += yield_amount  (share price rises for all LPs)
+  Pool books yield: face_value − funded_amount = gross yield
+  Protocol fee cut: protocol_cut = gross_yield × fee_bps / 10000 ──► Treasury
+  LP yield: lp_yield = gross_yield − protocol_cut
+  TotalDeposits += lp_yield  (share price rises for all LPs)
+  TotalYieldDistributed += lp_yield
 Invoice status: Confirmed → Repaid
 ```
+
+**Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
 
 Repayment does **not** flow through escrow. The escrow contract is only involved in funding (Step 3), the missing issuer release (Step 4), and default recovery (Step 7).
 
@@ -459,3 +473,4 @@ MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 ## Contributors
 
 [![Contributors](https://contrib.rocks/image?repo=TrusTrove/TrusTrove-contract)](https://github.com/TrusTrove/TrusTrove-contract/graphs/contributors)
+// fix

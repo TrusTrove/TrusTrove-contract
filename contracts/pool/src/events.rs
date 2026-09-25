@@ -1,5 +1,24 @@
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
+pub fn pool_initialized(
+    env: &Env,
+    admin: &Address,
+    invoice_contract: &Address,
+    escrow_contract: &Address,
+    usdc_asset: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "pool_initialized"),
+            admin.clone(),
+            invoice_contract.clone(),
+            escrow_contract.clone(),
+            usdc_asset.clone(),
+        ),
+        (),
+    );
+}
+
 pub fn lp_deposited(env: &Env, lp: &Address, usdc_amount: u128, shares_issued: u128) {
     env.events().publish(
         (Symbol::new(env, "lp_deposited"), lp.clone()),
@@ -35,10 +54,24 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
     );
 }
 
+pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "max_utilization_updated"),),
+        (old_cap_bps, new_cap_bps),
+    );
+}
+
 #[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ownership_transferred"), old_admin.clone()),
         new_admin.clone(),
+    );
+}
+
+pub fn protocol_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32, treasury: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "protocol_fee_updated"),),
+        (old_fee_bps, new_fee_bps, treasury.clone()),
     );
 }

@@ -257,6 +257,8 @@ EscrowEvent {
 | `TotalYieldDistributed` | `u128` | Cumulative yield distributed | `initialize() = 0` |
 | `ActiveInvoiceCount` | `u32` | Currently funded invoices | `initialize() = 0` |
 | `MaxUtilizationBps` | `u32` | Max utilization cap (bps) | `initialize() = 8500` |
+| `ProtocolFeeBps` | `u32` | Protocol fee in basis points (max 2000 bps = 20%) | `initialize() = 0` |
+| `TreasuryAddress` | `Address` | Protocol treasury destination for fee cuts | `initialize() = treasury (may equal admin)` |
 
 ### Persistent Storage
 
@@ -275,12 +277,25 @@ EscrowEvent {
 |---------|------|-------------|
 | `FundedInvoice(BytesN<32>)` | `u128` | Funded amount keyed by invoice ID |
 
+### Protocol Fee & Yield Distribution Math
+
+When repayments occur via `receive_repayment` or `receive_repayment_with_refund`, gross yield is computed as:
+$$\text{yield\_amount} = \text{amount} - \text{funded\_amount} - \text{refund}$$
+
+With a configured protocol fee (`fee_bps > 0`):
+$$\text{protocol\_cut} = \frac{\text{yield\_amount} \times \text{fee\_bps}}{10\,000}$$
+$$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
+
+- **Treasury Transfer:** If `protocol_cut > 0`, the pool transfers `protocol_cut` USDC directly to `TreasuryAddress`. At the default `fee_bps == 0`, no transfer is made.
+- **LP Accounting:** Only `lp_yield` (not the full gross yield) is added to `TotalDeposits` and `TotalYieldDistributed`.
+- **Admin Configuration:** The fee defaults to 0 bps at initialization and can be modified up to 2000 bps (20%) along with the treasury address by the contract admin via `set_protocol_fee(fee_bps, treasury)`.
+
 ### Storage Key Count
 
-**Approximately 6 instance + (5 × number_of_LPs) + (1 × number_of_funded_invoices).**
+**Approximately 8 instance + (5 × number_of_LPs) + (1 × number_of_funded_invoices).**
 
 In practice most pools will have:
-- 6 instance keys (constant)
+- 8 instance keys (constant)
 - 5 keys per active LP
 - 1 key per funded invoice (removed on repayment/default)
 
