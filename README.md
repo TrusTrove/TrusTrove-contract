@@ -132,7 +132,7 @@ get_locked(invoice_id) → u128
 
 ### pool_contract
 
-USDC liquidity pool with share-based LP accounting. Share price grows as invoices repay.
+USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
 ```
 deposit(lp, usdc_amount) → shares
