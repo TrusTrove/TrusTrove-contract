@@ -92,4 +92,6 @@ pub enum DataKey {
     ProtocolFeeBps,
     /// Stored treasury destination address (defaults to admin).
     TreasuryAddress,
+    /// Allowance for spender to withdraw tokens from an owner (SEP-41).
+    Allowance((Address, Address)),
 }
