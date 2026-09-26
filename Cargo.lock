@@ -1570,6 +1570,9 @@ name = "trusttrove-pool-factory"
 version = "0.1.0"
 dependencies = [
  "soroban-sdk",
+ "trusttrove-escrow",
+ "trusttrove-invoice",
+ "trusttrove-pool",
  "trusttrove-ttl",
 ]
 
