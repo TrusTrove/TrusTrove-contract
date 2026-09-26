@@ -18,7 +18,7 @@ The factory will need a `register_existing_pool(asset, pool_address)` function t
 
 - Takes an asset address and an already-deployed pool contract address
 - Skips the deploy-and-initialize step (since the pool already exists)
-- Records the mapping: `DataKey::AssetToPool(asset) = pool_address`
+- Records the mapping: `DataKey::PoolForAsset(asset) = pool_address`
 - Updates the asset index: increments `DataKey::AssetCount` and appends to `DataKey::AssetIndex`
 
 This variant is scoped as a follow-up issue. Once implemented, the migration command would be:
@@ -46,7 +46,7 @@ The response should include the USDC asset address.
 
 ### 4. Verify pool lookup
 
-Call `get_pool_for_asset(asset)` (once implemented) to confirm the factory returns the existing pool address:
+Call `get_pool_for_asset(asset)` to confirm the factory returns the existing pool address:
 
 ```bash
 stellar contract invoke \
@@ -57,13 +57,33 @@ stellar contract invoke \
 
 ## Follow-up Requirements
 
-The `register_existing_pool` function has been implemented in this PR. This function:
+The `register_existing_pool` function has been implemented. This function:
 
 - Accepts `asset: Address` and `pool_address: Address` parameters
 - Requires admin authorization
 - Checks that the asset is not already registered
 - Updates the same storage keys as `register_asset` would, but skips deployment
 - Updates the asset index and asset-to-pool mapping
+
+Assets registered after the migration go through `register_asset`, which
+deploys and initializes the pool instance instead of adopting an existing one.
+It requires an escrow contract that was already initialized for the same asset,
+because `pool::initialize` cross-checks the escrow's configured asset against
+its own:
+
+```bash
+stellar contract invoke \
+  --id <factory_contract_id> \
+  --w <admin_wallet> \
+  register_asset \
+  --asset <asset_address> \
+  --pool_wasm_hash <uploaded_pool_wasm_hash> \
+  --invoice_contract <invoice_contract_id> \
+  --escrow_contract <escrow_contract_id>
+```
+
+Both paths write `DataKey::PoolForAsset`, so `get_pool_for_asset(asset)` is the
+single lookup for migrated and newly registered assets alike.
 
 ## Benefits
 
