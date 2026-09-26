@@ -145,6 +145,14 @@ fn pool_wasm() -> &'static [u8] {
                     "--target-dir",
                 ])
                 .arg(&fixture_dir)
+                // The fixture is a plain Wasm build and must not inherit the
+                // outer build's rustflags: under `cargo tarpaulin` (the
+                // `coverage` CI job) they carry `-C instrument-coverage` plus
+                // an `--extern profiler_builtins` that only exists for the host
+                // target, which fails the Wasm build outright.
+                .env_remove("RUSTFLAGS")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env_remove("RUSTDOCFLAGS")
                 .status()
                 .expect("failed to run cargo to build the trusttrove-pool Wasm");
             assert!(
