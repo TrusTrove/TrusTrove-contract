@@ -2,7 +2,7 @@
 
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, vec, xdr::ToXdr, Address, BytesN, Env, IntoVal,
-    Symbol, Vec,
+    String, Symbol, Vec,
 };
 
 mod constants;
@@ -345,7 +345,12 @@ impl PoolFactoryContract {
     ///
     /// Args are passed positionally to `pool::initialize`, whose signature is
     /// `(admin, invoice_contract, escrow_contract, funding_asset,
-    /// registry_contract, treasury, min_initial_deposit)`.
+    /// registry_contract, treasury, min_initial_deposit, share_name,
+    /// share_symbol, share_decimals)`.
+    ///
+    /// The three share-metadata args are the factory-wide defaults documented
+    /// on `DEFAULT_SHARE_NAME`: `register_asset` is not given per-asset names,
+    /// so there is nothing more accurate to pass here.
     fn initialize_pool(
         env: &Env,
         admin: &Address,
@@ -371,6 +376,9 @@ impl PoolFactoryContract {
             registry_contract.to_val(),
             admin.to_val(),
             DEFAULT_MIN_INITIAL_DEPOSIT.into_val(env),
+            String::from_str(env, DEFAULT_SHARE_NAME).to_val(),
+            String::from_str(env, DEFAULT_SHARE_SYMBOL).to_val(),
+            DEFAULT_SHARE_DECIMALS.into_val(env),
         ];
         env.invoke_contract::<()>(pool_address, &Symbol::new(env, POOL_INITIALIZE), args);
     }

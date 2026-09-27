@@ -147,6 +147,13 @@ get_protocol_fee_bps() → u32
 get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
+transfer(from, to, amount) → ()             ← SEP-41 share transfer
+approve(from, spender, amount, expiration_ledger) → ()   ← SEP-41 grant
+allowance(from, spender) → i128                          ← 0 when spent/expired
+transfer_from(spender, from, to, amount) → ()            ← spender auth, spends grant
+decimals() → u32                     ← per-instance, set at initialize
+name() → String                      ← set at initialize()
+symbol() → String                    ← set at initialize()
 ```
 
 ---

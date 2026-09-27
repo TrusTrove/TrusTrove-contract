@@ -6,7 +6,9 @@ use soroban_sdk::{
 };
 use trusttrove_escrow::{EscrowContract, EscrowContractClient};
 use trusttrove_invoice::{InvoiceContract, InvoiceContractClient, InvoiceStatus};
-use trusttrove_pool::{PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT};
+use trusttrove_pool::{
+    PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS,
+};
 use trusttrove_registry::{RegistryContract, RegistryContractClient};
 
 // --------------- Mock USDC Token ---------------
@@ -171,6 +173,9 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
+        &String::from_str(&env, "TT-USDC"),
+        &DEFAULT_SHARE_DECIMALS,
     );
     pool.set_max_utilization(&admin, &10000); // 100% cap
 
@@ -229,6 +234,9 @@ fn test_cross_contract_unauthorized_pool_setter_rejected() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
+        &String::from_str(&env, "TT-USDC"),
+        &DEFAULT_SHARE_DECIMALS,
     );
 
     // Non-admin call without authorization must fail

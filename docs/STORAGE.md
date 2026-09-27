@@ -262,6 +262,9 @@ EscrowEvent {
 | `ProtocolFeeBps` | `u32` | Protocol fee in basis points (max 2000 bps = 20%) | `initialize() = 0` |
 | `TreasuryAddress` | `Address` | Protocol treasury destination for fee cuts | `initialize() = treasury (may equal admin)` |
 | `MinInitialDeposit` | `u128` | Minimum first deposit an empty pool accepts, in `FundingAsset` stroops | `initialize()` |
+| `ShareName` | `String` | SEP-41 `name()` of this pool's LP share token | `initialize()` |
+| `ShareSymbol` | `String` | SEP-41 `symbol()` of this pool's LP share token | `initialize()` |
+| `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
 
 ### Persistent Storage
 
@@ -273,6 +276,12 @@ EscrowEvent {
 | `LPDepositCount(Address)` | `u32` | Number of deposits made by this LP |
 | `LPYieldEarned(Address)` | `u128` | Cumulative yield earned (updated on withdraw) |
 | `LPInitialDeposit(Address)` | `u128` | Total principal deposited by LP (tracked for yield calculation) |
+
+#### SEP-41 Allowance Keys
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `Allowance(Address, Address)` | `ShareAllowance { amount: i128, expiration_ledger: u32 }` | Shares `from` let `spender` move, until `expiration_ledger`. Removed when fully spent or revoked with `approve(..., amount = 0)`; read back as `0` once expired. |
 
 #### Funded Invoice
 

@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, IntoVal, Symbol, Vec,
+    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, IntoVal, String, Symbol,
+    Vec,
 };
 
 mod constants;
@@ -53,6 +54,20 @@ impl PoolContract {
     ///   accept, in `funding_asset` stroops. Callers funding an asset with
     ///   different decimals than the original USDC-only pool must scale this
     ///   accordingly rather than reuse `DEFAULT_MIN_INITIAL_DEPOSIT`.
+    /// * `share_name` - SEP-41 `name()` of this pool's LP share token, e.g.
+    ///   `"TrusTrove USDC Pool Shares"`. Must be non-empty.
+    /// * `share_symbol` - SEP-41 `symbol()` of this pool's LP share token, e.g.
+    ///   `"TT-USDC"`. Must be non-empty.
+    /// * `share_decimals` - SEP-41 `decimals()` of this pool's LP share token.
+    ///   Per `docs/SEP41_DESIGN.md` this must match `funding_asset`'s own
+    ///   decimals, since shares are issued in the funding asset's base units.
+    ///
+    /// Share metadata is configured per instance, alongside `min_initial_deposit`
+    /// and for the same reason: under the `pool_factory` model each pool funds a
+    /// different asset, so a deploy for an asset with other than 7 decimals
+    /// supplies its own name, symbol and precision. Fixing it at
+    /// `initialize` also means a wallet never sees an LP's share balance
+    /// silently re-labelled under a different symbol.
     ///
     /// Protocol fee storage (`DataKey::ProtocolFeeBps`) is explicitly initialized to 0 bps
     /// and `DataKey::TreasuryAddress` is initialized to the provided `treasury` address.
@@ -70,7 +85,9 @@ impl PoolContract {
     /// * `AlreadyInitialized` if the contract has already been initialized.
     /// * `InvalidConfiguration` if any two of `admin`, `invoice_contract`,
     ///   `escrow_contract`, `funding_asset`, and `registry_contract` are the
-    ///   same address.
+    ///   same address, or if `share_name`/`share_symbol` is empty (a wallet
+    ///   that cannot render the share token is treated as a misconfigured
+    ///   deploy rather than a pool to be lived with).
     /// * `EscrowAssetMismatch` if `escrow_contract`'s configured USDC asset
     ///   does not match `funding_asset`.
     ///
@@ -80,8 +97,13 @@ impl PoolContract {
     /// # Example
     /// ```ignore
     /// escrow_client.initialize(&admin, &pool, &invoice, &usdc); // escrow first
-    /// client.initialize(&admin, &invoice, &escrow, &usdc, &registry, &admin, &min_deposit);
+    /// client.initialize(&admin, &invoice, &escrow, &usdc, &registry, &admin,
+    ///     &min_deposit, &share_name, &share_symbol, &share_decimals);
     /// ```
+    // One-shot wiring for a pool instance: six contract/admin references, the
+    // treasury, the deposit floor and the three SEP-41 share-metadata values.
+    // Bundling the metadata into a struct would clear the argument-count lint
+    // but would make the initializer's wiring less explicit at call sites.
     #[allow(clippy::too_many_arguments)]
     pub fn initialize(
         env: Env,
@@ -92,6 +114,9 @@ impl PoolContract {
         registry_contract: Address,
         treasury: Address,
         min_initial_deposit: u128,
+        share_name: String,
+        share_symbol: String,
+        share_decimals: u32,
     ) {
         if Self::admin(&env).is_some() {
             panic_with_error!(&env, PoolError::AlreadyInitialized);
@@ -107,6 +132,9 @@ impl PoolContract {
             || escrow_contract == registry_contract
             || funding_asset == registry_contract
         {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
+        }
+        if share_name.is_empty() || share_symbol.is_empty() {
             panic_with_error!(&env, PoolError::InvalidConfiguration);
         }
 
@@ -165,6 +193,15 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::MinInitialDeposit, &min_initial_deposit);
+        env.storage()
+            .instance()
+            .set(&DataKey::ShareName, &share_name);
+        env.storage()
+            .instance()
+            .set(&DataKey::ShareSymbol, &share_symbol);
+        env.storage()
+            .instance()
+            .set(&DataKey::ShareDecimals, &share_decimals);
         Self::extend_instance_ttl(&env);
 
         events::pool_initialized(
@@ -203,6 +240,87 @@ impl PoolContract {
     /// callers should use `get_funding_asset` instead.
     pub fn get_usdc_asset(env: Env) -> Address {
         Self::funding_asset(&env)
+    }
+
+    /// Returns the decimal precision wallets use to render LP share balances
+    /// (SEP-41 `decimals`).
+    ///
+    /// Shares are issued in the funding asset's base units, so
+    /// `docs/SEP41_DESIGN.md` requires this to match the funding asset's own
+    /// decimals; `initialize` therefore takes a `share_decimals` per instance.
+    /// The `DEFAULT_SHARE_DECIMALS` fallback covers instances that predate it,
+    /// which were all USDC pools.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `u32` - This instance's share decimals, or 7 if never configured.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let decimals = client.decimals();
+    /// ```
+    pub fn decimals(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ShareDecimals)
+            .unwrap_or(DEFAULT_SHARE_DECIMALS)
+    }
+
+    /// Returns this pool's LP share token name (SEP-41 `name`), as configured
+    /// in `initialize`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if `initialize` has not stored the name yet.
+    ///
+    /// # Returns
+    /// * `String` - The share token name.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let name = client.name();
+    /// ```
+    pub fn name(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::ShareName)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
+    }
+
+    /// Returns this pool's LP share token symbol (SEP-41 `symbol`), as
+    /// configured in `initialize`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if `initialize` has not stored the symbol yet.
+    ///
+    /// # Returns
+    /// * `String` - The share token symbol.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let symbol = client.symbol();
+    /// ```
+    pub fn symbol(env: Env) -> String {
+        env.storage()
+            .instance()
+            .get(&DataKey::ShareSymbol)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
     }
 
     /// Returns the admin address for the pool.
@@ -519,17 +637,188 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
 
-        let amount_u128 = amount as u128;
+        Self::move_shares(&env, &from, &to, amount as u128);
+        Self::extend_instance_ttl(&env);
+    }
 
+    /// Grants `spender` permission to move up to `amount` of `from`'s shares
+    /// until ledger sequence `expiration_ledger`.
+    ///
+    /// Approving again overwrites the previous grant rather than adding to it
+    /// (SEP-41 semantics), and `amount = 0` clears it, which is the standard
+    /// way to revoke a spend authorization.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `from` - The share owner granting the allowance (must authorize).
+    /// * `spender` - The address permitted to move the shares.
+    /// * `amount` - The maximum number of shares `spender` may move.
+    /// * `expiration_ledger` - Last ledger sequence at which the grant is live.
+    ///
+    /// # Auth
+    /// Requires authorization from `from` (via `from.require_auth()`).
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidAmount` if `amount` is negative.
+    /// * `InvalidExpiration` if `amount` is non-zero and `expiration_ledger` is
+    ///   at or before the current ledger sequence (such a grant could never be
+    ///   spent, so approving with it is treated as a caller error).
+    ///
+    /// # Returns
+    /// * `()` - No value is returned. Emits `allowance_approved`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Let a staking contract move up to 5 shares through ledger 1_000.
+    /// client.approve(&lp, &staking, &5, &1000);
+    /// ```
+    pub fn approve(
+        env: Env,
+        from: Address,
+        spender: Address,
+        amount: i128,
+        expiration_ledger: u32,
+    ) {
+        Self::require_initialized(&env);
+        from.require_auth();
+        if amount < 0 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+        if amount > 0 && expiration_ledger <= env.ledger().sequence() {
+            panic_with_error!(&env, PoolError::InvalidExpiration);
+        }
+
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        if amount == 0 {
+            // Revoke: drop the entry entirely so its ledger rent is reclaimed.
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().set(
+                &key,
+                &ShareAllowance {
+                    amount,
+                    expiration_ledger,
+                },
+            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+
+        events::allowance_approved(&env, &from, &spender, amount, expiration_ledger);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the number of `from`'s shares `spender` may still move.
+    ///
+    /// Reads `0` both when no grant exists and when the grant's
+    /// `expiration_ledger` has passed, so callers never have to distinguish an
+    /// unset allowance from a dead one.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `from` - The share owner.
+    /// * `spender` - The address the grant was made to.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `i128` - The remaining allowance, or `0`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let remaining = client.allowance(&lp, &staking);
+    /// ```
+    pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        match Self::live_allowance(&env, &from, &spender) {
+            Some(record) => record.amount,
+            None => 0,
+        }
+    }
+
+    /// Moves `amount` of `from`'s shares to `to` using the allowance `from`
+    /// granted to `spender`, then decrements that allowance by `amount`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `spender` - The address holding the grant (must authorize).
+    /// * `from` - The share owner whose balance is debited.
+    /// * `to` - The address receiving the shares.
+    /// * `amount` - The number of shares to move.
+    ///
+    /// # Auth
+    /// Requires authorization from `spender` (via `spender.require_auth()`) —
+    /// `from` already authorized by calling `approve`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidAmount` if `amount` is zero or negative.
+    /// * `InsufficientAllowance` if the remaining (non-expired) allowance is
+    ///   less than `amount`.
+    /// * `NoShares` if `from` has no shares.
+    /// * `InsufficientBalance` if `from` does not own enough shares.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.approve(&lp, &staking, &5, &1000);
+    /// client.transfer_from(&staking, &lp, &treasury, &5);
+    /// // allowance(lp, staking) is now 0
+    /// ```
+    pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        Self::require_initialized(&env);
+        spender.require_auth();
+        if amount <= 0 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let record = Self::live_allowance(&env, &from, &spender)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InsufficientAllowance));
+        if record.amount < amount {
+            panic_with_error!(&env, PoolError::InsufficientAllowance);
+        }
+
+        let key = DataKey::Allowance(from.clone(), spender.clone());
+        let remaining = record.amount - amount;
+        if remaining > 0 {
+            env.storage().persistent().set(
+                &key,
+                &ShareAllowance {
+                    amount: remaining,
+                    expiration_ledger: record.expiration_ledger,
+                },
+            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        } else {
+            env.storage().persistent().remove(&key);
+        }
+
+        Self::move_shares(&env, &from, &to, amount as u128);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Shared share-movement path for `transfer` and `transfer_from`: debits
+    /// `from`'s `LPShares` balance and credits `to`'s.
+    ///
+    /// The grant bookkeeping and the two `require_auth` sites stay with the
+    /// public entry points; this helper owns only balance checks and writes, so
+    /// both paths enforce the same `NoShares`/`InsufficientBalance` rules.
+    fn move_shares(env: &Env, from: &Address, to: &Address, amount: u128) {
         let from_shares_key = DataKey::LPShares(from.clone());
         let from_shares: u128 = env
             .storage()
             .persistent()
             .get(&from_shares_key)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NoShares));
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::NoShares));
 
-        if from_shares < amount_u128 {
-            panic_with_error!(&env, PoolError::InsufficientBalance);
+        if from_shares < amount {
+            panic_with_error!(env, PoolError::InsufficientBalance);
         }
 
         // No-op if transferring to self
@@ -538,7 +827,7 @@ impl PoolContract {
         }
 
         // Decrement from sender
-        let remaining_shares = from_shares - amount_u128;
+        let remaining_shares = from_shares - amount;
         if remaining_shares > 0 {
             env.storage()
                 .persistent()
@@ -555,12 +844,24 @@ impl PoolContract {
         let to_shares: u128 = env.storage().persistent().get(&to_shares_key).unwrap_or(0);
         env.storage()
             .persistent()
-            .set(&to_shares_key, &(to_shares + amount_u128));
+            .set(&to_shares_key, &(to_shares + amount));
         env.storage()
             .persistent()
             .extend_ttl(&to_shares_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
 
-        Self::extend_instance_ttl(&env);
+    /// Reads an allowance grant, returning `None` when it was never set or has
+    /// expired. The expiry check lives here (rather than in the callers) so
+    /// every read path agrees on what a dead grant looks like.
+    fn live_allowance(env: &Env, from: &Address, spender: &Address) -> Option<ShareAllowance> {
+        let record: ShareAllowance = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Allowance(from.clone(), spender.clone()))?;
+        if record.expiration_ledger < env.ledger().sequence() {
+            return None;
+        }
+        Some(record)
     }
 
     /// Funds a listed invoice by moving USDC through escrow and invoice contracts.

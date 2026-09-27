@@ -9,12 +9,12 @@ use soroban_sdk::{
         MockAuth, MockAuthInvoke,
     },
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, Symbol, TryFromVal,
+    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
 };
 
 use crate::{
-    DataKey, PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT, TTL_EXTEND_TO,
-    TTL_THRESHOLD,
+    DataKey, PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS,
+    TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -29,6 +29,12 @@ const DEFAULT_FACE_VALUE: u128 = 10_000_000_000;
 const DEFAULT_DISCOUNT_BPS: u32 = 200;
 const DEFAULT_FUNDED_AMOUNT: u128 =
     DEFAULT_FACE_VALUE * (10000 - DEFAULT_DISCOUNT_BPS as u128) / 10000;
+
+// SEP-41 share metadata every test initializer passes to `initialize` (issue
+// #757). Kept as constants so the assertions in the metadata tests and the
+// `initialize` call sites cannot drift apart.
+const TEST_SHARE_NAME: &str = "TrusTrove USDC Pool Shares";
+const TEST_SHARE_SYMBOL: &str = "TT-USDC";
 const DEFAULT_YIELD_AMOUNT: u128 = DEFAULT_FACE_VALUE * DEFAULT_DISCOUNT_BPS as u128 / 10000;
 
 // --------------- Mock Registry ---------------
@@ -335,6 +341,9 @@ fn setup() -> TestEnv {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
 
     invoice.add_supported_asset(&usdc_id);
@@ -651,6 +660,9 @@ fn build_pool_with_min_deposit(
         registry_id,
         admin,
         &min_initial_deposit,
+        &String::from_str(env, TEST_SHARE_NAME),
+        &String::from_str(env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
     pool_id
 }
@@ -1252,6 +1264,9 @@ fn test_default_max_utilization_in_stats() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
     let stats = pool.get_stats();
     assert_eq!(stats.max_utilization_bps, 8500);
@@ -2809,6 +2824,9 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
             &addrs[4],
             &addrs[0],
             &DEFAULT_MIN_INITIAL_DEPOSIT,
+            &String::from_str(&env, TEST_SHARE_NAME),
+            &String::from_str(&env, TEST_SHARE_SYMBOL),
+            &DEFAULT_SHARE_DECIMALS,
         );
         assert!(
             res.is_err(),
@@ -2901,6 +2919,9 @@ fn test_deposit_extends_instance_ttl_when_below_threshold() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
 
     // After initialize: TTL should be bumped to ~TTL_EXTEND_TO.
@@ -3060,6 +3081,9 @@ fn test_double_initialize_panics() {
                 registry_id.clone(),
                 admin.clone(),
                 DEFAULT_MIN_INITIAL_DEPOSIT,
+                String::from_str(&env, TEST_SHARE_NAME),
+                String::from_str(&env, TEST_SHARE_SYMBOL),
+                DEFAULT_SHARE_DECIMALS,
             )
                 .into_val(&env),
             sub_invokes: &[],
@@ -3073,6 +3097,9 @@ fn test_double_initialize_panics() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
 
     // Verify storage state after first initialize
@@ -3120,6 +3147,9 @@ fn test_double_initialize_panics() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
 }
 
@@ -3273,6 +3303,9 @@ mod real_registry_integration {
             &registry_id,
             &admin,
             &DEFAULT_MIN_INITIAL_DEPOSIT,
+            &String::from_str(&env, TEST_SHARE_NAME),
+            &String::from_str(&env, TEST_SHARE_SYMBOL),
+            &DEFAULT_SHARE_DECIMALS,
         );
 
         invoice.add_supported_asset(&usdc_id);
@@ -3457,6 +3490,9 @@ fn test_initialize_emits_pool_initialized_event() {
         &registry_id,
         &admin,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
 
     let events = env.events().all();
@@ -4159,6 +4195,9 @@ fn test_protocol_fee_storage_initialized_with_custom_treasury() {
         &registry_id,
         &custom_treasury,
         &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, TEST_SHARE_NAME),
+        &String::from_str(&env, TEST_SHARE_SYMBOL),
+        &DEFAULT_SHARE_DECIMALS,
     );
 
     assert_eq!(pool.get_protocol_fee_bps(), 0);
@@ -4188,4 +4227,440 @@ fn test_sep41_balance_and_total_supply() {
 
     let lp_balance = client.balance(&te.lp);
     assert_eq!(lp_balance, 100_000_000);
+}
+
+// ============== ISSUE #756: SEP-41 ALLOWANCE INTERFACE ==============
+
+// approve() records a grant that allowance() reports until it is spent,
+// revoked, or expires.
+#[test]
+fn test_approve_sets_allowance_until_expiration() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 100;
+
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 0);
+    te.pool.approve(&te.lp, &spender, &5_000_000_000, &expires);
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 5_000_000_000);
+
+    // A second approve overwrites the grant (SEP-41 semantics) rather than
+    // adding to it, and it can move the expiry.
+    te.pool
+        .approve(&te.lp, &spender, &1_000_000_000, &(expires + 50));
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 1_000_000_000);
+
+    // The grant is per (owner, spender) pair: another spender sees nothing.
+    assert_eq!(te.pool.allowance(&te.lp, &Address::generate(&te.env)), 0);
+}
+
+// The whole point of the allowance: a spender moves shares, the grant shrinks
+// by exactly what moved, and nobody's total share supply changes.
+#[test]
+fn test_transfer_from_decrements_allowance() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let recipient = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 100;
+    te.pool.approve(&te.lp, &spender, &5_000_000_000, &expires);
+
+    te.pool
+        .transfer_from(&spender, &te.lp, &recipient, &2_000_000_000);
+
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 3_000_000_000);
+    assert_eq!(te.pool.get_lp_position(&recipient).shares, 2_000_000_000);
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, 8_000_000_000);
+    // Moving shares must not mint or burn them.
+    assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
+
+    // Spending the rest takes the grant to exactly zero.
+    te.pool
+        .transfer_from(&spender, &te.lp, &recipient, &3_000_000_000);
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 0);
+    assert_eq!(te.pool.get_lp_position(&recipient).shares, 5_000_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_transfer_from_fails_once_allowance_exhausted() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let recipient = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 100;
+    te.pool.approve(&te.lp, &spender, &1_000, &expires);
+    te.pool.transfer_from(&spender, &te.lp, &recipient, &1_000);
+
+    // Grant fully spent: the next move is rejected, and it is rejected before
+    // any share leaves the owner.
+    te.pool.transfer_from(&spender, &te.lp, &recipient, &1);
+}
+
+#[test]
+fn test_allowance_reads_zero_after_expiration() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 10;
+    te.pool.approve(&te.lp, &spender, &5_000_000_000, &expires);
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 5_000_000_000);
+
+    // The grant is still live on its last ledger...
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + 10);
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 5_000_000_000);
+
+    // ...and dead from the next one onwards, without anyone having to prune it.
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + 1);
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_transfer_from_rejects_expired_allowance() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let recipient = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 5;
+    te.pool.approve(&te.lp, &spender, &5_000_000_000, &expires);
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + 6);
+
+    te.pool.transfer_from(&spender, &te.lp, &recipient, &1);
+}
+
+#[test]
+fn test_approve_with_zero_amount_revokes_allowance() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let recipient = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 100;
+    te.pool.approve(&te.lp, &spender, &5_000_000_000, &expires);
+
+    // Revoking needs no future expiry: amount 0 is the revoke signal.
+    te.pool.approve(&te.lp, &spender, &0, &0);
+    assert_eq!(te.pool.allowance(&te.lp, &spender), 0);
+    assert!(te
+        .pool
+        .try_transfer_from(&spender, &te.lp, &recipient, &1)
+        .is_err());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #25)")]
+fn test_approve_with_expiration_in_the_past_panics() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    te.pool
+        .approve(&te.lp, &spender, &1_000, &te.env.ledger().sequence());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #24)")]
+fn test_transfer_from_rejects_spender_without_grant() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let stranger = Address::generate(&te.env);
+    let recipient = Address::generate(&te.env);
+    te.pool.transfer_from(&stranger, &te.lp, &recipient, &1_000);
+}
+
+// approve() is a state change LPs and spenders both need to observe off-chain,
+// so it emits `allowance_approved` with the new total grant and its expiry.
+#[test]
+fn test_approve_emits_allowance_approved_event() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let spender = Address::generate(&te.env);
+    let expires = te.env.ledger().sequence() + 100;
+    let before = te.env.events().all().len();
+    te.pool.approve(&te.lp, &spender, &5_000_000_000, &expires);
+
+    let events = te.env.events().all();
+    assert_eq!(events.len(), before + 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "allowance_approved")
+    );
+    assert_eq!(
+        Address::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        te.lp
+    );
+    assert_eq!(
+        <(Address, i128, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (spender.clone(), 5_000_000_000, expires)
+    );
+
+    // A rejected approve (expiry already passed) must not emit either.
+    assert!(te
+        .pool
+        .try_approve(&te.lp, &spender, &1_000, &te.env.ledger().sequence())
+        .is_err());
+    assert_eq!(te.env.events().all().len(), events.len());
+}
+
+// ============== ISSUE #757: SEP-41 SHARE METADATA ==============
+
+#[test]
+fn test_share_metadata_comes_from_initialize() {
+    let te = setup();
+    assert_eq!(te.pool.name(), String::from_str(&te.env, TEST_SHARE_NAME));
+    assert_eq!(
+        te.pool.symbol(),
+        String::from_str(&te.env, TEST_SHARE_SYMBOL)
+    );
+    // Shares are denominated in the funding asset's base units, so the value
+    // configured at `initialize` is what `decimals()` reports.
+    assert_eq!(te.pool.decimals(), DEFAULT_SHARE_DECIMALS);
+
+    // Metadata lives on the instance, written once by initialize.
+    te.env.as_contract(&te.pool_id, || {
+        let stored_name: String = te
+            .env
+            .storage()
+            .instance()
+            .get(&DataKey::ShareName)
+            .unwrap();
+        let stored_symbol: String = te
+            .env
+            .storage()
+            .instance()
+            .get(&DataKey::ShareSymbol)
+            .unwrap();
+        assert_eq!(stored_name, String::from_str(&te.env, TEST_SHARE_NAME));
+        assert_eq!(stored_symbol, String::from_str(&te.env, TEST_SHARE_SYMBOL));
+    });
+}
+
+// The per-asset `pool_factory` model is the reason metadata is an initializer
+// argument instead of a constant: two pool instances are two different share
+// tokens and must not render identically in a wallet.
+#[test]
+fn test_share_metadata_is_scoped_to_the_pool_instance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let invoice_id = env.register_contract(None, RealInvoice);
+    let escrow_id = env.register_contract(None, RealEscrow);
+    let usdc_id = env.register_contract(None, MockToken);
+    let registry_id = env.register_contract(None, MockRegistry);
+    let pool_id = env.register_contract(None, PoolContract);
+
+    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
+
+    let pool = PoolContractClient::new(&env, &pool_id);
+    pool.initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+        &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, "TrusTrove XLM Pool Shares"),
+        &String::from_str(&env, "TT-XLM"),
+        &12,
+    );
+
+    assert_eq!(
+        pool.name(),
+        String::from_str(&env, "TrusTrove XLM Pool Shares")
+    );
+    assert_eq!(pool.symbol(), String::from_str(&env, "TT-XLM"));
+    // A non-7 value proves decimals is per-instance state, not a constant.
+    assert_eq!(pool.decimals(), 12);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_initialize_rejects_empty_share_symbol() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let invoice_id = env.register_contract(None, RealInvoice);
+    let escrow_id = env.register_contract(None, RealEscrow);
+    let usdc_id = env.register_contract(None, MockToken);
+    let registry_id = env.register_contract(None, MockRegistry);
+    let pool_id = env.register_contract(None, PoolContract);
+
+    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
+    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
+
+    PoolContractClient::new(&env, &pool_id).initialize(
+        &admin,
+        &invoice_id,
+        &escrow_id,
+        &usdc_id,
+        &registry_id,
+        &admin,
+        &DEFAULT_MIN_INITIAL_DEPOSIT,
+        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
+        &String::from_str(&env, ""),
+        &DEFAULT_SHARE_DECIMALS,
+    );
+}
+
+#[test]
+fn test_share_metadata_unreadable_before_initialize() {
+    let env = Env::default();
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+
+    assert!(pool.try_name().is_err());
+    assert!(pool.try_symbol().is_err());
+    // `decimals` falls back to the 7-decimal default instead of panicking, so
+    // pools that predate the parameter still render sensibly.
+    assert_eq!(pool.decimals(), DEFAULT_SHARE_DECIMALS);
+}
+
+// ============== ISSUE #758: DEPOSIT ROUTES THROUGH mint() ==============
+
+// The `mint()` extraction must be invisible from the outside: same shares, same
+// bookkeeping, and exactly one event with the same payload shape.
+#[test]
+fn test_deposit_mints_through_shared_helper_without_changing_behaviour() {
+    let te = setup();
+
+    let before = te.env.events().all().len();
+    let shares = te.pool.deposit(&te.lp, &10_000_000_000);
+    assert_eq!(shares, 10_000_000_000);
+
+    // One event, unchanged: `lp_deposited(lp, usdc_amount, shares_issued)`.
+    let events = te.env.events().all();
+    assert_eq!(events.len(), before + 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "lp_deposited")
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000u128, 10_000_000_000u128)
+    );
+
+    // mint() bumps the total and the LP's balance together...
+    assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, 10_000_000_000);
+
+    // ...and a second deposit through the same helper is additive.
+    te.pool.deposit(&te.lp, &5_000_000_000);
+    assert_eq!(te.pool.get_stats().total_shares, 15_000_000_000);
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, 15_000_000_000);
+}
+
+// `total_shares` in stats and the LP's share balance must agree, since that is
+// the invariant `mint()`/`burn()` now own.
+#[test]
+fn test_share_supply_stays_consistent_across_mint_and_burn() {
+    let te = setup();
+    let other = Address::generate(&te.env);
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    // top up the mock token for a second LP
+    te.env.as_contract(&te.usdc_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&TKey(other.clone()), &100_000_000_000_000i128);
+    });
+    te.pool.deposit(&other, &20_000_000_000);
+
+    assert_eq!(te.pool.get_stats().total_shares, 30_000_000_000);
+    assert_eq!(
+        te.pool.get_lp_position(&te.lp).shares + te.pool.get_lp_position(&other).shares,
+        30_000_000_000
+    );
+
+    te.pool.withdraw(&te.lp, &4_000_000_000);
+    assert_eq!(te.pool.get_stats().total_shares, 26_000_000_000);
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, 6_000_000_000);
+}
+
+// ============== ISSUE #767: protocol_fee_updated EVENT ==============
+
+// A fee/treasury change is high-impact for LPs, so it must be observable
+// without polling `get_protocol_fee_bps`, and the event must carry the *old*
+// value so an indexer can report what changed.
+#[test]
+fn test_set_protocol_fee_emits_event_with_old_and_new_values() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+    let before = te.env.events().all().len();
+
+    te.pool.set_protocol_fee(&750, &treasury);
+
+    let events = te.env.events().all();
+    assert_eq!(events.len(), before + 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "protocol_fee_updated")
+    );
+    // setup() initialized the fee to 0 bps, so the first change reports 0 -> 750.
+    assert_eq!(
+        <(u32, u32, Address)>::try_from_val(&te.env, &data).unwrap(),
+        (0u32, 750u32, treasury.clone())
+    );
+
+    // A second change reports the value it replaced, not the original one.
+    te.pool.set_protocol_fee(&1500, &treasury);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u32, u32, Address)>::try_from_val(&te.env, &data).unwrap(),
+        (750u32, 1500u32, treasury.clone())
+    );
+
+    // A rejected change (above MAX_PROTOCOL_FEE_BPS) must not emit anything,
+    // and must leave the stored fee at 1500.
+    let before_rejected = events.len();
+    assert!(te.pool.try_set_protocol_fee(&2001, &treasury).is_err());
+    assert_eq!(te.env.events().all().len(), before_rejected);
+    assert_eq!(te.pool.get_protocol_fee_bps(), 1500);
+}
+
+// Re-pointing the treasury is reported in the same event even when the fee
+// itself does not change, so monitoring sees the destination move.
+#[test]
+fn test_set_protocol_fee_event_reports_treasury_change_with_unchanged_fee() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+    te.pool.set_protocol_fee(&500, &treasury);
+
+    let new_treasury = Address::generate(&te.env);
+    te.pool.set_protocol_fee(&500, &new_treasury);
+
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u32, u32, Address)>::try_from_val(&te.env, &data).unwrap(),
+        (500u32, 500u32, new_treasury.clone())
+    );
+    assert_eq!(te.pool.get_treasury(), new_treasury);
+    assert_eq!(te.pool.get_protocol_fee_bps(), 500);
 }

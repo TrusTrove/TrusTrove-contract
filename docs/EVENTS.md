@@ -294,6 +294,42 @@ Emitted when the pool handles a defaulted invoice.
 
 ---
 
+### `protocol_fee_updated`
+
+Emitted when the admin changes the protocol fee and/or the treasury address. The
+old value is included so an indexer can report what changed rather than only
+what it changed to. A rejected call (fee above `MAX_PROTOCOL_FEE_BPS`) emits
+nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"protocol_fee_updated"` |
+| **Data** | `(u32, u32, Address)` | `(old_fee_bps, new_fee_bps, treasury)` |
+
+**Emitted by:** `set_protocol_fee()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:72`
+
+---
+
+### `allowance_approved`
+
+Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
+`amount` is the new **total** grant (not a delta), and `amount == 0` is the
+revoke signal.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"allowance_approved"` |
+| `topic[1]` | `Address` | Share owner (`from`) |
+| **Data** | `(Address, i128, u32)` | `(spender, amount, expiration_ledger)` |
+
+**Emitted by:** `approve()` in `contracts/pool/src/lib.rs:646`  
+**Source:** `contracts/pool/src/events.rs:83`
+
+---
+
 ### `ownership_transferred` (dead code)
 
 Emitted when pool ownership is transferred. Currently unused (marked `#[allow(dead_code)]`).
