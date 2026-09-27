@@ -2538,8 +2538,13 @@ fn test_repay_fails_when_funding_asset_contract_missing() {
     client.add_supported_asset(&missing_token);
 
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-    let invoice_id =
-        client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &missing_token);
+    let invoice_id = client.create(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &missing_token,
+    );
     attest(&env, &client, &invoice_id);
     client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
 
@@ -2569,8 +2574,13 @@ fn test_repay_early_fails_when_funding_asset_contract_missing() {
     client.add_supported_asset(&missing_token);
 
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-    let invoice_id =
-        client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &missing_token);
+    let invoice_id = client.create(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &missing_token,
+    );
     attest(&env, &client, &invoice_id);
     client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
 
