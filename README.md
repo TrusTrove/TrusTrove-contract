@@ -111,13 +111,25 @@ mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
 confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
 repay(invoice_id) → bool
+repay_partial(invoice_id, amount) → bool
+repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
+get_counts() → Map<String, u64>
+get_remaining_balance(invoice_id) → u128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
+
+#### `list_for_financing(invoice_id, discount_bps) → bool`
+- Marks a `Created` invoice as available for financing (`Listed` status).
+- `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
+- Only the invoice `issuer` can call this.
+- Requires invoice to be in `Created` status.
+- Requires an active risk attestation from an authorized Underwrite agent.
+
 
 ### escrow_contract
 
@@ -207,7 +219,8 @@ Pool ──[shares]──► LP
 ```
 
 #### Step 2 — Create & List (no funds move)
-The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` expressing the yield they will give up in exchange for immediate liquidity.
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
+
 
 Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice.
 
@@ -474,9 +487,42 @@ test(invoice): add full lifecycle integration test
 
 If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/trusttrove)**
 
+### Error Codes Reference
+
+#### Invoice Contract (`InvoiceError`)
+
+| Code | Variant | Description |
+|:---:|---|---|
+| 1 | `AlreadyInitialized` | Contract has already been initialized |
+| 2 | `NotFound` | Invoice record or configuration key was not found |
+| 3 | `NotAuthorized` | Caller lacks required authorization |
+| 4 | `IssuerNotVerified` | Issuer is not verified in the registry contract |
+| 5 | `BuyerNotVerified` | Buyer is not verified in the registry contract |
+| 6 | `InvalidFaceValue` | Face value is zero |
+| 7 | `InvalidDueDate` | Due date is in the past or exceeds maximum invoice lifetime |
+| 8 | `InvalidStatusTransition` | Status does not allow the requested operation |
+| 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
+| 10 | `AlreadyConfirmed` | Caller has already confirmed delivery |
+| 11 | `DueDateNotPassed` | Invoice due date has not passed yet |
+| 12 | `InvalidDiscount` | Discount computation resulted in an invalid state |
+| 13 | `UnsupportedAsset` | Token asset is not registered as supported |
+| 14 | `ListingNotExpired` | Invoice listing has not reached expiry |
+| 15 | `MathOverflow` | Arithmetic operation overflowed or underflowed |
+| 16 | `InvalidAmount` | Face value, repayment, or fee amount is invalid or zero |
+| 17 | `CounterOverflow` | Internal invoice ID counter exceeded limit |
+| 18 | `InvalidExpiryWindow` | Expiry window parameter is invalid |
+| 19 | `InvalidParticipants` | Issuer and buyer cannot be the same address |
+| 20 | `NotInitialized` | Contract has not been initialized |
+| 21 | `UntrustedSigner` | Attestation signer does not match a verified agent |
+| 22 | `AlreadyAttested` | Invoice already has an attestation recorded |
+| 23 | `VerificationRequired` | Listing requires a valid underwriting attestation |
+| 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
+| 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
+
 ---
 
 ## License
+
 
 MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 

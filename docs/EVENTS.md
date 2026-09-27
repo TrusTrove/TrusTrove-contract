@@ -122,6 +122,22 @@ Emitted when the buyer repays the invoice.
 
 ---
 
+### `partial_repayment_received`
+
+Emitted when a buyer makes a partial repayment towards an invoice.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"partial_repayment_received"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `(u128, u128)` | Tuple of `(amount_paid, remaining_balance)` in USDC stroops |
+
+**Emitted by:** `repay_partial()` in `contracts/invoice/src/lib.rs`
+
+---
+
+
 ### `invoice_defaulted`
 
 Emitted when an invoice defaults (past due date, not repaid).

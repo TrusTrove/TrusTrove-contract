@@ -654,6 +654,8 @@ impl InvoiceContract {
             repaid_at: None,
             funding_asset: funding_asset.clone(),
             funding_pool: None,
+            repaid_amount: 0,
+            remaining_balance: face_value,
         };
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -1138,8 +1140,15 @@ impl InvoiceContract {
     /// ```ignore
     /// client.repay(&invoice_id);
     /// ```
-    pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
-        // ```
+    /// Repays an invoice in partial installments or in full.
+    ///
+    /// Transfers `amount` from the buyer to escrow. If the cumulative repayment
+    /// is less than `face_value`, the invoice remains in its current status,
+    /// updating `repaid_amount` and `remaining_balance` and emitting `partial_repayment_received`.
+    /// Once cumulative repayment equals `face_value`, the escrow releases the funds
+    /// to the pool, the pool's repayment accounting is updated, the invoice transitions
+    /// to `Repaid`, and `invoice_repaid` is emitted.
+    pub fn repay_partial(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
             .storage()
@@ -1153,82 +1162,116 @@ impl InvoiceContract {
         {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        let prev_status = invoice.status;
 
-        let pool: Address = invoice
-            .funding_pool
-            .clone()
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        let face_value = invoice.face_value;
-        let funded_amount = invoice.funded_amount;
-        let funding_asset = invoice.funding_asset.clone();
+        if amount == 0 {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
 
-        let now = env.ledger().timestamp();
-        let funded_at = invoice
-            .funded_at
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        let discount = face_value.saturating_sub(funded_amount);
-        let term = invoice.due_date.saturating_sub(funded_at);
-        let elapsed = now.saturating_sub(funded_at);
-        let earned_by_pool = if term == 0 {
-            discount
-        } else {
-            discount
-                .checked_mul(elapsed as u128)
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
-                / (term as u128)
-        };
-        let refund_to_buyer = discount.saturating_sub(earned_by_pool);
+        if amount > invoice.remaining_balance {
+            panic_with_error!(&env, InvoiceError::RepaymentExceedsBalance);
+        }
 
-        let buyer = invoice.buyer.clone();
-
-        // Route repayment through escrow so escrow remains the secure
-        // intermediary for all fund movements (fixes issue #59).
-        // Flow: buyer → escrow → pool (via escrow::release_to_pool)
         let escrow: Address = env
             .storage()
             .instance()
             .get(&DataKey::EscrowContract)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
-        let token = token::Client::new(&env, &funding_asset);
-        // Step 1: buyer transfers face_value into escrow
-        token.transfer(&buyer, &escrow, &(face_value as i128));
+        let token = token::Client::new(&env, &invoice.funding_asset);
+        // Step 1: buyer transfers amount into escrow
+        token.transfer(&invoice.buyer, &escrow, &(amount as i128));
 
-        // Step 2: escrow releases face_value back to pool
-        let mut escrow_args = Vec::new(&env);
-        escrow_args.push_back(invoice_id.clone().into_val(&env));
-        escrow_args.push_back(face_value.into_val(&env));
-        let escrow_released: bool =
-            env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
-        if !escrow_released {
-            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        let new_repaid_amount = invoice
+            .repaid_amount
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+        let new_remaining = invoice
+            .remaining_balance
+            .checked_sub(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+
+        if new_remaining > 0 {
+            let mut updated = invoice;
+            updated.repaid_amount = new_repaid_amount;
+            updated.remaining_balance = new_remaining;
+            Self::save_invoice(&env, inv_key, &updated);
+            Self::extend_instance_ttl(&env);
+
+            events::partial_repayment_received(&env, &invoice_id, amount, new_remaining);
+            true
+        } else {
+            let pool: Address = invoice
+                .funding_pool
+                .clone()
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let face_value = invoice.face_value;
+            let funded_amount = invoice.funded_amount;
+
+            let now = env.ledger().timestamp();
+            let funded_at = invoice
+                .funded_at
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let discount = face_value.saturating_sub(funded_amount);
+            let term = invoice.due_date.saturating_sub(funded_at);
+            let elapsed = now.saturating_sub(funded_at);
+            let earned_by_pool = if term == 0 {
+                discount
+            } else {
+                discount
+                    .checked_mul(elapsed as u128)
+                    .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
+                    / (term as u128)
+            };
+            let refund_to_buyer = discount.saturating_sub(earned_by_pool);
+
+            // Step 2: escrow releases full face_value back to pool
+            let mut escrow_args = Vec::new(&env);
+            escrow_args.push_back(invoice_id.clone().into_val(&env));
+            escrow_args.push_back(face_value.into_val(&env));
+            let escrow_released: bool =
+                env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
+            if !escrow_released {
+                panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+            }
+
+            // Step 3: notify pool to update its internal accounting
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            args.push_back(face_value.into_val(&env));
+            args.push_back(refund_to_buyer.into_val(&env));
+            args.push_back(invoice.buyer.into_val(&env));
+            let repayment_recorded: bool = env.invoke_contract(
+                &pool,
+                &Symbol::new(&env, "receive_repayment_with_refund"),
+                args,
+            );
+            if !repayment_recorded {
+                panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+            }
+
+            let prev_status = invoice.status;
+            let mut updated = invoice;
+            updated.status = InvoiceStatus::Repaid;
+            updated.repaid_at = Some(now);
+            updated.repaid_amount = new_repaid_amount;
+            updated.remaining_balance = 0;
+            Self::save_invoice(&env, inv_key, &updated);
+            Self::extend_instance_ttl(&env);
+
+            move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Repaid);
+            events::invoice_repaid(&env, &invoice_id, updated.face_value);
+            true
         }
+    }
 
-        // Step 3: notify pool to update its internal accounting
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(face_value.into_val(&env));
-        args.push_back(refund_to_buyer.into_val(&env));
-        args.push_back(buyer.into_val(&env));
-        let repayment_recorded: bool = env.invoke_contract(
-            &pool,
-            &Symbol::new(&env, "receive_repayment_with_refund"),
-            args,
-        );
-        if !repayment_recorded {
-            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
-        }
-
-        let mut updated = invoice;
-        updated.status = InvoiceStatus::Repaid;
-        updated.repaid_at = Some(env.ledger().timestamp());
-        Self::save_invoice(&env, inv_key, &updated);
-        Self::extend_instance_ttl(&env);
-
-        move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Repaid);
-        events::invoice_repaid(&env, &invoice_id, updated.face_value);
-        true
+    pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        Self::repay_partial(env, invoice_id, invoice.remaining_balance)
     }
 
     /// Repays a confirmed invoice before its due date, returning the
@@ -1282,8 +1325,7 @@ impl InvoiceContract {
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
         let face_value = invoice.face_value;
-        let discount_bps = invoice.discount_bps as u128;
-        let funded_amount = face_value * (10000u128 - discount_bps) / 10000u128;
+        let funded_amount = invoice.funded_amount;
         let discount = face_value.saturating_sub(funded_amount);
 
         let funded_at = invoice
@@ -1352,6 +1394,8 @@ impl InvoiceContract {
         let mut updated = invoice;
         updated.status = InvoiceStatus::Repaid;
         updated.repaid_at = Some(now);
+        updated.repaid_amount = face_value;
+        updated.remaining_balance = 0;
         Self::save_invoice(&env, inv_key, &updated);
         Self::extend_instance_ttl(&env);
 
@@ -1679,6 +1723,16 @@ impl InvoiceContract {
     /// ```
     pub fn get_face_value(env: Env, invoice_id: BytesN<32>) -> u128 {
         Self::get_invoice(&env, invoice_id).face_value
+    }
+
+    /// Returns the remaining balance to be repaid on an invoice.
+    pub fn get_remaining_balance(env: Env, invoice_id: BytesN<32>) -> u128 {
+        Self::get_invoice(&env, invoice_id).remaining_balance
+    }
+
+    /// Returns the cumulative amount repaid on an invoice.
+    pub fn get_repaid_amount(env: Env, invoice_id: BytesN<32>) -> u128 {
+        Self::get_invoice(&env, invoice_id).repaid_amount
     }
 
     /// Returns the discount basis points for an invoice.
