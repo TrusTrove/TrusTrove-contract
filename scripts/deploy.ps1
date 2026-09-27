@@ -284,7 +284,7 @@ Write-Host "USDC Pool: $poolUsdcId"
 
 Invoke-Init "escrow_usdc" $escrowUsdcId @("--", "initialize", "--admin", $deployerAddress, "--pool_contract", $poolUsdcId, "--invoice_contract", $invoiceId, "--usdc_asset", $usdcIssuer)
 
-Invoke-Init "pool_usdc" $poolUsdcId @("--", "initialize", "--admin", $deployerAddress, "--invoice_contract", $invoiceId, "--escrow_contract", $escrowUsdcId, "--usdc_asset", $usdcIssuer, "--registry_contract", $registryId, "--treasury", $deployerAddress, "--share_name", "`"TrusTrove USDC Pool Shares`"", "--share_symbol", "`"TT-USDC`"")
+Invoke-Init "pool_usdc" $poolUsdcId @("--", "initialize", "--admin", $deployerAddress, "--invoice_contract", $invoiceId, "--escrow_contract", $escrowUsdcId, "--funding_asset", $usdcIssuer, "--registry_contract", $registryId, "--treasury", $deployerAddress, "--min_initial_deposit", "10000000", "--share_name", "`"TrusTrove USDC Pool Shares`"", "--share_symbol", "`"TT-USDC`"", "--share_decimals", "7")
 
 Write-Host "`n=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
 $escrowXlmId = Deploy-Contract "escrow_xlm" "target/wasm32v1-none/release/trusttrove_escrow.wasm"
@@ -296,7 +296,7 @@ Write-Host "XLM Pool: $poolXlmId"
 
 Invoke-Init "escrow_xlm" $escrowXlmId @("--", "initialize", "--admin", $deployerAddress, "--pool_contract", $poolXlmId, "--invoice_contract", $invoiceId, "--usdc_asset", $xlmAsset)
 
-Invoke-Init "pool_xlm" $poolXlmId @("--", "initialize", "--admin", $deployerAddress, "--invoice_contract", $invoiceId, "--escrow_contract", $escrowXlmId, "--usdc_asset", $xlmAsset, "--registry_contract", $registryId, "--treasury", $deployerAddress, "--share_name", "`"TrusTrove XLM Pool Shares`"", "--share_symbol", "`"TT-XLM`"")
+Invoke-Init "pool_xlm" $poolXlmId @("--", "initialize", "--admin", $deployerAddress, "--invoice_contract", $invoiceId, "--escrow_contract", $escrowXlmId, "--funding_asset", $xlmAsset, "--registry_contract", $registryId, "--treasury", $deployerAddress, "--min_initial_deposit", "10000000", "--share_name", "`"TrusTrove XLM Pool Shares`"", "--share_symbol", "`"TT-XLM`"", "--share_decimals", "7")
 
 Write-Host "`n=== Wiring USDC pool_contract into invoice_contract ==="
 Invoke-Init "invoice_set_pool" $invoiceId @("--", "set_pool_contract", "--pool_contract", $poolUsdcId)

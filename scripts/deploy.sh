@@ -365,11 +365,13 @@ invoke_init "pool_usdc" "$POOL_USDC_ID" \
   --admin "$DEPLOYER_ADDRESS" \
   --invoice_contract "$INVOICE_ID" \
   --escrow_contract "$ESCROW_USDC_ID" \
-  --usdc_asset "$USDC_ISSUER" \
+  --funding_asset "$USDC_ISSUER" \
   --registry_contract "$REGISTRY_ID" \
   --treasury "$DEPLOYER_ADDRESS" \
+  --min_initial_deposit 10000000 \
   --share_name '"TrusTrove USDC Pool Shares"' \
-  --share_symbol '"TT-USDC"'
+  --share_symbol '"TT-USDC"' \
+  --share_decimals 7
 
 echo ""
 echo "=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
@@ -393,11 +395,13 @@ invoke_init "pool_xlm" "$POOL_XLM_ID" \
   --admin "$DEPLOYER_ADDRESS" \
   --invoice_contract "$INVOICE_ID" \
   --escrow_contract "$ESCROW_XLM_ID" \
-  --usdc_asset "$XLM_ASSET" \
+  --funding_asset "$XLM_ASSET" \
   --registry_contract "$REGISTRY_ID" \
   --treasury "$DEPLOYER_ADDRESS" \
+  --min_initial_deposit 10000000 \
   --share_name '"TrusTrove XLM Pool Shares"' \
-  --share_symbol '"TT-XLM"'
+  --share_symbol '"TT-XLM"' \
+  --share_decimals 7
 
 echo ""
 echo "=== Wiring USDC pool_contract into invoice_contract ==="

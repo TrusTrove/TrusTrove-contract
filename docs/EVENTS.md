@@ -307,7 +307,7 @@ nothing.
 | `topic[0]` | `Symbol` | `"protocol_fee_updated"` |
 | **Data** | `(u32, u32, Address)` | `(old_fee_bps, new_fee_bps, treasury)` |
 
-**Emitted by:** `set_protocol_fee()` in `contracts/pool/src/lib.rs`  
+**Emitted by:** `set_protocol_fee()` in `contracts/pool/src/lib.rs:1525`  
 **Source:** `contracts/pool/src/events.rs:72`
 
 ---
@@ -325,7 +325,7 @@ revoke signal.
 | `topic[1]` | `Address` | Share owner (`from`) |
 | **Data** | `(Address, i128, u32)` | `(spender, amount, expiration_ledger)` |
 
-**Emitted by:** `approve()` in `contracts/pool/src/lib.rs:646`  
+**Emitted by:** `approve()` in `contracts/pool/src/lib.rs:676`  
 **Source:** `contracts/pool/src/events.rs:83`
 
 ---
