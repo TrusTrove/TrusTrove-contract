@@ -52,6 +52,54 @@ impl MockCaller {
 #[contracttype]
 pub struct BalanceKey(Address);
 
+/// A strict mock token that reverts transfers which would overdraw an
+/// account, mimicking a real asset's insufficient-balance behavior. The
+/// lenient [`MockToken`] happily drives balances negative, so it cannot
+/// exercise the escrow contract's behavior when it lacks the funds it
+/// tries to transfer.
+///
+/// Lives in its own module because `#[contractimpl]` emits helper symbols
+/// (`__transfer`, `__balance`, …) at module scope, which would collide with
+/// the ones generated for [`MockToken`].
+mod strict {
+    use super::BalanceKey;
+    use soroban_sdk::{contract, contracterror, contractimpl, panic_with_error, Address, Env};
+
+    #[contract]
+    pub struct StrictMockToken;
+
+    #[contracterror]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum StrictMockTokenError {
+        /// Returned when a transfer would overdraw the source account.
+        InsufficientBalance = 1,
+    }
+
+    #[contractimpl]
+    impl StrictMockToken {
+        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+            let from_key = BalanceKey(from.clone());
+            let to_key = BalanceKey(to.clone());
+            let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+            let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+            if from_bal < amount {
+                panic_with_error!(&env, StrictMockTokenError::InsufficientBalance);
+            }
+            env.storage()
+                .persistent()
+                .set(&from_key, &(from_bal - amount));
+            env.storage().persistent().set(&to_key, &(to_bal + amount));
+        }
+
+        pub fn balance(env: Env, addr: Address) -> i128 {
+            env.storage()
+                .persistent()
+                .get(&BalanceKey(addr))
+                .unwrap_or(0)
+        }
+    }
+}
+
 fn setup() -> (
     Env,
     EscrowContractClient<'static>,
@@ -761,6 +809,80 @@ fn test_handle_default_second_call_returns_false_without_side_effects() {
         event_count_after_first,
         "second handle_default must not emit any events"
     );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_handle_default_panics_when_escrow_balance_insufficient() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = env.register_contract(None, MockCaller);
+    let pool = env.register_contract(None, MockCaller);
+    let issuer = env.register_contract(None, MockCaller);
+    let usdc_id = env.register_contract(None, strict::StrictMockToken);
+    let token_client = strict::StrictMockTokenClient::new(&env, &usdc_id);
+
+    // Fund the pool so the initial lock can proceed.
+    let pool_bal_key = BalanceKey(pool.clone());
+    env.as_contract(&usdc_id, || {
+        env.storage()
+            .persistent()
+            .set(&pool_bal_key, &10_000_000_000_000i128);
+    });
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &pool, &usdc_id);
+
+    let invoice_id = generate_invoice_id(&env, 30);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // Sanity: the escrow contract now holds exactly the locked amount.
+    assert_eq!(token_client.balance(&contract_id), amount as i128);
+
+    // Drain the escrow contract's balance directly through the token so the
+    // subsequent default transfer cannot complete.
+    let escrow_balance = token_client.balance(&contract_id);
+    token_client.transfer(&contract_id, &issuer, &escrow_balance);
+    assert_eq!(token_client.balance(&contract_id), 0);
+
+    // Advance past the grace period so the only remaining failure mode is
+    // the token transfer itself.
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+
+    client.handle_default(&invoice_id, &pool);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_handle_default_admin_caller_without_pool_set_panics_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let invoice_id = generate_invoice_id(&env, 105);
+    let admin = Address::generate(&env);
+
+    // Set only the Admin key — PoolContract (and UsdcAsset) remain unset —
+    // and seed a lock record so handle_default gets past its early guard.
+    env.as_contract(&contract_id, || {
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        let record = EscrowRecord {
+            invoice_id: invoice_id.clone(),
+            amount: 1_000_000_000,
+            locked_at: env.ledger().timestamp(),
+            issuer: Address::generate(&env),
+        };
+        env.storage()
+            .persistent()
+            .set(&DataKey::Locked(invoice_id.clone()), &record);
+    });
+
+    // Even though the caller is the admin, the missing PoolContract must
+    // panic with NotInitialized before any funds move.
+    client.handle_default(&invoice_id, &admin);
 }
 
 #[test]
