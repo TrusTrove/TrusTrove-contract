@@ -118,6 +118,8 @@ get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
+get_invoice_count_by_issuer(address) → u32
+get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
 set_agent_registry_contract(agent_registry_contract) → bool

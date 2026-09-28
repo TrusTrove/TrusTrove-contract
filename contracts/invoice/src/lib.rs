@@ -1966,6 +1966,66 @@ impl InvoiceContract {
         hydrate_ids(&env, ids)
     }
 
+    /// Returns the number of invoices created by a given issuer.
+    ///
+    /// Reads only the issuer index counter, so it is much cheaper than
+    /// [`get_by_issuer`](Self::get_by_issuer), which hydrates every record.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The issuer address.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The number of invoices issued by `address`, or `0` if the
+    ///   address has never issued an invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_invoice_count_by_issuer(&issuer);
+    /// ```
+    pub fn get_invoice_count_by_issuer(env: Env, address: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuerIndexCount(address))
+            .unwrap_or(0)
+    }
+
+    /// Returns the number of invoices associated with a given buyer.
+    ///
+    /// Reads only the buyer index counter, so it is much cheaper than
+    /// [`get_by_buyer`](Self::get_by_buyer), which hydrates every record.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The buyer address.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The number of invoices bought by `address`, or `0` if the
+    ///   address has never bought an invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_invoice_count_by_buyer(&buyer);
+    /// ```
+    pub fn get_invoice_count_by_buyer(env: Env, address: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BuyerIndexCount(address))
+            .unwrap_or(0)
+    }
+
     /// Returns a map of invoice counts keyed by status name.
     ///
     /// # Arguments

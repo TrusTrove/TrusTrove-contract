@@ -36,7 +36,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "A_bGW_267"
+                      },
+                      "val": {
+                        "string": "LO9W_NUwI0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "TQH63J_pH_"
+                      },
+                      "val": {
+                        "string": "o2"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "WIhA"
+                      },
+                      "val": {
+                        "string": "6u_9_3"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -100,7 +125,32 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "A_bGW_267"
+                            },
+                            "val": {
+                              "string": "LO9W_NUwI0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "TQH63J_pH_"
+                            },
+                            "val": {
+                              "string": "o2"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "WIhA"
+                            },
+                            "val": {
+                              "string": "6u_9_3"
+                            }
+                          }
+                        ]
                       }
                     },
                     {
@@ -355,7 +405,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "A_bGW_267"
+                      },
+                      "val": {
+                        "string": "LO9W_NUwI0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "TQH63J_pH_"
+                      },
+                      "val": {
+                        "string": "o2"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "WIhA"
+                      },
+                      "val": {
+                        "string": "6u_9_3"
+                      }
+                    }
+                  ]
                 }
               ]
             }

@@ -36,40 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "PnjDU_4"
-                      },
-                      "val": {
-                        "string": "et_OkoD7_h_"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "___4Tf"
-                      },
-                      "val": {
-                        "string": "5_xXJh6ExB_wU__lq"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_eDJ__6N"
-                      },
-                      "val": {
-                        "string": "F1G4savG5a7"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "c6__"
-                      },
-                      "val": {
-                        "string": "aj2S9s_0y9_4hki_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -285,40 +252,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "PnjDU_4"
-                            },
-                            "val": {
-                              "string": "et_OkoD7_h_"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "___4Tf"
-                            },
-                            "val": {
-                              "string": "5_xXJh6ExB_wU__lq"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "_eDJ__6N"
-                            },
-                            "val": {
-                              "string": "F1G4savG5a7"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "c6__"
-                            },
-                            "val": {
-                              "string": "aj2S9s_0y9_4hki_"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -804,40 +738,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "PnjDU_4"
-                      },
-                      "val": {
-                        "string": "et_OkoD7_h_"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "___4Tf"
-                      },
-                      "val": {
-                        "string": "5_xXJh6ExB_wU__lq"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_eDJ__6N"
-                      },
-                      "val": {
-                        "string": "F1G4savG5a7"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "c6__"
-                      },
-                      "val": {
-                        "string": "aj2S9s_0y9_4hki_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }

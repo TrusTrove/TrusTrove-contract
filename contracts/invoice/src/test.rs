@@ -1055,6 +1055,112 @@ fn test_get_by_buyer_returns_correct_invoices() {
 }
 
 #[test]
+fn test_get_invoice_count_by_issuer_matches_get_by_issuer() {
+    // Verifies that `get_invoice_count_by_issuer` returns the same value as
+    // `get_by_issuer(..).len()` after several creates spread across multiple
+    // issuers and buyers (issue #840).
+    let (env, client, issuer, buyer, registry, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    registry.register(&issuer2);
+    registry.register(&issuer3);
+    registry.register(&buyer2);
+
+    // issuer -> buyer: 2 invoices, issuer -> buyer2: 1 invoice
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
+    client.create(&issuer, &buyer2, &3_000_000_000, &due_date, &usdc);
+    // issuer2 -> buyer: 1 invoice
+    client.create(&issuer2, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // issuer3 -> buyer2: 2 invoices
+    client.create(&issuer3, &buyer2, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    client.create(&issuer3, &buyer2, &4_000_000_000, &due_date, &usdc);
+
+    for party in [&issuer, &issuer2, &issuer3, &buyer, &buyer2] {
+        assert_eq!(
+            client.get_invoice_count_by_issuer(party),
+            client.get_by_issuer(party).len(),
+            "issuer count mismatch for {party:?}"
+        );
+    }
+
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 3);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer2), 1);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer3), 2);
+    assert_eq!(client.get_invoice_count_by_issuer(&buyer), 0);
+    assert_eq!(client.get_invoice_count_by_issuer(&buyer2), 0);
+}
+
+#[test]
+fn test_get_invoice_count_by_buyer_matches_get_by_buyer() {
+    // Verifies that `get_invoice_count_by_buyer` returns the same value as
+    // `get_by_buyer(..).len()` after several creates spread across multiple
+    // issuers and buyers (issue #840).
+    let (env, client, issuer, buyer, registry, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let issuer2 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    let buyer3 = Address::generate(&env);
+    registry.register(&issuer2);
+    registry.register(&buyer2);
+    registry.register(&buyer3);
+
+    // issuer -> buyer: 2 invoices, issuer -> buyer2: 1 invoice
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
+    client.create(&issuer, &buyer2, &3_000_000_000, &due_date, &usdc);
+    // issuer2 -> buyer3: 2 invoices
+    client.create(&issuer2, &buyer3, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    client.create(&issuer2, &buyer3, &4_000_000_000, &due_date, &usdc);
+
+    for party in [&issuer, &issuer2, &buyer, &buyer2, &buyer3] {
+        assert_eq!(
+            client.get_invoice_count_by_buyer(party),
+            client.get_by_buyer(party).len(),
+            "buyer count mismatch for {party:?}"
+        );
+    }
+
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 2);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer2), 1);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer3), 2);
+    assert_eq!(client.get_invoice_count_by_buyer(&issuer), 0);
+    assert_eq!(client.get_invoice_count_by_buyer(&issuer2), 0);
+}
+
+#[test]
+fn test_get_invoice_count_by_issuer_and_buyer_unknown_address_is_zero() {
+    // Verifies both count views return `0` for addresses that have never
+    // issued or bought an invoice, both before and after other activity
+    // (issue #840).
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let stranger = Address::generate(&env);
+
+    // Before any invoice exists
+    assert_eq!(client.get_invoice_count_by_issuer(&stranger), 0);
+    assert_eq!(client.get_invoice_count_by_buyer(&stranger), 0);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 0);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 0);
+
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Unrelated addresses stay at zero while known ones advance
+    assert_eq!(client.get_invoice_count_by_issuer(&stranger), 0);
+    assert_eq!(client.get_invoice_count_by_buyer(&stranger), 0);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 1);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 1);
+    // Cross-index: an issuer that never bought is `0` as a buyer and vice versa
+    assert_eq!(client.get_invoice_count_by_buyer(&issuer), 0);
+    assert_eq!(client.get_invoice_count_by_issuer(&buyer), 0);
+}
+
+#[test]
 fn test_get_by_status_returns_correct_invoices() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;

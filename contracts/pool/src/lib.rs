@@ -454,7 +454,7 @@ impl PoolContract {
         let usdc = token::Client::new(&env, &usdc_id);
         usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
 
-        Self::mint(&env, &lp, shares_to_issue);
+        Self::_mint(&env, &lp, shares_to_issue);
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + usdc_amount));
@@ -482,7 +482,6 @@ impl PoolContract {
             .extend_ttl(&lp_init_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
-        Self::extend_instance_ttl(&env);
         shares_to_issue
     }
 
@@ -562,7 +561,7 @@ impl PoolContract {
             &(usdc_to_return as i128),
         );
 
-        let remaining_shares = Self::burn(&env, &lp, shares);
+        let remaining_shares = Self::_burn(&env, &lp, shares);
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
@@ -603,7 +602,6 @@ impl PoolContract {
             .extend_ttl(&yield_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         events::lp_withdrawn(&env, &lp, usdc_to_return, shares);
-        Self::extend_instance_ttl(&env);
         usdc_to_return
     }
 
@@ -621,6 +619,21 @@ impl PoolContract {
     /// # Panics
     /// * `InvalidAmount` if `amount` is zero.
     /// * `NoShares` if `from` has no shares.
+    /// Transfers shares from one address to another.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `from` - The source address.
+    /// * `to` - The destination address.
+    /// * `amount` - The amount to transfer (can be negative for reverse accounting in specific contexts).
+    ///
+    /// # Auth
+    /// Requires authorization from `from`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidAmount` if `amount` is zero or negative.
+    /// * `NoShares` if `from` has no shares.
     /// * `InsufficientBalance` if `from` does not own enough shares.
     ///
     /// # Returns
@@ -628,9 +641,12 @@ impl PoolContract {
     ///
     /// # Example
     /// ```ignore
-    /// client.transfer(&from, &to, 100);
+    /// client.transfer_shares(&from, &to, 100);
     /// ```
-    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+    ///
+    /// Note: This function accepts i128 to allow for negative amounts in internal accounting,
+    /// but negative amounts are rejected as invalid for standard transfers.
+    pub fn transfer_shares(env: Env, from: Address, to: Address, amount: i128) {
         Self::require_initialized(&env);
         from.require_auth();
         if amount <= 0 {
@@ -1759,7 +1775,7 @@ impl PoolContract {
     }
 
     /// Internal helper to mint LP shares (scoped for SEP-41 share issuance).
-    fn mint(env: &Env, to: &Address, amount: u128) {
+    fn _mint(env: &Env, to: &Address, amount: u128) {
         let total_shares = Self::totals(env).shares;
         env.storage()
             .instance()
@@ -1776,7 +1792,7 @@ impl PoolContract {
     }
 
     /// Internal helper to burn LP shares (scoped for SEP-41 share redemption).
-    fn burn(env: &Env, from: &Address, amount: u128) -> u128 {
+    fn _burn(env: &Env, from: &Address, amount: u128) -> u128 {
         let total_shares = Self::totals(env).shares;
         env.storage()
             .instance()
