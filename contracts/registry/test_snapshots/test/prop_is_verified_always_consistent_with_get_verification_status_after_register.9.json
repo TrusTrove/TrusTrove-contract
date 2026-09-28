@@ -36,32 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "_"
-                      },
-                      "val": {
-                        "string": "FoSF__40k_Aw"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "ips"
-                      },
-                      "val": {
-                        "string": "P_9bS45weGv__Sj_l"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "mW4Phw"
-                      },
-                      "val": {
-                        "string": "U5__2OL6vu_vvbM__"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -125,32 +100,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "_"
-                            },
-                            "val": {
-                              "string": "FoSF__40k_Aw"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "ips"
-                            },
-                            "val": {
-                              "string": "P_9bS45weGv__Sj_l"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "mW4Phw"
-                            },
-                            "val": {
-                              "string": "U5__2OL6vu_vvbM__"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -405,32 +355,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "_"
-                      },
-                      "val": {
-                        "string": "FoSF__40k_Aw"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "ips"
-                      },
-                      "val": {
-                        "string": "P_9bS45weGv__Sj_l"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "mW4Phw"
-                      },
-                      "val": {
-                        "string": "U5__2OL6vu_vvbM__"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }

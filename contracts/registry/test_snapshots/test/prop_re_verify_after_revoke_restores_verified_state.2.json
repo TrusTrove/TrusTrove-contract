@@ -36,16 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "_SbFm8j_rs"
-                      },
-                      "val": {
-                        "string": "OfxJ_8omt__AzA4"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -217,16 +208,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "_SbFm8j_rs"
-                            },
-                            "val": {
-                              "string": "OfxJ_8omt__AzA4"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -646,16 +628,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "_SbFm8j_rs"
-                      },
-                      "val": {
-                        "string": "OfxJ_8omt__AzA4"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }

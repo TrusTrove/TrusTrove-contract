@@ -36,7 +36,24 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "EC"
+                      },
+                      "val": {
+                        "string": "Swl3"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "hf0z__l"
+                      },
+                      "val": {
+                        "string": "laKb_g"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -208,7 +225,24 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "EC"
+                            },
+                            "val": {
+                              "string": "Swl3"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "hf0z__l"
+                            },
+                            "val": {
+                              "string": "laKb_g"
+                            }
+                          }
+                        ]
                       }
                     },
                     {
@@ -628,7 +662,24 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "EC"
+                      },
+                      "val": {
+                        "string": "Swl3"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "hf0z__l"
+                      },
+                      "val": {
+                        "string": "laKb_g"
+                      }
+                    }
+                  ]
                 }
               ]
             }
