@@ -3518,6 +3518,43 @@ fn test_repay_partial_leaves_status_and_updates_balance() {
 }
 
 #[test]
+fn test_repay_after_partial_settles_outstanding_balance_only() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let face_value: u128 = 1_000_000_000;
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+
+    // The buyer can only afford `face_value` in total, so `repay` pulling more
+    // than the outstanding remainder would overdraw this balance and fail.
+    mint_tokens(&env, &usdc, &buyer, face_value as i128);
+
+    client.repay_partial(&invoice_id, &400_000_000);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+    assert_eq!(client.get_remaining_balance(&invoice_id), 600_000_000);
+    assert_eq!(client.get_repaid_amount(&invoice_id), 400_000_000);
+
+    assert!(client.repay(&invoice_id));
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Repaid);
+    assert_eq!(inv.repaid_amount, face_value);
+    assert_eq!(inv.remaining_balance, 0);
+    assert!(inv.repaid_at.is_some());
+    assert_eq!(client.get_remaining_balance(&invoice_id), 0);
+    assert_eq!(client.get_repaid_amount(&invoice_id), face_value);
+}
+
+#[test]
 fn test_repay_partial_multi_step_reaches_repaid() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
