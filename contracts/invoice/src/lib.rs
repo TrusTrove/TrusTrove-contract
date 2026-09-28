@@ -1179,7 +1179,12 @@ impl InvoiceContract {
 
         let token = token::Client::new(&env, &invoice.funding_asset);
         // Step 1: buyer transfers amount into escrow
-        token.transfer(&invoice.buyer, &escrow, &(amount as i128));
+        if !matches!(
+            token.try_transfer(&invoice.buyer, &escrow, &(amount as i128)),
+            Ok(Ok(()))
+        ) {
+            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        }
 
         let new_repaid_amount = invoice
             .repaid_amount
