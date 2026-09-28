@@ -7,7 +7,8 @@
 
 
 <p align="center">
-  Four Soroban smart contracts powering the TrusTrove trade finance protocol on Stellar.
+  Soroban smart contracts powering the TrusTrove trade finance protocol on Stellar. 
+  The protocol uses a pool_factory + per-asset pool instance model, allowing independent liquidity pools per asset.
 </p> 
 
 
@@ -110,13 +111,25 @@ mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
 confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
 repay(invoice_id) → bool
+repay_partial(invoice_id, amount) → bool
+repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status) → Vec<Invoice>
 get_by_issuer(address) → Vec<Invoice>
+get_counts() → Map<String, u64>
+get_remaining_balance(invoice_id) → u128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
+
+#### `list_for_financing(invoice_id, discount_bps) → bool`
+- Marks a `Created` invoice as available for financing (`Listed` status).
+- `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
+- Only the invoice `issuer` can call this.
+- Requires invoice to be in `Created` status.
+- Requires an active risk attestation from an authorized Underwrite agent.
+
 
 ### escrow_contract
 
@@ -146,11 +159,22 @@ get_protocol_fee_bps() → u32
 get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
+transfer(from, to, amount) → ()             ← SEP-41 share transfer
+approve(from, spender, amount, expiration_ledger) → ()   ← SEP-41 grant
+allowance(from, spender) → i128                          ← 0 when spent/expired
+transfer_from(spender, from, to, amount) → ()            ← spender auth, spends grant
+decimals() → u32                     ← per-instance, set at initialize
+name() → String                      ← set at initialize()
+symbol() → String                    ← set at initialize()
 ```
 
 ---
 
 ## Architecture & Fund Flow
+
+The protocol employs a `pool_factory` + per-asset pool instance model. The `pool_factory` handles deploying and tracking an independent `pool_contract` instance for each supported funding asset (e.g., USDC, XLM). This design isolates risk, ensuring that a shortfall in one asset pool cannot cross-contaminate another. 
+
+**Note**: This architecture explicitly supersedes closed issue #17's Option A/B question, resolved as Option B (parallel single-asset pools instead of a commingled multi-asset pool).
 
 ### Contract Interaction Map
 
@@ -167,17 +191,17 @@ get_lp_position(address) → LPPosition
                  │ mark_funded()      │ receive_repayment()
                  │ trigger_default()  │ handle_default()
           ┌──────▼───────┐    ┌───────▼──────────┐
-          │ pool_contract │    │  pool_contract   │
-          │  fund_invoice │    │  (repayment in)  │
-          └──────┬────────┘    └──────────────────┘
+          │ pool_contract │    │  pool_contract   │◄──(deployed by)── ┌───────────────┐
+          │  fund_invoice │    │  (repayment in)  │                  │ pool_factory  │
+          └──────┬────────┘    └──────────────────┘                  └───────────────┘
                  │ lock()
           ┌──────▼────────────┐
           │  escrow_contract  │
-          │  (USDC custody)   │
+          │  (Asset custody)  │
           └───────────────────┘
 ```
 
-`pool_contract` also calls `registry_contract.is_verified()` directly
+The `pool_contract` instances also call `registry_contract.is_verified()` directly
 (not shown above) as part of `fund_invoice`, re-checking the issuer and
 buyer before committing capital. See "Revocation is prospective, not
 retroactive" above.
@@ -195,7 +219,8 @@ Pool ──[shares]──► LP
 ```
 
 #### Step 2 — Create & List (no funds move)
-The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` expressing the yield they will give up in exchange for immediate liquidity.
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
+
 
 Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice.
 
@@ -407,15 +432,9 @@ The goal is LP-governed capital allocation:
 
 If you want to contribute to governance design, open an issue tagged `complexity:high` and link your proposal.
 
-### `trigger_default` is admin-gated, not time-based
+### `trigger_default` is permissionless and time-based (Resolved)
 
-`invoice::trigger_default` requires `admin.require_auth()`. Although the on-chain eligibility check enforces `now >= due_date`, the function is **not** an automatic time-based trigger — an admin must explicitly call it. This creates a single point of control over declaring defaults.
-
-**Risk:** Delays or failure to call `trigger_default` in time prevents the pool from recovering funds via `escrow::handle_default`, which could harm LP returns. A compromised admin could also misuse this power.
-
-**Current design rationale:** A human-in-the-loop check before declaring a default prevents accidental defaults from clock drift, chain reorgs, or misconfigured automation. It also allows for off-chain negotiations (grace periods, extensions) before a default is formally recorded.
-
-**Roadmap:** Introduce a permissionless time-based default mechanism where any caller can trigger a default for an invoice past its `due_date + grace_period`, without requiring admin authorization. The admin would retain only an override capability (e.g., to halt a false default).
+`invoice::trigger_default` is permissionless and requires no authorization (`admin.require_auth()` was removed). Anyone can trigger default processing once `now >= due_date`. This removes the single point of failure of an admin-gated default mechanism and ensures timely loss recognition and escrow fund recovery for liquidity pools without relying on admin intervention.
 
 ### No emergency pause mechanism
 
@@ -462,9 +481,42 @@ test(invoice): add full lifecycle integration test
 
 If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/trusttrove)**
 
+### Error Codes Reference
+
+#### Invoice Contract (`InvoiceError`)
+
+| Code | Variant | Description |
+|:---:|---|---|
+| 1 | `AlreadyInitialized` | Contract has already been initialized |
+| 2 | `NotFound` | Invoice record or configuration key was not found |
+| 3 | `NotAuthorized` | Caller lacks required authorization |
+| 4 | `IssuerNotVerified` | Issuer is not verified in the registry contract |
+| 5 | `BuyerNotVerified` | Buyer is not verified in the registry contract |
+| 6 | `InvalidFaceValue` | Face value is zero |
+| 7 | `InvalidDueDate` | Due date is in the past or exceeds maximum invoice lifetime |
+| 8 | `InvalidStatusTransition` | Status does not allow the requested operation |
+| 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
+| 10 | `AlreadyConfirmed` | Caller has already confirmed delivery |
+| 11 | `DueDateNotPassed` | Invoice due date has not passed yet |
+| 12 | `InvalidDiscount` | Discount computation resulted in an invalid state |
+| 13 | `UnsupportedAsset` | Token asset is not registered as supported |
+| 14 | `ListingNotExpired` | Invoice listing has not reached expiry |
+| 15 | `MathOverflow` | Arithmetic operation overflowed or underflowed |
+| 16 | `InvalidAmount` | Face value, repayment, or fee amount is invalid or zero |
+| 17 | `CounterOverflow` | Internal invoice ID counter exceeded limit |
+| 18 | `InvalidExpiryWindow` | Expiry window parameter is invalid |
+| 19 | `InvalidParticipants` | Issuer and buyer cannot be the same address |
+| 20 | `NotInitialized` | Contract has not been initialized |
+| 21 | `UntrustedSigner` | Attestation signer does not match a verified agent |
+| 22 | `AlreadyAttested` | Invoice already has an attestation recorded |
+| 23 | `VerificationRequired` | Listing requires a valid underwriting attestation |
+| 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
+| 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
+
 ---
 
 ## License
+
 
 MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 

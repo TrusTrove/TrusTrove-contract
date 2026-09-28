@@ -105,6 +105,8 @@ Profile {
 | `PoolContract` | `Address` | Pool contract address | `set_pool_contract()` |
 | `Counter` | `u64` | Monotonically increasing invoice counter | `initialize()`, incremented on `create()` |
 | `ExpiryWindow` | `u64` | Listing expiry window in seconds (default `604800`) | `set_expiry_window()` |
+| `SupportedAssetCount` | `u32` | Number of supported funding assets | `add_supported_asset()` |
+| `SupportedAsset(Address)` | `bool` | True if the asset is allowed for new invoices. *Note: Under the `pool_factory` model, an asset listed here should also be registered via `pool_factory::register_asset` to ensure `fund_invoice` is reachable.* | `add_supported_asset()` |
 
 ### Persistent Storage
 
@@ -250,7 +252,7 @@ EscrowEvent {
 | `Admin` | `Address` | Contract admin | `initialize()` |
 | `InvoiceContract` | `Address` | Invoice contract address | `initialize()` |
 | `EscrowContract` | `Address` | Escrow contract address | `initialize()` |
-| `UsdcAsset` | `Address` | USDC token contract address | `initialize()` |
+| `FundingAsset` | `Address` | Asset this pool instance funds invoices with | `initialize()` |
 | `TotalShares` | `u128` | Total LP shares outstanding | `initialize() = 0` |
 | `TotalDeposits` | `u128` | Total USDC principal deposited | `initialize() = 0` |
 | `TotalFunded` | `u128` | Total USDC deployed to invoices | `initialize() = 0` |
@@ -259,6 +261,10 @@ EscrowEvent {
 | `MaxUtilizationBps` | `u32` | Max utilization cap (bps) | `initialize() = 8500` |
 | `ProtocolFeeBps` | `u32` | Protocol fee in basis points (max 2000 bps = 20%) | `initialize() = 0` |
 | `TreasuryAddress` | `Address` | Protocol treasury destination for fee cuts | `initialize() = treasury (may equal admin)` |
+| `MinInitialDeposit` | `u128` | Minimum first deposit an empty pool accepts, in `FundingAsset` stroops | `initialize()` |
+| `ShareName` | `String` | SEP-41 `name()` of this pool's LP share token | `initialize()` |
+| `ShareSymbol` | `String` | SEP-41 `symbol()` of this pool's LP share token | `initialize()` |
+| `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
 
 ### Persistent Storage
 
@@ -270,6 +276,12 @@ EscrowEvent {
 | `LPDepositCount(Address)` | `u32` | Number of deposits made by this LP |
 | `LPYieldEarned(Address)` | `u128` | Cumulative yield earned (updated on withdraw) |
 | `LPInitialDeposit(Address)` | `u128` | Total principal deposited by LP (tracked for yield calculation) |
+
+#### SEP-41 Allowance Keys
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `Allowance(Address, Address)` | `ShareAllowance { amount: i128, expiration_ledger: u32 }` | Shares `from` let `spender` move, until `expiration_ledger`. Removed when fully spent or revoked with `approve(..., amount = 0)`; read back as `0` once expired. |
 
 #### Funded Invoice
 
@@ -300,6 +312,24 @@ In practice most pools will have:
 - 1 key per funded invoice (removed on repayment/default)
 
 ---
+
+## Contract: pool_factory
+
+### Instance Storage
+
+| DataKey | Type | Description | Set During |
+|---------|------|-------------|------------|
+| `Admin` | `Address` | Contract admin | `initialize()` |
+| `AssetCount` | `u32` | Number of registered assets | `register_asset()` / `register_existing_pool()` |
+| `AssetIndex(u32)` | `Address` | Ordered index of registered assets | `register_asset()` / `register_existing_pool()` |
+| `PoolForAsset(Address)` | `Address` | The pool contract deployed/tracked for an asset | `register_asset()` / `register_existing_pool()` |
+
+### Storage Key Count
+
+**Approximately 2 + (2 × number_of_assets).**
+
+Each registered asset requires two keys: one for its position in the list (`AssetIndex`) and one mapping its address to a pool (`PoolForAsset`).
+
 
 ## Gas / Budget Estimates
 

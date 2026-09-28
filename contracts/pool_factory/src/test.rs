@@ -4,7 +4,10 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
-use soroban_sdk::{testutils::Address as _, Address, Bytes, BytesN, Env};
+use soroban_sdk::{
+    testutils::{Address as _, Events as _},
+    Address, Bytes, BytesN, Env, Symbol, TryFromVal,
+};
 use trusttrove_escrow::EscrowContractClient;
 use trusttrove_invoice::InvoiceContractClient;
 use trusttrove_pool::PoolContractClient;
@@ -235,6 +238,27 @@ fn test_register_asset_deploys_and_initializes_pool() {
         })
         .expect("pool instance should record a registry contract");
     assert_eq!(registry, te.registry_id);
+}
+
+#[test]
+fn test_register_asset_emits_pool_instance_created_event() {
+    let te = setup();
+
+    let pool_address = register_asset(&te, &te.asset.clone());
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.factory_id);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "pool_instance_created")
+    );
+    assert_eq!(
+        Address::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        te.asset
+    );
+    assert_eq!(Address::try_from_val(&te.env, &data).unwrap(), pool_address);
 }
 
 #[test]
@@ -520,4 +544,133 @@ fn test_list_assets_multiple() {
     assert_eq!(assets.get(0), Some(asset1));
     assert_eq!(assets.get(1), Some(asset2));
     assert_eq!(assets.get(2), Some(asset3));
+}
+
+// --------------- Mock Token for Integration Tests ---------------
+
+use soroban_sdk::{contract, contractimpl, contracttype};
+
+#[contract]
+pub struct MockToken;
+
+#[contractimpl]
+impl MockToken {
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        let from_key = TKey(from.clone());
+        let to_key = TKey(to.clone());
+        let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+        let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&from_key, &(from_bal - amount));
+        env.storage().persistent().set(&to_key, &(to_bal + amount));
+    }
+
+    pub fn balance(env: Env, addr: Address) -> i128 {
+        env.storage().persistent().get(&TKey(addr)).unwrap_or(0)
+    }
+}
+
+#[contracttype]
+pub struct TKey(Address);
+
+// --------------- New Tests ---------------
+
+#[test]
+fn test_pool_instances_do_not_cross_contaminate() {
+    let te = setup();
+
+    // Register two actual mock tokens
+    let asset1 = te.env.register_contract(None, MockToken);
+    let asset2 = te.env.register_contract(None, MockToken);
+
+    let pool1 = register_asset(&te, &asset1);
+    let pool2 = register_asset(&te, &asset2);
+
+    let lp1 = Address::generate(&te.env);
+    let lp2 = Address::generate(&te.env);
+
+    // Give LP1 and LP2 some mock tokens
+    let lp1_bal_key = TKey(lp1.clone());
+    let lp2_bal_key = TKey(lp2.clone());
+    te.env.as_contract(&asset1, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&lp1_bal_key, &1_000_000_000_i128);
+    });
+    te.env.as_contract(&asset2, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&lp2_bal_key, &2_000_000_000_i128);
+    });
+
+    let pool1_client = PoolContractClient::new(&te.env, &pool1);
+    let pool2_client = PoolContractClient::new(&te.env, &pool2);
+
+    // LP1 deposits 20_000_000 into pool1
+    pool1_client.deposit(&lp1, &20_000_000);
+
+    // LP2 deposits 30_000_000 into pool2
+    pool2_client.deposit(&lp2, &30_000_000);
+
+    let stats1 = pool1_client.get_stats();
+    let stats2 = pool2_client.get_stats();
+
+    // Verify no cross contamination
+    assert_eq!(stats1.total_deposits, 20_000_000);
+    assert_eq!(stats1.total_shares, 20_000_000);
+
+    assert_eq!(stats2.total_deposits, 30_000_000);
+    assert_eq!(stats2.total_shares, 30_000_000);
+}
+
+#[test]
+fn test_get_aggregate_stats() {
+    let te = setup();
+
+    let asset1 = te.env.register_contract(None, MockToken);
+    let asset2 = te.env.register_contract(None, MockToken);
+
+    let pool1 = register_asset(&te, &asset1);
+    let pool2 = register_asset(&te, &asset2);
+
+    let lp1 = Address::generate(&te.env);
+    let lp2 = Address::generate(&te.env);
+
+    let lp1_bal_key = TKey(lp1.clone());
+    let lp2_bal_key = TKey(lp2.clone());
+    te.env.as_contract(&asset1, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&lp1_bal_key, &1_000_000_000_i128);
+    });
+    te.env.as_contract(&asset2, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&lp2_bal_key, &2_000_000_000_i128);
+    });
+
+    let pool1_client = PoolContractClient::new(&te.env, &pool1);
+    let pool2_client = PoolContractClient::new(&te.env, &pool2);
+
+    pool1_client.deposit(&lp1, &20_000_000);
+    pool2_client.deposit(&lp2, &30_000_000);
+
+    let aggregate = te.factory.get_aggregate_stats();
+    assert_eq!(aggregate.len(), 2);
+
+    // The order depends on listing order, which is insertion order.
+    // pool1 was inserted first.
+    let (addr1, stat1) = aggregate.get(0).unwrap();
+    let (addr2, stat2) = aggregate.get(1).unwrap();
+
+    assert_eq!(addr1, pool1);
+    assert_eq!(stat1.total_deposits, 20_000_000);
+
+    assert_eq!(addr2, pool2);
+    assert_eq!(stat2.total_deposits, 30_000_000);
 }

@@ -78,6 +78,10 @@ pub struct Invoice {
     /// came from a pool rather than a direct funder. `None` for
     /// direct-funded invoices.
     pub funding_pool: Option<Address>,
+    /// Cumulative amount repaid so far by the buyer, in USDC stroops.
+    pub repaid_amount: u128,
+    /// Remaining balance left to be repaid, in USDC stroops.
+    pub remaining_balance: u128,
 }
 
 #[contracttype]
