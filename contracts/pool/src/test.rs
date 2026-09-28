@@ -3811,6 +3811,69 @@ fn prop_full_withdrawal_returns_exact_deposit_with_no_yield() {
         .unwrap();
 }
 
+// Once repayment raises the share price above 1, a depositor's immediate
+// deposit and full withdrawal must not extract value from existing LPs.
+#[test]
+fn prop_deposit_then_withdraw_never_returns_more_than_deposited_above_par() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(
+                20_000_000_000u128..=1_000_000_000_000u128,
+                1u32..=500u32,
+                DEFAULT_MIN_INITIAL_DEPOSIT..=1_000_000_000_000u128,
+            ),
+            |(initial_deposit, discount_bps, deposit_amount)| {
+                let te = setup();
+                te.pool.deposit(&te.lp, &initial_deposit);
+
+                let invoice_id = create_and_list_with_params(
+                    &te,
+                    &te.usdc_id,
+                    DEFAULT_FACE_VALUE,
+                    discount_bps,
+                );
+                te.pool.fund_invoice(&invoice_id);
+                te.invoice.mark_shipped(&invoice_id);
+                te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+                te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+                te.env
+                    .ledger()
+                    .set_timestamp(te.env.ledger().timestamp() + 86401);
+                te.invoice.repay(&invoice_id);
+
+                let stats_before = te.pool.get_stats();
+                prop_assert!(
+                    stats_before.total_deposits > stats_before.total_shares,
+                    "repayment must raise the share price above 1"
+                );
+                let existing_lp_value_before = te.pool.get_lp_position(&te.lp).usdc_value;
+                let depositor = create_lp_with_balance(&te, 100_000_000_000_000);
+                let shares_minted = te.pool.deposit(&depositor, &deposit_amount);
+                let usdc_returned = te.pool.withdraw(&depositor, &shares_minted);
+
+                prop_assert!(
+                    usdc_returned <= deposit_amount,
+                    "withdrawal returned {usdc_returned} for deposit {deposit_amount}"
+                );
+                let ceil_share_price = stats_before.total_deposits / stats_before.total_shares
+                    + u128::from(stats_before.total_deposits % stats_before.total_shares != 0);
+                prop_assert!(
+                    deposit_amount - usdc_returned <= ceil_share_price,
+                    "round-trip loss {} exceeds ceil share price {ceil_share_price}",
+                    deposit_amount - usdc_returned
+                );
+                let existing_lp_value_after = te.pool.get_lp_position(&te.lp).usdc_value;
+                prop_assert!(
+                    existing_lp_value_after >= existing_lp_value_before,
+                    "existing LP value decreased from {existing_lp_value_before} to {existing_lp_value_after}"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
 // After a full withdrawal the LP's position must be empty: zero shares,
 // zero USDC value, deposit count zeroed.
 #[test]
