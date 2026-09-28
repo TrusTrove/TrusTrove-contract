@@ -129,3 +129,25 @@ jobs:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/cobertura.xml
           fail_ci_if_error: true
+
+  integration-test:
+    name: integration-test
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.85.0
+          targets: wasm32v1-none
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: integration-test
+
+      - name: Run cross-contract integration tests
+        run: cargo test -p trusttrove-integration-tests -- --nocapture
+

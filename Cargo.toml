@@ -5,7 +5,9 @@ members = [
     "contracts/invoice",
     "contracts/escrow",
     "contracts/pool",
+    "contracts/pool_factory",
     "contracts/ttl",
+    "tests/integration",
 ]
 
 [workspace.package]
@@ -22,6 +24,7 @@ trusttrove-registry = { path = "contracts/registry" }
 trusttrove-invoice = { path = "contracts/invoice" }
 trusttrove-escrow = { path = "contracts/escrow" }
 trusttrove-pool = { path = "contracts/pool" }
+trusttrove-pool-factory = { path = "contracts/pool_factory" }
 
 [profile.release]
 opt-level = "z"

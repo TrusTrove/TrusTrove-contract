@@ -359,6 +359,33 @@ impl InvoiceContract {
             .get(&DataKey::Attestation(invoice_id))
     }
 
+    /// Adds an asset to the allow-list of funding assets that `create`
+    /// accepts. Adding an already-supported asset is a no-op.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `asset` - The token contract address to allow-list.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Pool Factory Integration
+    /// Note that under the `pool_factory` model, a supported asset listed here
+    /// should also be registered via `pool_factory::register_asset` (or
+    /// `register_existing_pool`). If an invoice is listed in an asset that has
+    /// no corresponding pool instance, `fund_invoice` will not be reachable
+    /// end-to-end for that invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.add_supported_asset(&usdc);
+    /// ```
     pub fn add_supported_asset(env: Env, asset: Address) {
         let admin: Address = env
             .storage()
@@ -385,17 +412,29 @@ impl InvoiceContract {
         events::supported_asset_added(&env, &asset);
     }
 
-    /// Removes an asset from the list of supported funding assets.
+    /// Removes an asset from the allow-list of funding assets.
+    ///
+    /// Removing an asset that is not currently supported is a no-op. Once
+    /// removed, new invoices can no longer be created with it, though any
+    /// already-funded invoices using it continue unaffected.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `asset` - The address of the asset to remove.
+    /// * `asset` - The token contract address to remove from the allow-list.
     ///
     /// # Auth
     /// Requires authorization from the stored admin address.
     ///
     /// # Panics
-    /// * `InvoiceError::NotFound` if the admin cannot be found.
+    /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.remove_supported_asset(&usdc);
+    /// ```
     pub fn remove_supported_asset(env: Env, asset: Address) {
         let admin: Address = env
             .storage()
@@ -422,39 +461,50 @@ impl InvoiceContract {
         events::supported_asset_removed(&env, &asset);
     }
 
-    /// Checks if a given asset is currently supported for financing.
+    /// Checks whether an asset is currently on the funding allow-list.
     ///
     /// # Arguments
-    ///
-    /// * `env` - The environment context.
-    /// * `asset` - The address of the asset to check.
+    /// * `env` - The Soroban environment.
+    /// * `asset` - The token contract address to check.
     ///
     /// # Auth
+    /// None — this is a public read.
     ///
-    /// This is a read-only function and does not require authorization.
+    /// # Panics
+    /// Does not panic.
     ///
     /// # Returns
+    /// * `bool` - `true` if the asset is allow-listed, `false` otherwise.
     ///
-    /// True if the asset is supported, false otherwise.
+    /// # Example
+    /// ```ignore
+    /// let supported = client.is_supported_asset(&usdc);
+    /// ```
     pub fn is_supported_asset(env: Env, asset: Address) -> bool {
         env.storage()
             .persistent()
             .has(&DataKey::SupportedAsset(asset))
     }
 
-    /// Gets the total number of supported financing assets.
+    /// Returns the number of assets currently on the funding allow-list.
     ///
     /// # Arguments
-    ///
-    /// * `env` - The environment context.
+    /// * `env` - The Soroban environment.
     ///
     /// # Auth
+    /// None — this is a public read.
     ///
-    /// This is a read-only function and does not require authorization.
+    /// # Panics
+    /// Does not panic.
     ///
     /// # Returns
+    /// * `u32` - The count of supported assets. `0` if none have ever been
+    ///   added.
     ///
-    /// The number of supported assets as a u32.
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_supported_asset_count();
+    /// ```
     pub fn get_supported_asset_count(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -604,6 +654,8 @@ impl InvoiceContract {
             repaid_at: None,
             funding_asset: funding_asset.clone(),
             funding_pool: None,
+            repaid_amount: 0,
+            remaining_balance: face_value,
         };
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -851,11 +903,17 @@ impl InvoiceContract {
     /// Requires authorization from `pool_address`.
     ///
     /// # Panics
-    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the
+    ///   pool contract has not been configured via `set_pool_contract`.
+    /// * `InvoiceError::NotAuthorized` if `pool_address` does not match the
+    ///   pool contract configured via `set_pool_contract`. The configured
+    ///   pool is the only address allowed to fund — without this check any
+    ///   address that can self-authorize could hijack an invoice's
+    ///   `funding_pool` (issue #553).
     /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Listed`.
     /// * `InvoiceError::UnsupportedAsset` if the asset does not match the invoice funding asset.
-    /// * `InvoiceError::InvalidAmount` if `funded_amount` is zero.
-    /// * `InvoiceError::NotAuthorized` if `pool_address` does not match the configured PoolContract.
+    /// * `InvoiceError::InvalidAmount` if `funded_amount` is zero or exceeds
+    ///   the invoice's `face_value` (issue #554).
     ///
     /// # Returns
     /// * `bool` - `true` when funding is recorded.
@@ -871,6 +929,14 @@ impl InvoiceContract {
         asset_address: Address,
         funded_amount: u128,
     ) -> bool {
+        let configured_pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        if pool_address != configured_pool {
+            panic_with_error!(&env, InvoiceError::NotAuthorized);
+        }
         pool_address.require_auth();
         let configured_pool: Address = env
             .storage()
@@ -899,6 +965,9 @@ impl InvoiceContract {
         }
         if asset_address != invoice.funding_asset {
             panic_with_error!(&env, InvoiceError::UnsupportedAsset);
+        }
+        if funded_amount > invoice.face_value {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
 
         invoice.status = InvoiceStatus::Funded;
@@ -1061,6 +1130,8 @@ impl InvoiceContract {
     /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the invoice has no
     ///   recorded funding pool or funding timestamp.
     /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Funded`, `Active`, or `Confirmed`.
+    /// * `InvoiceError::CrossContractCallFailed` if token transfer, escrow, or pool
+    ///   repayment accounting fails.
     ///
     /// # Returns
     /// * `bool` - `true` when repayment is completed.
@@ -1069,8 +1140,15 @@ impl InvoiceContract {
     /// ```ignore
     /// client.repay(&invoice_id);
     /// ```
-    pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
-        // ```
+    /// Repays an invoice in partial installments or in full.
+    ///
+    /// Transfers `amount` from the buyer to escrow. If the cumulative repayment
+    /// is less than `face_value`, the invoice remains in its current status,
+    /// updating `repaid_amount` and `remaining_balance` and emitting `partial_repayment_received`.
+    /// Once cumulative repayment equals `face_value`, the escrow releases the funds
+    /// to the pool, the pool's repayment accounting is updated, the invoice transitions
+    /// to `Repaid`, and `invoice_repaid` is emitted.
+    pub fn repay_partial(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
             .storage()
@@ -1084,98 +1162,157 @@ impl InvoiceContract {
         {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        let prev_status = invoice.status;
 
-        let pool: Address = invoice
-            .funding_pool
-            .clone()
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        let face_value = invoice.face_value;
-        let funded_amount = invoice.funded_amount;
-        let funding_asset = invoice.funding_asset.clone();
+        if amount == 0 {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
 
-        let now = env.ledger().timestamp();
-        let funded_at = invoice
-            .funded_at
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        let discount = face_value.saturating_sub(funded_amount);
-        let term = invoice.due_date.saturating_sub(funded_at);
-        let elapsed = now.saturating_sub(funded_at);
-        let earned_by_pool = if term == 0 {
-            discount
-        } else {
-            discount
-                .checked_mul(elapsed as u128)
-                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
-                / (term as u128)
-        };
-        let refund_to_buyer = discount.saturating_sub(earned_by_pool);
+        if amount > invoice.remaining_balance {
+            panic_with_error!(&env, InvoiceError::RepaymentExceedsBalance);
+        }
 
-        let buyer = invoice.buyer.clone();
-
-        // Route repayment through escrow so escrow remains the secure
-        // intermediary for all fund movements (fixes issue #59).
-        // Flow: buyer → escrow → pool (via escrow::release_to_pool)
         let escrow: Address = env
             .storage()
             .instance()
             .get(&DataKey::EscrowContract)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
-        let token = token::Client::new(&env, &funding_asset);
-        // Step 1: buyer transfers face_value into escrow
-        token.transfer(&buyer, &escrow, &(face_value as i128));
+        let token = token::Client::new(&env, &invoice.funding_asset);
+        // Step 1: buyer transfers amount into escrow
+        if !matches!(
+            token.try_transfer(&invoice.buyer, &escrow, &(amount as i128)),
+            Ok(Ok(()))
+        ) {
+            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        }
 
-        // Step 2: escrow releases face_value back to pool
-        let mut escrow_args = Vec::new(&env);
-        escrow_args.push_back(invoice_id.clone().into_val(&env));
-        escrow_args.push_back(face_value.into_val(&env));
-        let _: bool =
-            env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
+        let new_repaid_amount = invoice
+            .repaid_amount
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+        let new_remaining = invoice
+            .remaining_balance
+            .checked_sub(amount)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
 
-        // Step 3: notify pool to update its internal accounting
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        args.push_back(face_value.into_val(&env));
-        args.push_back(refund_to_buyer.into_val(&env));
-        args.push_back(buyer.into_val(&env));
-        let _: bool = env.invoke_contract(
-            &pool,
-            &Symbol::new(&env, "receive_repayment_with_refund"),
-            args,
-        );
+        if new_remaining > 0 {
+            let mut updated = invoice;
+            updated.repaid_amount = new_repaid_amount;
+            updated.remaining_balance = new_remaining;
+            Self::save_invoice(&env, inv_key, &updated);
+            Self::extend_instance_ttl(&env);
 
-        let mut updated = invoice;
-        updated.status = InvoiceStatus::Repaid;
-        updated.repaid_at = Some(env.ledger().timestamp());
-        Self::save_invoice(&env, inv_key, &updated);
-        Self::extend_instance_ttl(&env);
+            events::partial_repayment_received(&env, &invoice_id, amount, new_remaining);
+            true
+        } else {
+            let pool: Address = invoice
+                .funding_pool
+                .clone()
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let face_value = invoice.face_value;
+            let funded_amount = invoice.funded_amount;
 
-        move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Repaid);
-        events::invoice_repaid(&env, &invoice_id, updated.face_value);
-        true
+            let now = env.ledger().timestamp();
+            let funded_at = invoice
+                .funded_at
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let discount = face_value.saturating_sub(funded_amount);
+            let term = invoice.due_date.saturating_sub(funded_at);
+            let elapsed = now.saturating_sub(funded_at);
+            let earned_by_pool = if term == 0 {
+                discount
+            } else {
+                discount
+                    .checked_mul(elapsed as u128)
+                    .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
+                    / (term as u128)
+            };
+            let refund_to_buyer = discount.saturating_sub(earned_by_pool);
+
+            // Step 2: escrow releases full face_value back to pool
+            let mut escrow_args = Vec::new(&env);
+            escrow_args.push_back(invoice_id.clone().into_val(&env));
+            escrow_args.push_back(face_value.into_val(&env));
+            let escrow_released: bool =
+                env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
+            if !escrow_released {
+                panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+            }
+
+            // Step 3: notify pool to update its internal accounting
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            args.push_back(face_value.into_val(&env));
+            args.push_back(refund_to_buyer.into_val(&env));
+            args.push_back(invoice.buyer.into_val(&env));
+            let repayment_recorded: bool = env.invoke_contract(
+                &pool,
+                &Symbol::new(&env, "receive_repayment_with_refund"),
+                args,
+            );
+            if !repayment_recorded {
+                panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+            }
+
+            let prev_status = invoice.status;
+            let mut updated = invoice;
+            updated.status = InvoiceStatus::Repaid;
+            updated.repaid_at = Some(now);
+            updated.repaid_amount = new_repaid_amount;
+            updated.remaining_balance = 0;
+            Self::save_invoice(&env, inv_key, &updated);
+            Self::extend_instance_ttl(&env);
+
+            move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Repaid);
+            events::invoice_repaid(&env, &invoice_id, updated.face_value);
+            true
+        }
     }
 
-    /// Repays an invoice before its due date.
-    /// Repays an invoice early, applying a pro-rated discount refund.
+    pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        Self::repay_partial(env, invoice_id, invoice.remaining_balance)
+    }
+
+    /// Repays a confirmed invoice before its due date, returning the
+    /// pro-rated discount to the buyer.
+    ///
+    /// Early repayment settles the invoice in full (via escrow → pool, the
+    /// same fund route as [`Self::repay`]) before maturity. Instead of the
+    /// buyer owning the full unbilled discount, the pool only earns the
+    /// discount for the portion of the term that has already elapsed; the
+    /// remaining discount is refunded back to the buyer. This function must
+    /// be called before `due_date` — once the invoice is due, use
+    /// [`Self::repay`] instead.
     ///
     /// # Arguments
-    ///
-    /// * `env` - The environment context.
-    /// * `invoice_id` - The unique identifier of the invoice being repaid early.
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being repaid early.
     ///
     /// # Auth
-    ///
-    /// Requires authorization from the `buyer` address associated with the invoice.
+    /// Requires authorization from the invoice's buyer.
     ///
     /// # Panics
-    ///
-    /// * `InvoiceError::NotFound` if the invoice, pool, or funding timestamp does not exist.
-    /// * `InvoiceError::InvalidStatusTransition` if the invoice is not in the `Confirmed` status or if `now >= due_date`.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the
+    ///   invoice has no recorded funding pool or funding timestamp.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not
+    ///   `Confirmed`, or if `now >= due_date` (an early repayment must happen
+    ///   strictly before the due date).
+    /// * `InvoiceError::CrossContractCallFailed` if token transfer, escrow, or pool
+    ///   repayment accounting fails.
     ///
     /// # Returns
+    /// * `bool` - `true` when early repayment is completed.
     ///
-    /// A boolean indicating whether the early repayment was successful.
+    /// # Example
+    /// ```ignore
+    /// client.repay_early(&invoice_id);
+    /// ```
     pub fn repay_early(env: Env, invoice_id: BytesN<32>) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let invoice: Invoice = env
@@ -1195,8 +1332,7 @@ impl InvoiceContract {
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
         let face_value = invoice.face_value;
-        let discount_bps = invoice.discount_bps as u128;
-        let funded_amount = face_value * (10000u128 - discount_bps) / 10000u128;
+        let funded_amount = invoice.funded_amount;
         let discount = face_value.saturating_sub(funded_amount);
 
         let funded_at = invoice
@@ -1235,14 +1371,22 @@ impl InvoiceContract {
 
         let token = token::Client::new(&env, &funding_asset);
         // Step 1: buyer transfers face_value into escrow
-        token.transfer(&buyer, &escrow, &(face_value as i128));
+        if !matches!(
+            token.try_transfer(&buyer, &escrow, &(face_value as i128)),
+            Ok(Ok(()))
+        ) {
+            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        }
 
         // Step 2: escrow releases face_value back to pool
         let mut escrow_args = Vec::new(&env);
         escrow_args.push_back(invoice_id.clone().into_val(&env));
         escrow_args.push_back(face_value.into_val(&env));
-        let _: bool =
+        let escrow_released: bool =
             env.invoke_contract(&escrow, &Symbol::new(&env, "release_to_pool"), escrow_args);
+        if !escrow_released {
+            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        }
 
         // Step 3: notify pool to update its internal accounting
         let mut args = Vec::new(&env);
@@ -1250,15 +1394,20 @@ impl InvoiceContract {
         args.push_back(face_value.into_val(&env));
         args.push_back(refund_to_buyer.into_val(&env));
         args.push_back(buyer.into_val(&env));
-        let _: bool = env.invoke_contract(
+        let repayment_recorded: bool = env.invoke_contract(
             &pool,
             &Symbol::new(&env, "receive_repayment_with_refund"),
             args,
         );
+        if !repayment_recorded {
+            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        }
 
         let mut updated = invoice;
         updated.status = InvoiceStatus::Repaid;
         updated.repaid_at = Some(now);
+        updated.repaid_amount = face_value;
+        updated.remaining_balance = 0;
         Self::save_invoice(&env, inv_key, &updated);
         Self::extend_instance_ttl(&env);
 
@@ -1292,6 +1441,8 @@ impl InvoiceContract {
     /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
     /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
     ///   has not yet been reached.
+    /// * `InvoiceError::CrossContractCallFailed` if the pool returns `false` from
+    ///   `handle_default`.
     ///
     /// # Returns
     /// * `bool` - `true` when default processing succeeds.
@@ -1306,9 +1457,10 @@ impl InvoiceContract {
     /// and has no awareness of, the escrow contract's own
     /// `DEFAULT_MIN_LOCK_SECONDS` grace period (60s from the escrow lock
     /// timestamp, roughly `funded_at`). If `due_date` is reached less than
-    /// that window after the invoice was funded, this call sets the invoice's
-    /// local status to `Defaulted` and then transitively invokes
-    /// `escrow.handle_default()` (via `pool.handle_default`), which panics
+    /// that window after the invoice was funded, the downstream default call
+    /// may panic from the escrow constraint. The whole transaction reverts, so
+    /// the invoice remains unchanged. The call transitively invokes
+    /// `escrow.handle_default()` (via `pool.handle_default`), which may panic
     /// with `EscrowError::NotAuthorized`. The whole transaction reverts, so
     /// there is no persistent state inconsistency, but the caller sees a
     /// revert originating from a constraint this contract does not itself
@@ -1335,19 +1487,31 @@ impl InvoiceContract {
         }
 
         let prev_status = invoice.status;
-        invoice.status = InvoiceStatus::Defaulted;
-        Self::save_invoice(&env, inv_key, &invoice);
-        Self::extend_instance_ttl(&env);
-
-        move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Defaulted);
 
         let pool: Address = invoice
             .funding_pool
+            .clone()
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
-        let _: bool = env.invoke_contract(&pool, &Symbol::new(&env, "handle_default"), args);
-        events::invoice_defaulted(&env, &invoice_id);
+        let default_handled: bool =
+            env.invoke_contract(&pool, &Symbol::new(&env, "handle_default"), args);
+        if !default_handled {
+            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
+        }
+
+        let current: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        if current.status == prev_status {
+            invoice.status = InvoiceStatus::Defaulted;
+            Self::save_invoice(&env, inv_key, &invoice);
+            Self::extend_instance_ttl(&env);
+            move_status_index(&env, &invoice_id, prev_status, InvoiceStatus::Defaulted);
+            events::invoice_defaulted(&env, &invoice_id);
+        }
         true
     }
 
@@ -1573,6 +1737,16 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id).face_value
     }
 
+    /// Returns the remaining balance to be repaid on an invoice.
+    pub fn get_remaining_balance(env: Env, invoice_id: BytesN<32>) -> u128 {
+        Self::get_invoice(&env, invoice_id).remaining_balance
+    }
+
+    /// Returns the cumulative amount repaid on an invoice.
+    pub fn get_repaid_amount(env: Env, invoice_id: BytesN<32>) -> u128 {
+        Self::get_invoice(&env, invoice_id).repaid_amount
+    }
+
     /// Returns the discount basis points for an invoice.
     ///
     /// # Arguments
@@ -1595,6 +1769,32 @@ impl InvoiceContract {
     /// ```
     pub fn get_discount_bps(env: Env, invoice_id: BytesN<32>) -> u32 {
         Self::get_invoice(&env, invoice_id).discount_bps
+    }
+
+    /// Returns (status, face_value, discount_bps) in a single cross-contract call.
+    ///
+    /// # Arguments
+    /// - `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// - None.
+    ///
+    /// # Panics
+    /// - If the invoice does not exist (`InvoiceError::NotFound`).
+    ///
+    /// # Returns
+    /// A tuple of `(invoice_status as u32, face_value, discount_bps)`.
+    pub fn get_funding_terms(env: Env, invoice_id: BytesN<32>) -> (u32, u128, u32) {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        (
+            invoice.status as u32,
+            invoice.face_value,
+            invoice.discount_bps,
+        )
     }
 
     /// Returns the funding asset for an invoice.
@@ -1764,6 +1964,66 @@ impl InvoiceContract {
             ids.push_back(id);
         }
         hydrate_ids(&env, ids)
+    }
+
+    /// Returns the number of invoices created by a given issuer.
+    ///
+    /// Reads only the issuer index counter, so it is much cheaper than
+    /// [`get_by_issuer`](Self::get_by_issuer), which hydrates every record.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The issuer address.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The number of invoices issued by `address`, or `0` if the
+    ///   address has never issued an invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_invoice_count_by_issuer(&issuer);
+    /// ```
+    pub fn get_invoice_count_by_issuer(env: Env, address: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuerIndexCount(address))
+            .unwrap_or(0)
+    }
+
+    /// Returns the number of invoices associated with a given buyer.
+    ///
+    /// Reads only the buyer index counter, so it is much cheaper than
+    /// [`get_by_buyer`](Self::get_by_buyer), which hydrates every record.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The buyer address.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The number of invoices bought by `address`, or `0` if the
+    ///   address has never bought an invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_invoice_count_by_buyer(&buyer);
+    /// ```
+    pub fn get_invoice_count_by_buyer(env: Env, address: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BuyerIndexCount(address))
+            .unwrap_or(0)
     }
 
     /// Returns a map of invoice counts keyed by status name.

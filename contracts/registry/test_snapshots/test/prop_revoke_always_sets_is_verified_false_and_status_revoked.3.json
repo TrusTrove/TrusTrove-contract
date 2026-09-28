@@ -30,7 +30,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "register_buyer",
+              "function_name": "register_issuer",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -39,18 +39,34 @@
                   "map": [
                     {
                       "key": {
-                        "string": "Ws_Y_3T_"
+                        "string": "H4U9_j"
                       },
                       "val": {
-                        "string": "Qbl_Z_bOqmuV_u"
+                        "string": "nRRpzR"
                       }
                     },
                     {
                       "key": {
-                        "string": "WtD"
+                        "string": "I0PuSTmO"
                       },
                       "val": {
-                        "string": "1qgcnw"
+                        "string": "Gvi_0__699c"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "v_"
+                      },
+                      "val": {
+                        "string": "29I_l2q0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "w1"
+                      },
+                      "val": {
+                        "string": "_R_p"
                       }
                     }
                   ]
@@ -161,18 +177,34 @@
                         "map": [
                           {
                             "key": {
-                              "string": "Ws_Y_3T_"
+                              "string": "H4U9_j"
                             },
                             "val": {
-                              "string": "Qbl_Z_bOqmuV_u"
+                              "string": "nRRpzR"
                             }
                           },
                           {
                             "key": {
-                              "string": "WtD"
+                              "string": "I0PuSTmO"
                             },
                             "val": {
-                              "string": "1qgcnw"
+                              "string": "Gvi_0__699c"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "v_"
+                            },
+                            "val": {
+                              "string": "29I_l2q0"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "w1"
+                            },
+                            "val": {
+                              "string": "_R_p"
                             }
                           }
                         ]
@@ -183,7 +215,7 @@
                         "symbol": "packed_flags"
                       },
                       "val": {
-                        "u32": 5
+                        "u32": 4
                       }
                     },
                     {
@@ -487,7 +519,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
               },
               {
-                "symbol": "register_buyer"
+                "symbol": "register_issuer"
               }
             ],
             "data": {
@@ -499,18 +531,34 @@
                   "map": [
                     {
                       "key": {
-                        "string": "Ws_Y_3T_"
+                        "string": "H4U9_j"
                       },
                       "val": {
-                        "string": "Qbl_Z_bOqmuV_u"
+                        "string": "nRRpzR"
                       }
                     },
                     {
                       "key": {
-                        "string": "WtD"
+                        "string": "I0PuSTmO"
                       },
                       "val": {
-                        "string": "1qgcnw"
+                        "string": "Gvi_0__699c"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "v_"
+                      },
+                      "val": {
+                        "string": "29I_l2q0"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "w1"
+                      },
+                      "val": {
+                        "string": "_R_p"
                       }
                     }
                   ]
@@ -531,7 +579,7 @@
           "v0": {
             "topics": [
               {
-                "symbol": "buyer_registered"
+                "symbol": "issuer_registered"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -555,7 +603,7 @@
                 "symbol": "fn_return"
               },
               {
-                "symbol": "register_buyer"
+                "symbol": "register_issuer"
               }
             ],
             "data": {

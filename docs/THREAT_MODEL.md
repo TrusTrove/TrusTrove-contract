@@ -90,7 +90,6 @@ Only the stored admin address may call this function.
 | `verify_profile` | Registry | Controls verification status |
 | `batch_register_issuers` | Registry | Batch operations gated by admin |
 | `set_pool_contract` | Invoice | Wiring a new pool changes fund flows |
-| `trigger_default` | Invoice | Declaring a default is a state change with fund consequences |
 | `set_expiry_window` | Invoice | Configuration parameter |
 | `expire_listing` | Invoice | Admin fallback path |
 | `fund_invoice` | Pool | (*currently*) Capital allocation from pool |
@@ -127,10 +126,11 @@ Any account can call these.
 | Function | Contract | Notes |
 |----------|----------|-------|
 | `get_profile`, `is_verified`, `get_verification_status`, `get_admin` | Registry | Read-only views |
-| `get`, `get_status`, `get_face_value`, `get_discount_bps`, `get_funding_asset`, `get_issuer`, `get_by_status`, `get_by_issuer`, `get_by_buyer`, `get_counts`, `get_expiry_window` | Invoice | Read-only views |
+| `get`, `get_status`, `get_face_value`, `get_discount_bps`, `get_funding_asset`, `get_issuer`, `get_by_status`, `get_by_issuer`, `get_by_buyer`, `get_invoice_count_by_issuer`, `get_invoice_count_by_buyer`, `get_counts`, `get_expiry_window` | Invoice | Read-only views |
 | `get_locked`, `get_history` | Escrow | Read-only views |
 | `get_stats`, `get_lp_position`, `get_utilization_rate`, `get_usdc_asset` | Pool | Read-only views |
 | `expire_listing` | Invoice | Also callable by issuer (Pattern A) |
+| `trigger_default` | Invoice | Callable by any account once `now >= due_date` |
 
 ---
 
@@ -138,7 +138,7 @@ Any account can call these.
 
 ### 1. Admin Key Compromise
 
-**Risk:** The admin key controls profile revocations, defaults, pool funding,
+**Risk:** The admin key controls profile revocations, pool funding,
 and ownership transfer. Compromise of this key has a high blast radius.
 
 **Mitigation:**
@@ -245,10 +245,10 @@ If the admin key is compromised or malicious:
 |-----------------|---------------------|
 | Revoke any profile | Transfer admin to a non-consenting address (dual auth) |
 | Register fraudulent profiles | Directly withdraw LP funds |
-| Trigger false defaults | Bypass the utilization cap (>10000 bps) |
-| Set a new pool contract | Mint unbacked LP shares |
-| Change pool utilization cap (≤10000 bps) | Release escrowed funds to themselves (only pool contract can) |
-| Expire listings | |
+| Set a new pool contract | Trigger defaults before due date (`now >= due_date` enforced on-chain) |
+| Change pool utilization cap (≤10000 bps) | Bypass the utilization cap (>10000 bps) |
+| Expire listings | Mint unbacked LP shares |
+| | Release escrowed funds to themselves (only pool contract can) |
 
 ---
 

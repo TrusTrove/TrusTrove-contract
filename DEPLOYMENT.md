@@ -79,19 +79,35 @@ because each contract references others:
    └─ needs: registry_contract
 
 3. escrow_contract (USDC)
-   └─ needs: pool_contract, invoice_contract, USDC asset
+   └─ needs: pool_contract, USDC asset
 
 4. pool_contract (USDC)
    └─ needs: invoice_contract, escrow_contract, USDC asset
 
 5. escrow_contract (XLM) [EXPERIMENTAL]
-   └─ needs: pool_contract, invoice_contract, XLM asset
+   └─ needs: pool_contract, XLM asset
 
 6. pool_contract (XLM) [EXPERIMENTAL]
    └─ needs: invoice_contract, escrow_contract, XLM asset
 
 7. Wire pool into invoice
    └─ invoice.set_pool_contract(pool_usdc)
+
+8. Wire escrow into invoice
+   └─ invoice.set_escrow_contract(escrow_usdc)
+   Without this, repay / repay_partial / repay_early panic with
+   `InvoiceError::NotFound` when reading `DataKey::EscrowContract`.
+
+9. Allow-list funding assets
+   └─ invoice.add_supported_asset(usdc)
+   └─ invoice.add_supported_asset(xlm)
+   Without this, `create` rejects every invoice with `UnsupportedAsset`.
+
+10. Wire agent registry (optional — skipped when `AGENT_REGISTRY_CONTRACT`
+    is unset)
+    └─ invoice.set_agent_registry_contract(agent_registry)
+    Without this, `submit_attestation` panics and `list_for_financing`
+    can never unlock.
 ```
 
 The registry must be deployed first because all other contracts
@@ -100,9 +116,11 @@ call `is_verified()` on it during initialization.
 ## Agent Registry Wiring
 
 `AGENT_REGISTRY_CONTRACT` in `.env.example` refers to the agent-registry
-contract from the separate `underwrite-contract` repo. Wiring it in is a
-manual, optional step and is **not** performed by `deploy.sh` or
-`deploy.ps1`:
+contract from the separate `underwrite-contract` repo. `deploy.sh` and
+`deploy.ps1` wire it automatically **when** `AGENT_REGISTRY_CONTRACT` is
+set in `.env`; otherwise the step is skipped with a clear warning.
+
+To wire it manually (or re-wire it after rotating the agent registry):
 
 1. Deploy the agent-registry contract from the `underwrite-contract` repo.
 2. Set `AGENT_REGISTRY_CONTRACT` in your `.env` to its address.
@@ -113,7 +131,8 @@ manual, optional step and is **not** performed by `deploy.sh` or
      --id "$INVOICE_CONTRACT_ID" \
      --source "$DEPLOYER_ACCOUNT" \
      --network "$STELLAR_NETWORK" \
-     -- set_agent_registry_contract --contract "$AGENT_REGISTRY_CONTRACT"
+     -- set_agent_registry_contract \
+        --agent_registry_contract "$AGENT_REGISTRY_CONTRACT"
    ```
 
 This step is only required if agent-attested invoice submission is used;
@@ -146,7 +165,10 @@ powershell ./scripts/verify.ps1
 ```
 
 This checks each contract responds to a read-only query
-(`get_admin`, `get_counts`, `get_stats`, `get_locked`).
+(`get_admin`, `get_counts`, `get_stats`, `get_locked`) and that the
+invoice contract's post-deploy wiring is in place
+(`get_escrow_contract`, `get_agent_registry_contract`,
+`is_supported_asset`).
 
 You can also verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet).
 
@@ -172,7 +194,12 @@ pool_xlm=<CONTRACT_ID> (EXPERIMENTAL)
 
 ### Integrator Expectations
 
-When an address rotation occurs, the `README.md` is automatically updated with the latest live testnet addresses during the build/deploy step. Integrators and contributors should:
+The automated update of `README.md` with live testnet addresses only occurs when the full `deploy.sh` pipeline is run to completion by an operator with valid deployer credentials and an active Stellar CLI session. It relies on the local, gitignored `deployments.json` and does not run automatically on every address change or in CI.
+
+> [!NOTE]
+> **Single-Contract Hotfix Redeploys:** Currently, for an ad-hoc or single-contract hotfix redeployment (such as updating only `invoice_contract` as in commit `bef73d5`), operators must manually hand-edit the contract table in `README.md` to reflect the new address, since the full deploy pipeline may not be executed. A dedicated, lighter-weight CLI tool and flag (`--only <contract>`) for single-contract redeploys is tracked in [#812](https://github.com/TrusTrove/TrusTrove-contract/issues/812).
+
+Integrators and contributors should:
 1. Treat testnet addresses as volatile.
 2. Regularly pull the latest changes from the `main` branch to synchronize with the current testnet environment.
 3. Check `README.md` for the current canonical testnet addresses rather than hardcoding them in local environments.
