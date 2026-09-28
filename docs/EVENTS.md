@@ -122,6 +122,22 @@ Emitted when the buyer repays the invoice.
 
 ---
 
+### `partial_repayment_received`
+
+Emitted when a buyer makes a partial repayment towards an invoice.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"partial_repayment_received"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `(u128, u128)` | Tuple of `(amount_paid, remaining_balance)` in USDC stroops |
+
+**Emitted by:** `repay_partial()` in `contracts/invoice/src/lib.rs`
+
+---
+
+
 ### `invoice_defaulted`
 
 Emitted when an invoice defaults (past due date, not repaid).
@@ -214,6 +230,38 @@ Emitted when the contract is initialized.
 
 ---
 
+### `attestation_submitted`
+
+Emitted when an authorized agent submits a risk attestation for an invoice.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"attestation_submitted"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Symbol` | Agent ID |
+| **Data** | `u32` | Risk score (0–10000 bps) |
+
+**Emitted by:** `submit_attestation()` in `contracts/invoice/src/lib.rs:890`
+
+---
+
+### `agent_registry_contract_updated`
+
+Emitted when the admin updates the agent registry contract address.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"agent_registry_contract_updated"` |
+| `topic[1]` | `Address` | Old agent registry contract |
+| `topic[2]` | `Address` | New agent registry contract |
+| **Data** | `()` | None |
+
+**Emitted by:** `set_agent_registry_contract()` in `contracts/invoice/src/lib.rs:230`
+
+---
+
 ## Pool Contract
 
 **Contract:** `pool_contract`  
@@ -291,6 +339,42 @@ Emitted when the pool handles a defaulted invoice.
 | **Data** | `u128` | Loss amount (funded amount lost) |
 
 **Emitted by:** `handle_default()` in `contracts/pool/src/lib.rs:741`
+
+---
+
+### `protocol_fee_updated`
+
+Emitted when the admin changes the protocol fee and/or the treasury address. The
+old value is included so an indexer can report what changed rather than only
+what it changed to. A rejected call (fee above `MAX_PROTOCOL_FEE_BPS`) emits
+nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"protocol_fee_updated"` |
+| **Data** | `(u32, u32, Address)` | `(old_fee_bps, new_fee_bps, treasury)` |
+
+**Emitted by:** `set_protocol_fee()` in `contracts/pool/src/lib.rs:1525`  
+**Source:** `contracts/pool/src/events.rs:72`
+
+---
+
+### `allowance_approved`
+
+Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
+`amount` is the new **total** grant (not a delta), and `amount == 0` is the
+revoke signal.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"allowance_approved"` |
+| `topic[1]` | `Address` | Share owner (`from`) |
+| **Data** | `(Address, i128, u32)` | `(spender, amount, expiration_ledger)` |
+
+**Emitted by:** `approve()` in `contracts/pool/src/lib.rs:676`  
+**Source:** `contracts/pool/src/events.rs:83`
 
 ---
 
@@ -397,6 +481,21 @@ Emitted when escrow ownership is transferred. Currently unused (marked `#[allow(
 **Contract:** `registry_contract`  
 **Source:** `contracts/registry/src/events.rs`
 
+### `contract_initialized`
+
+Emitted when the registry contract is initialized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"contract_initialized"` |
+| `topic[1]` | `Address` | Admin address |
+| **Data** | `()` | None |
+
+**Emitted by:** `initialize()` in `contracts/registry/src/lib.rs:55`
+
+---
+
 ### `issuer_registered`
 
 Emitted when an issuer is registered (single or batch).
@@ -427,18 +526,18 @@ Emitted when a buyer is registered.
 
 ---
 
-### `metadata_updated`
+### `profile_updated`
 
-Emitted when a profile's metadata is updated.
+Emitted when an account profile's details or metadata are updated.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
-| `topic[0]` | `Symbol` | `"metadata_updated"` |
+| `topic[0]` | `Symbol` | `"profile_updated"` |
 | `topic[1]` | `Address` | Profile address |
 | **Data** | `()` | None |
 
-**Emitted by:** `update_metadata()` in `contracts/registry/src/lib.rs:243`
+**Emitted by:** `update_profile()` in `contracts/registry/src/lib.rs:323` and `update_metadata()` at line 363
 
 ---
 
@@ -453,7 +552,22 @@ Emitted when an address is revoked (issuer or buyer).
 | `topic[1]` | `Address` | Revoked address |
 | **Data** | `()` | None |
 
-**Emitted by:** `revoke()` in `contracts/registry/src/lib.rs:359`
+**Emitted by:** `revoke()` in `contracts/registry/src/lib.rs:498`
+
+---
+
+### `address_reinstated`
+
+Emitted when a previously revoked address is reinstated.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"address_reinstated"` |
+| `topic[1]` | `Address` | Reinstated address |
+| **Data** | `()` | None |
+
+**Emitted by:** `reinstate()` in `contracts/registry/src/lib.rs:546`
 
 ---
 
@@ -467,7 +581,7 @@ Emitted when a batch registration completes.
 | `topic[0]` | `Symbol` | `"batch_registered"` |
 | **Data** | `(u32, u32)` | `(registered_count, skipped_count)` |
 
-**Emitted by:** `batch_register_issuers()` in `contracts/registry/src/lib.rs:149`
+**Emitted by:** `batch_register_issuers()` in `contracts/registry/src/lib.rs:155` and `batch_register_buyers()` at line 218
 
 ---
 
@@ -482,7 +596,7 @@ Emitted when a profile's verification status is checked/updated.
 | `topic[1]` | `Address` | Profile address |
 | **Data** | `bool` | Verification status (true = verified) |
 
-**Emitted by:** `is_verified()` in `contracts/registry/src/lib.rs:380`
+**Emitted by:** `verify_profile()` in `contracts/registry/src/lib.rs:570`
 
 ---
 
@@ -495,10 +609,24 @@ Emitted when registry ownership is transferred.
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"ownership_transferred"` |
 | `topic[1]` | `Address` | Old admin |
-| `topic[2]` | `Address` | New admin |
-| **Data** | `()` | None |
+| **Data** | `Address` | New admin |
 
-**Emitted by:** `transfer_ownership()` in `contracts/registry/src/lib.rs:410`
+**Emitted by:** `transfer_ownership()` in `contracts/registry/src/lib.rs:593`
+
+---
+
+### `admin_transferred`
+
+Emitted when the registry admin role is transferred.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transferred"` |
+| `topic[1]` | `Address` | Old admin |
+| **Data** | `Address` | New admin |
+
+**Emitted by:** `transfer_admin()` in `contracts/registry/src/lib.rs:631`
 
 ---
 
@@ -508,6 +636,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 
 | Event Name | Contracts |
 |------------|-----------|
+| `contract_initialized` | `invoice_contract`, `registry_contract` |
 | `invoice_funded` | `invoice_contract`, `pool_contract` |
 | `invoice_defaulted` | `invoice_contract`, `pool_contract` |
 | `ownership_transferred` | All four contracts |

@@ -27,4 +27,5 @@ pub enum InvoiceError {
     AlreadyAttested = 22,
     VerificationRequired = 23,
     CrossContractCallFailed = 24,
+    RepaymentExceedsBalance = 25,
 }

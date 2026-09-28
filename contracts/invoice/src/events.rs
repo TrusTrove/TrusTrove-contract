@@ -64,6 +64,21 @@ pub fn invoice_repaid(env: &Env, invoice_id: &BytesN<32>, amount: u128) {
     );
 }
 
+pub fn partial_repayment_received(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    amount: u128,
+    remaining_balance: u128,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "partial_repayment_received"),
+            invoice_id.clone(),
+        ),
+        (amount, remaining_balance),
+    );
+}
+
 pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>) {
     env.events().publish(
         (Symbol::new(env, "invoice_defaulted"), invoice_id.clone()),

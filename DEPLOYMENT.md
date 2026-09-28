@@ -172,7 +172,12 @@ pool_xlm=<CONTRACT_ID> (EXPERIMENTAL)
 
 ### Integrator Expectations
 
-When an address rotation occurs, the `README.md` is automatically updated with the latest live testnet addresses during the build/deploy step. Integrators and contributors should:
+The automated update of `README.md` with live testnet addresses only occurs when the full `deploy.sh` pipeline is run to completion by an operator with valid deployer credentials and an active Stellar CLI session. It relies on the local, gitignored `deployments.json` and does not run automatically on every address change or in CI.
+
+> [!NOTE]
+> **Single-Contract Hotfix Redeploys:** Currently, for an ad-hoc or single-contract hotfix redeployment (such as updating only `invoice_contract` as in commit `bef73d5`), operators must manually hand-edit the contract table in `README.md` to reflect the new address, since the full deploy pipeline may not be executed. A dedicated, lighter-weight CLI tool and flag (`--only <contract>`) for single-contract redeploys is tracked in [#812](https://github.com/TrusTrove/TrusTrove-contract/issues/812).
+
+Integrators and contributors should:
 1. Treat testnet addresses as volatile.
 2. Regularly pull the latest changes from the `main` branch to synchronize with the current testnet environment.
 3. Check `README.md` for the current canonical testnet addresses rather than hardcoding them in local environments.
