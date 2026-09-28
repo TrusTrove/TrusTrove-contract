@@ -1177,10 +1177,15 @@ impl InvoiceContract {
             .get(&DataKey::EscrowContract)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
+        let buyer = invoice.buyer.clone();
+        let funding_asset = invoice.funding_asset.clone();
+
         let token = token::Client::new(&env, &funding_asset);
-        // Step 1: buyer transfers face_value into escrow
+        // Step 1: buyer transfers this installment's `amount` into escrow.
+        // Previously deposited installments remain in escrow until the
+        // final repayment releases the accumulated `face_value`.
         if !matches!(
-            token.try_transfer(&buyer, &escrow, &(face_value as i128)),
+            token.try_transfer(&buyer, &escrow, &(amount as i128)),
             Ok(Ok(()))
         ) {
             panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
@@ -2306,9 +2311,10 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
                     .persistent()
                     .get(&last_entry_key)
                     .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
-                env.storage()
-                    .persistent()
-                    .set(&DataKey::StatusIndexEntry(from_u32, found_at as u32), last_id);
+                env.storage().persistent().set(
+                    &DataKey::StatusIndexEntry(from_u32, found_at as u32),
+                    &last_id,
+                );
             }
             // Decrement the count
             env.storage()
