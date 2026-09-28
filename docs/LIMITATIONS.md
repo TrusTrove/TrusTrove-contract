@@ -110,6 +110,10 @@ The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta
   expensive for issuers/buyers with many invoices. The status index also
   performs O(1) membership checks via `DataKey::StatusMembership` to filter
   out removed entries without loading the full invoice.
+- `get_invoice_count_by_issuer` and `get_invoice_count_by_buyer` avoid that
+  cost entirely: they read a single stored counter (`u32`) in O(1), so
+  pagination and badge UIs should prefer them over `.len()` on the
+  full-fetch views.
 
 ### Storing the `History` Vector
 
