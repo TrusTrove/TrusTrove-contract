@@ -252,20 +252,7 @@ impl MockAgentRegistry {
 #[contracttype]
 pub struct AgentKey(Symbol);
 
-const TEST_AGENT_SEED: [u8; 32] = [7u8; 32];
-
-fn test_agent_signing_key() -> k256::ecdsa::SigningKey {
-    k256::ecdsa::SigningKey::from_slice(&TEST_AGENT_SEED).unwrap()
-}
-
-fn test_agent_pubkey(env: &Env) -> BytesN<65> {
-    let point = test_agent_signing_key()
-        .verifying_key()
-        .to_encoded_point(false);
-    let mut bytes = [0u8; 65];
-    bytes.copy_from_slice(point.as_bytes());
-    BytesN::from_array(env, &bytes)
-}
+use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key, TEST_AGENT_SEED};
 
 /// Deploys a fresh mock agent-registry, registers one active agent with a
 /// real secp256k1 keypair, points `client` at it, and submits a validly

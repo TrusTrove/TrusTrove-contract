@@ -53,7 +53,26 @@ contracts. Deployed addresses are saved to `.deployed-addresses`.
 | *(none)* | Resume mode — skips already-deployed contracts |
 | `--fresh` | Ignore saved addresses and redeploy everything |
 | `--resume` | Explicit resume (same as default) |
+| `--dry-run` | Print what would be deployed without executing |
+| `--only <contract>` | Redeploy a single contract (hotfix mode) |
 | `--help` | Show usage |
+
+#### Single-Contract Hotfix Redeploys
+
+To hotfix a single contract without rerunning the full pipeline, pass
+`--only <contract>` where `<contract>` is one of:
+`registry`, `invoice`, `escrow_usdc`, `pool_usdc`, `escrow_xlm`, `pool_xlm`.
+
+```bash
+# Redeploy only the invoice contract, keeping all other addresses intact:
+bash scripts/deploy.sh --only invoice
+```
+
+When `--only` is passed, the script:
+1. Clears only the saved address and init flag for the targeted contract.
+2. Loads all other saved addresses from `.deployed-addresses` for cross-contract references.
+3. Runs `deploy_contract` + `invoke_init` only for the specified contract.
+4. Generates `deployments.json` and updates `README.md` at the end (same as a full deploy).
 
 ### 3. Post-Deploy Wiring
 
@@ -175,7 +194,7 @@ pool_xlm=<CONTRACT_ID> (EXPERIMENTAL)
 The automated update of `README.md` with live testnet addresses only occurs when the full `deploy.sh` pipeline is run to completion by an operator with valid deployer credentials and an active Stellar CLI session. It relies on the local, gitignored `deployments.json` and does not run automatically on every address change or in CI.
 
 > [!NOTE]
-> **Single-Contract Hotfix Redeploys:** Currently, for an ad-hoc or single-contract hotfix redeployment (such as updating only `invoice_contract` as in commit `bef73d5`), operators must manually hand-edit the contract table in `README.md` to reflect the new address, since the full deploy pipeline may not be executed. A dedicated, lighter-weight CLI tool and flag (`--only <contract>`) for single-contract redeploys is tracked in [#812](https://github.com/TrusTrove/TrusTrove-contract/issues/812).
+> **Single-Contract Hotfix Redeploys:** Use `bash scripts/deploy.sh --only <contract>` (e.g. `--only invoice`) to redeploy a single contract without re-running the full pipeline. The script will automatically update `deployments.json` and `README.md` with the new address. See the [Single-Contract Hotfix](#single-contract-hotfix-redeploys) section under **Flags** above for full details.
 
 Integrators and contributors should:
 1. Treat testnet addresses as volatile.
