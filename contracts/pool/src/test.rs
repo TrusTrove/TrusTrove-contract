@@ -4843,9 +4843,11 @@ fn run_step(te: &TestEnv, lps: &[Address], step: &LpStep) -> StepOutcome {
     match step {
         LpStep::Deposit { lp, amount } => classify(te.pool.try_deposit(at(lp), amount)),
         LpStep::Withdraw { lp, shares } => classify(te.pool.try_withdraw(at(lp), shares)),
-        LpStep::Transfer { from, to, amount } => {
-            classify(te.pool.try_transfer(at(from), at(to), &(*amount as i128)))
-        }
+        LpStep::Transfer { from, to, amount } => classify(te.pool.try_transfer_shares(
+            at(from),
+            at(to),
+            &(*amount as i128),
+        )),
         LpStep::TransferFrom {
             owner,
             spender,
