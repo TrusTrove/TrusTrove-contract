@@ -2216,6 +2216,45 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
     }
 
     decrement_status_count(env, from);
+    // Remove stale entry from source status index to prevent unbounded growth
+    let from_u32 = from as u32;
+    let from_count_key = DataKey::StatusIndexCount(from_u32);
+    let from_count: u32 = env.storage().persistent().get(&from_count_key).unwrap_or(0);
+    if from_count > 0 {
+        // Find the invoice in the source status index and remove it
+        let mut found_at: i32 = -1;
+        for j in 0..from_count {
+            let entry_key = DataKey::StatusIndexEntry(from_u32, j);
+            let existing_id: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&entry_key)
+                .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+            if existing_id == *invoice_id {
+                found_at = j as i32;
+                break;
+            }
+        }
+        if found_at >= 0 {
+            // Remove the entry by shifting subsequent entries down
+            if found_at < (from_count - 1) as i32 {
+                // Swap with last entry and decrement count
+                let last_entry_key = DataKey::StatusIndexEntry(from_u32, from_count - 1);
+                let last_id: BytesN<32> = env
+                    .storage()
+                    .persistent()
+                    .get(&last_entry_key)
+                    .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::StatusIndexEntry(from_u32, found_at as u32), last_id);
+            }
+            // Decrement the count
+            env.storage()
+                .persistent()
+                .set(&from_count_key, &(from_count - 1));
+        }
+    }
     increment_status_count(env, to);
     extend_status_index(env, to, invoice_id);
 }
