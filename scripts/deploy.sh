@@ -2,11 +2,15 @@
 # deploy.sh — Idempotent deployment script for TrusTrove contracts
 #
 # Usage:
-#   ./scripts/deploy.sh              # Normal deploy (skips already-deployed contracts)
-#   ./scripts/deploy.sh --resume     # Explicit resume mode (same as default)
-#   ./scripts/deploy.sh --fresh      # Ignore saved addresses and redeploy everything
-#   ./scripts/deploy.sh --dry-run    # Show what would be deployed without actually deploying
-#   ./scripts/deploy.sh --help       # Show this help
+#   ./scripts/deploy.sh                         # Normal deploy (skips already-deployed contracts)
+#   ./scripts/deploy.sh --resume                # Explicit resume mode (same as default)
+#   ./scripts/deploy.sh --fresh                 # Ignore saved addresses and redeploy everything
+#   ./scripts/deploy.sh --dry-run               # Show what would be deployed without actually deploying
+#   ./scripts/deploy.sh --only <contract>       # Redeploy a single contract (hotfix mode)
+#   ./scripts/deploy.sh --help                  # Show this help
+#
+# <contract> for --only must be one of:
+#   registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm
 #
 # Deployed addresses are persisted to .deployed-addresses after each successful
 # deployment step.  Re-running the script after a partial failure will skip any
@@ -68,14 +72,37 @@ fi
 FRESH=false
 RESUME=false
 DRY_RUN=false
+ONLY_CONTRACT=""
+ONLY_CONTRACT=""
 
-for arg in "$@"; do
+# Parse arguments, handling --only which consumes the next argument
+_args=("$@")
+_i=0
+while [ $_i -lt ${#_args[@]} ]; do
+  arg="${_args[$_i]}"
   case "$arg" in
     --fresh)   FRESH=true ;;
     --resume)  RESUME=true ;;
     --dry-run) DRY_RUN=true ;;
+    --only)
+      _i=$((_i + 1))
+      if [ $_i -ge ${#_args[@]} ]; then
+        echo "Error: --only requires a contract key argument."
+        echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm"
+        exit 1
+      fi
+      ONLY_CONTRACT="${_args[$_i]}"
+      case "$ONLY_CONTRACT" in
+        registry|invoice|escrow_usdc|pool_usdc|escrow_xlm|pool_xlm) ;;
+        *)
+          echo "Error: unknown contract key '$ONLY_CONTRACT' for --only."
+          echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm"
+          exit 1
+          ;;
+      esac
+      ;;
     --help|-h)
-      sed -n '2,12p' "$0" | sed 's/^# //'
+      sed -n '2,17p' "$0" | sed 's/^# //'
       exit 0
       ;;
     *)
@@ -83,6 +110,7 @@ for arg in "$@"; do
       exit 1
       ;;
   esac
+  _i=$((_i + 1))
 done
 
 # Prefer a globally available `stellar` on PATH, fall back to STELLAR_BIN env var,
@@ -307,6 +335,7 @@ echo "  Deployer address : $DEPLOYER_ADDRESS"
 echo "  Addresses file   : $ADDRESSES_FILE"
 echo "  Fresh deploy     : $FRESH"
 echo "  Dry-run mode     : $DRY_RUN"
+if [ -n "$ONLY_CONTRACT" ]; then echo "  Only deploying   : $ONLY_CONTRACT"; fi
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -325,89 +354,151 @@ echo ""
 # 7. Deploy & initialize all contracts
 # ---------------------------------------------------------------------------
 
-echo "=== Deploying registry_contract ==="
-REGISTRY_ID=$(deploy_contract "registry" "target/wasm32v1-none/release/trusttrove_registry.wasm")
-echo "Registry: $REGISTRY_ID"
+# In --only mode, load all existing saved addresses first so cross-contract
+# references remain valid even when only one contract is redeployed.
+_load_or_deploy() {
+  local key="$1"
+  local var="$2"
+  local existing
+  existing=$(load_address "$key")
+  if [ -n "$existing" ]; then
+    eval "$var=\$existing"
+  fi
+}
 
-invoke_init "registry" "$REGISTRY_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS"
+if [ -n "$ONLY_CONTRACT" ]; then
+  echo "=== --only mode: redeploying single contract: $ONLY_CONTRACT ==="
+  # Clear the saved address + init flag for the targeted contract so
+  # deploy_contract / invoke_init will re-run it.
+  grep -v "^${ONLY_CONTRACT}=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
+  grep -v "^${ONLY_CONTRACT}_initialized=" "${ADDRESSES_FILE}.tmp" > "${ADDRESSES_FILE}.tmp2" 2>/dev/null || true
+  mv "${ADDRESSES_FILE}.tmp2" "$ADDRESSES_FILE"
+  rm -f "${ADDRESSES_FILE}.tmp"
 
-echo ""
-echo "=== Deploying invoice_contract ==="
-INVOICE_ID=$(deploy_contract "invoice" "target/wasm32v1-none/release/trusttrove_invoice.wasm")
-echo "Invoice: $INVOICE_ID"
+  # Load all surviving saved addresses into variables for cross-refs
+  REGISTRY_ID=$(load_address "registry")
+  INVOICE_ID=$(load_address "invoice")
+  ESCROW_USDC_ID=$(load_address "escrow_usdc")
+  POOL_USDC_ID=$(load_address "pool_usdc")
+  ESCROW_XLM_ID=$(load_address "escrow_xlm")
+  POOL_XLM_ID=$(load_address "pool_xlm")
+  echo "  Existing saved addresses loaded for cross-contract references."
+  echo ""
+fi
 
-invoke_init "invoice" "$INVOICE_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --registry_contract "$REGISTRY_ID"
+# Helper: returns true if we should run this step.
+# In --only mode only the targeted step runs; otherwise all steps run.
+_should_run() {
+  [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "$1" ]
+}
 
-echo ""
-echo "=== Deploying USDC escrow_contract ==="
-ESCROW_USDC_ID=$(deploy_contract "escrow_usdc" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
-echo "USDC Escrow: $ESCROW_USDC_ID"
+if _should_run "registry"; then
+  echo "=== Deploying registry_contract ==="
+  REGISTRY_ID=$(deploy_contract "registry" "target/wasm32v1-none/release/trusttrove_registry.wasm")
+  echo "Registry: $REGISTRY_ID"
 
-echo ""
-echo "=== Deploying USDC pool_contract ==="
-POOL_USDC_ID=$(deploy_contract "pool_usdc" "target/wasm32v1-none/release/trusttrove_pool.wasm")
-echo "USDC Pool: $POOL_USDC_ID"
+  invoke_init "registry" "$REGISTRY_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS"
+  echo ""
+fi
 
-invoke_init "escrow_usdc" "$ESCROW_USDC_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --pool_contract "$POOL_USDC_ID" \
-  --invoice_contract "$INVOICE_ID" \
-  --usdc_asset "$USDC_ISSUER"
+if _should_run "invoice"; then
+  echo "=== Deploying invoice_contract ==="
+  INVOICE_ID=$(deploy_contract "invoice" "target/wasm32v1-none/release/trusttrove_invoice.wasm")
+  echo "Invoice: $INVOICE_ID"
 
-invoke_init "pool_usdc" "$POOL_USDC_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --invoice_contract "$INVOICE_ID" \
-  --escrow_contract "$ESCROW_USDC_ID" \
-  --funding_asset "$USDC_ISSUER" \
-  --registry_contract "$REGISTRY_ID" \
-  --treasury "$DEPLOYER_ADDRESS" \
-  --min_initial_deposit 10000000 \
-  --share_name '"TrusTrove USDC Pool Shares"' \
-  --share_symbol '"TT-USDC"' \
-  --share_decimals 7
+  invoke_init "invoice" "$INVOICE_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --registry_contract "$REGISTRY_ID"
+  echo ""
+fi
 
-echo ""
-echo "=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
-ESCROW_XLM_ID=$(deploy_contract "escrow_xlm" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
-echo "XLM Escrow: $ESCROW_XLM_ID"
+if _should_run "escrow_usdc"; then
+  echo "=== Deploying USDC escrow_contract ==="
+  ESCROW_USDC_ID=$(deploy_contract "escrow_usdc" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
+  echo "USDC Escrow: $ESCROW_USDC_ID"
+  echo ""
+fi
 
-echo ""
-echo "=== Deploying XLM pool_contract (EXPERIMENTAL) ==="
-POOL_XLM_ID=$(deploy_contract "pool_xlm" "target/wasm32v1-none/release/trusttrove_pool.wasm")
-echo "XLM Pool: $POOL_XLM_ID"
+if _should_run "pool_usdc"; then
+  echo "=== Deploying USDC pool_contract ==="
+  POOL_USDC_ID=$(deploy_contract "pool_usdc" "target/wasm32v1-none/release/trusttrove_pool.wasm")
+  echo "USDC Pool: $POOL_USDC_ID"
+  echo ""
+fi
 
-invoke_init "escrow_xlm" "$ESCROW_XLM_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --pool_contract "$POOL_XLM_ID" \
-  --invoice_contract "$INVOICE_ID" \
-  --usdc_asset "$XLM_ASSET"
+# escrow_usdc init depends on pool_usdc, so run after both are deployed
+if _should_run "escrow_usdc"; then
+  invoke_init "escrow_usdc" "$ESCROW_USDC_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --pool_contract "$POOL_USDC_ID" \
+    --invoice_contract "$INVOICE_ID" \
+    --usdc_asset "$USDC_ISSUER"
+fi
 
-invoke_init "pool_xlm" "$POOL_XLM_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --invoice_contract "$INVOICE_ID" \
-  --escrow_contract "$ESCROW_XLM_ID" \
-  --funding_asset "$XLM_ASSET" \
-  --registry_contract "$REGISTRY_ID" \
-  --treasury "$DEPLOYER_ADDRESS" \
-  --min_initial_deposit 10000000 \
-  --share_name '"TrusTrove XLM Pool Shares"' \
-  --share_symbol '"TT-XLM"' \
-  --share_decimals 7
+if _should_run "pool_usdc"; then
+  invoke_init "pool_usdc" "$POOL_USDC_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --invoice_contract "$INVOICE_ID" \
+    --escrow_contract "$ESCROW_USDC_ID" \
+    --funding_asset "$USDC_ISSUER" \
+    --registry_contract "$REGISTRY_ID" \
+    --treasury "$DEPLOYER_ADDRESS" \
+    --min_initial_deposit 10000000 \
+    --share_name '"TrusTrove USDC Pool Shares"' \
+    --share_symbol '"TT-USDC"' \
+    --share_decimals 7
+fi
 
-echo ""
-echo "=== Wiring USDC pool_contract into invoice_contract ==="
-invoke_init "invoice_set_pool" "$INVOICE_ID" \
-  -- set_pool_contract \
-  --pool_contract "$POOL_USDC_ID"
+if _should_run "escrow_xlm"; then
+  echo ""
+  echo "=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
+  ESCROW_XLM_ID=$(deploy_contract "escrow_xlm" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
+  echo "XLM Escrow: $ESCROW_XLM_ID"
+fi
+
+if _should_run "pool_xlm"; then
+  echo ""
+  echo "=== Deploying XLM pool_contract (EXPERIMENTAL) ==="
+  POOL_XLM_ID=$(deploy_contract "pool_xlm" "target/wasm32v1-none/release/trusttrove_pool.wasm")
+  echo "XLM Pool: $POOL_XLM_ID"
+fi
+
+if _should_run "escrow_xlm"; then
+  invoke_init "escrow_xlm" "$ESCROW_XLM_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --pool_contract "$POOL_XLM_ID" \
+    --invoice_contract "$INVOICE_ID" \
+    --usdc_asset "$XLM_ASSET"
+fi
+
+if _should_run "pool_xlm"; then
+  invoke_init "pool_xlm" "$POOL_XLM_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --invoice_contract "$INVOICE_ID" \
+    --escrow_contract "$ESCROW_XLM_ID" \
+    --funding_asset "$XLM_ASSET" \
+    --registry_contract "$REGISTRY_ID" \
+    --treasury "$DEPLOYER_ADDRESS" \
+    --min_initial_deposit 10000000 \
+    --share_name '"TrusTrove XLM Pool Shares"' \
+    --share_symbol '"TT-XLM"' \
+    --share_decimals 7
+fi
+
+if [ -z "$ONLY_CONTRACT" ]; then
+  echo ""
+  echo "=== Wiring USDC pool_contract into invoice_contract ==="
+  invoke_init "invoice_set_pool" "$INVOICE_ID" \
+    -- set_pool_contract \
+    --pool_contract "$POOL_USDC_ID"
+fi
 
 # ---------------------------------------------------------------------------
 # 8. Persist final addresses to .deployed-addresses (already done per step)

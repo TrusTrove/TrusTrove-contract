@@ -2,11 +2,13 @@
 resolver = "2"
 members = [
     "contracts/registry",
+    "contracts/test-utils",
     "contracts/invoice",
     "contracts/escrow",
     "contracts/pool",
     "contracts/pool_factory",
     "contracts/ttl",
+    "contracts/test-utils",
     "tests/integration",
 ]
 
@@ -25,6 +27,8 @@ trusttrove-invoice = { path = "contracts/invoice" }
 trusttrove-escrow = { path = "contracts/escrow" }
 trusttrove-pool = { path = "contracts/pool" }
 trusttrove-pool-factory = { path = "contracts/pool_factory" }
+trusttrove-test-utils = { path = "contracts/test-utils" }
+trusttrove-test-utils = { path = "contracts/test-utils" }
 
 [profile.release]
 opt-level = "z"

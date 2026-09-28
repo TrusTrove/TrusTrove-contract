@@ -21,6 +21,7 @@ use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as Re
 use trusttrove_invoice::{
     InvoiceContract as RealInvoice, InvoiceContractClient as RealInvoiceClient,
 };
+use trusttrove_test_utils::{setup_full_protocol, test_agent_id, test_agent_pubkey, test_agent_signing_key, TEST_AGENT_SEED};
 
 // Default invoice parameters matching create_and_list() defaults
 // These computed constants eliminate magic numbers in test assertions
@@ -96,24 +97,7 @@ impl MockAgentRegistry {
 #[contracttype]
 pub struct AgentKey(Symbol);
 
-const TEST_AGENT_SEED: [u8; 32] = [7u8; 32];
-
-fn test_agent_signing_key() -> k256::ecdsa::SigningKey {
-    k256::ecdsa::SigningKey::from_slice(&TEST_AGENT_SEED).unwrap()
-}
-
-fn test_agent_pubkey(env: &Env) -> BytesN<65> {
-    let point = test_agent_signing_key()
-        .verifying_key()
-        .to_encoded_point(false);
-    let mut bytes = [0u8; 65];
-    bytes.copy_from_slice(point.as_bytes());
-    BytesN::from_array(env, &bytes)
-}
-
-fn test_agent_id(env: &Env) -> Symbol {
-    Symbol::new(env, "test_agent")
-}
+// Shared test_agent helpers imported from trusttrove_test_utils (Issue #813)
 
 /// Submits a validly signed attestation for `invoice_id` against the
 /// agent-registry wired up in `setup()`, unlocking it for
@@ -4663,4 +4647,11 @@ fn test_set_protocol_fee_event_reports_treasury_change_with_unchanged_fee() {
     );
     assert_eq!(te.pool.get_treasury(), new_treasury);
     assert_eq!(te.pool.get_protocol_fee_bps(), 500);
+}
+
+#[test]
+fn test_shared_fixture_setup_full_protocol() {
+    let proto = setup_full_protocol();
+    assert_eq!(proto.pool.get_max_utilization(&proto.admin), 10000);
+    assert_eq!(proto.invoice.get_total_funded(), 0);
 }

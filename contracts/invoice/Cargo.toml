@@ -18,6 +18,8 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 trusttrove-registry = { path = "../registry" }
 trusttrove-escrow = { path = "../escrow" }
 trusttrove-pool = { path = "../pool" }
+trusttrove-test-utils = { workspace = true }
+trusttrove-test-utils = { workspace = true }
 proptest = "1"
 # Test-only: signs attestation payloads with a real secp256k1 key so
 # submit_attestation's signature-recovery path is exercised for real,
