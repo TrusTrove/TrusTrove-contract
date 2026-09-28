@@ -1177,19 +1177,9 @@ impl InvoiceContract {
             .get(&DataKey::EscrowContract)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
 
-        let buyer = invoice.buyer.clone();
-        let funding_asset = invoice.funding_asset.clone();
-
-        let token = token::Client::new(&env, &funding_asset);
-        // Step 1: buyer transfers this installment's `amount` into escrow.
-        // Previously deposited installments remain in escrow until the
-        // final repayment releases the accumulated `face_value`.
-        if !matches!(
-            token.try_transfer(&buyer, &escrow, &(amount as i128)),
-            Ok(Ok(()))
-        ) {
-            panic_with_error!(&env, InvoiceError::CrossContractCallFailed);
-        }
+        let token = token::Client::new(&env, &invoice.funding_asset);
+        // Step 1: buyer transfers amount into escrow
+        token.transfer(&invoice.buyer, &escrow, &(amount as i128));
 
         let new_repaid_amount = invoice
             .repaid_amount
