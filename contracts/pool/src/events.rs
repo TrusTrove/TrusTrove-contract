@@ -75,3 +75,20 @@ pub fn protocol_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32, treas
         (old_fee_bps, new_fee_bps, treasury.clone()),
     );
 }
+
+/// Emitted by `approve` whenever an LP's spending grant changes, so a spender
+/// (and any indexer watching LP positions) can observe pre-authorized share
+/// movement without polling `allowance`. `amount` is the new total grant, not a
+/// delta, matching SEP-41's `approve` semantics.
+pub fn allowance_approved(
+    env: &Env,
+    from: &Address,
+    spender: &Address,
+    amount: i128,
+    expiration_ledger: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "allowance_approved"), from.clone()),
+        (spender.clone(), amount, expiration_ledger),
+    );
+}
