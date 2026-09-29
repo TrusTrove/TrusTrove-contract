@@ -4199,8 +4199,6 @@ fn prop_deposit_then_withdraw_never_returns_more_than_deposited_above_par() {
                     usdc_returned <= deposit_amount,
                     "withdrawal returned {usdc_returned} for deposit {deposit_amount}"
                 );
-                let ceil_share_price = stats_before.total_deposits / stats_before.total_shares
-                    + u128::from(stats_before.total_deposits % stats_before.total_shares != 0);
                 prop_assert!(
                     stats_before.total_shares > 0,
                     "share price is undefined when there are no shares"
