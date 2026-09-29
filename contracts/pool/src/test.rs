@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+extern crate std;
+
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
@@ -1615,6 +1617,164 @@ fn test_repay_early_against_real_pool_and_escrow() {
     assert_eq!(te.invoice.get_status(&invoice_id), 5); // Repaid
 }
 
+// Issue #876: nonzero protocol fees must also flow through the real early
+// repayment path, including the subsequent LP withdrawal.
+#[test]
+fn test_nonzero_protocol_fee_with_real_early_repayment_and_withdrawal() {
+    let te = setup();
+    let deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1_000u32;
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+
+    let elapsed = 43_200u64;
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + elapsed);
+    let earned = DEFAULT_YIELD_AMOUNT * elapsed as u128 / 86_400;
+    let fee = earned * fee_bps as u128 / 10_000;
+    let lp_yield = earned - fee;
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let treasury_before = usdc.balance(&treasury);
+
+    assert!(te.invoice.repay_early(&invoice_id));
+    assert_eq!(usdc.balance(&treasury) - treasury_before, fee as i128);
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_yield_distributed, lp_yield);
+    assert_eq!(stats.total_deposits, deposit + lp_yield);
+    assert_eq!(stats.total_funded, 0);
+    assert_eq!(stats.active_invoice_count, 0);
+
+    let position = te.pool.get_lp_position(&te.lp);
+    let before_withdraw = usdc.balance(&te.lp);
+    let returned = te.pool.withdraw(&te.lp, &position.shares);
+    assert_eq!(returned, deposit + lp_yield);
+    assert_eq!(usdc.balance(&te.lp) - before_withdraw, returned as i128);
+    assert_eq!(te.pool.get_stats().total_deposits, 0);
+    assert_eq!(te.invoice.get_status(&invoice_id), 5);
+}
+
+// Issue #878: interleave several real invoices while checking shared pool
+// counters and the price used to admit a late LP after yield and loss.
+#[test]
+fn test_multi_invoice_mixed_repayment_default_and_late_depositor() {
+    let te = setup();
+    let lp2 = Address::generate(&te.env);
+    let lp3 = Address::generate(&te.env);
+    let lp2_key = TKey(lp2.clone());
+    let lp3_key = TKey(lp3.clone());
+    for (lp, key) in [(&lp2, &lp2_key), (&lp3, &lp3_key)] {
+        te.env.as_contract(&te.usdc_id, || {
+            te.env
+                .storage()
+                .persistent()
+                .set(key, &100_000_000_000_000i128);
+        });
+        te.registry.register(lp);
+    }
+    te.pool.set_max_utilization(&te.admin, &6_000);
+    te.pool.deposit(&te.lp, &40_000_000_000);
+    te.pool.deposit(&lp2, &20_000_000_000);
+
+    let repaid = create_and_list(&te, &te.usdc_id);
+    let defaulted = create_and_list(&te, &te.usdc_id);
+    let active = create_and_list(&te, &te.usdc_id);
+    for id in [&repaid, &defaulted, &active] {
+        te.pool.fund_invoice(id);
+        let stats = te.pool.get_stats();
+        assert_eq!(
+            stats.available_liquidity,
+            stats.total_deposits - stats.total_funded
+        );
+        assert!(stats.utilization_rate_bps <= stats.max_utilization_bps);
+    }
+    assert_eq!(te.pool.get_stats().active_invoice_count, 3);
+    assert_eq!(te.pool.get_stats().total_funded, DEFAULT_FUNDED_AMOUNT * 3);
+
+    te.invoice.mark_shipped(&repaid);
+    te.invoice.confirm_delivery(&repaid, &te.issuer);
+    te.invoice.confirm_delivery(&repaid, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_200);
+    assert!(te.invoice.repay_early(&repaid));
+    let earned = DEFAULT_YIELD_AMOUNT / 2;
+    let after_repay = te.pool.get_stats();
+    assert_eq!(after_repay.total_yield_distributed, earned);
+    assert_eq!(after_repay.active_invoice_count, 2);
+    assert_eq!(
+        after_repay.available_liquidity,
+        after_repay.total_deposits - after_repay.total_funded
+    );
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_201);
+    assert!(te.pool.handle_default(&defaulted));
+    assert_eq!(te.invoice.get_status(&defaulted), 6);
+    let after_default = te.pool.get_stats();
+    assert_eq!(after_default.total_loss_realised, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(after_default.active_invoice_count, 1);
+    assert_eq!(
+        after_default.available_liquidity,
+        after_default.total_deposits - after_default.total_funded
+    );
+    assert_eq!(after_default.total_yield_distributed, earned);
+
+    let lp1_before = te.pool.get_lp_position(&te.lp);
+    let lp2_before = te.pool.get_lp_position(&lp2);
+    let before_late_deposit = te.pool.get_stats();
+    te.pool.deposit(&lp3, &10_000_000_000);
+    let lp3_position = te.pool.get_lp_position(&lp3);
+    assert_eq!(
+        lp3_position.shares,
+        10_000_000_000 * before_late_deposit.total_shares / before_late_deposit.total_deposits
+    );
+    assert_eq!(lp3_position.yield_earned, 0);
+    assert!(lp3_position.usdc_value <= 10_000_000_000);
+    assert!(10_000_000_000 - lp3_position.usdc_value <= 1);
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, lp1_before.shares);
+    assert_eq!(te.pool.get_lp_position(&lp2).shares, lp2_before.shares);
+
+    for (index, lp) in [&te.lp, &lp2, &lp3].iter().enumerate() {
+        let position = te.pool.get_lp_position(lp);
+        if position.shares > 0 {
+            let stats = te.pool.get_stats();
+            let position_value = position.shares * stats.total_deposits / stats.total_shares;
+            let remaining_lps = (3 - index) as u128;
+            let withdrawal_value =
+                core::cmp::min(position_value, stats.available_liquidity / remaining_lps);
+            let withdrawal_shares = withdrawal_value * stats.total_shares / stats.total_deposits;
+            if withdrawal_shares > 0 {
+                te.pool.withdraw(lp, &withdrawal_shares);
+                let after = te.pool.get_stats();
+                assert_eq!(
+                    after.available_liquidity,
+                    after.total_deposits - after.total_funded
+                );
+                assert_eq!(after.total_yield_distributed, earned);
+                assert_eq!(after.total_loss_realised, DEFAULT_FUNDED_AMOUNT);
+                assert_eq!(after.active_invoice_count, 1);
+            }
+        }
+    }
+    let final_stats = te.pool.get_stats();
+    assert_eq!(
+        final_stats.available_liquidity,
+        final_stats.total_deposits - final_stats.total_funded
+    );
+    assert_eq!(final_stats.active_invoice_count, 1);
+    assert_eq!(final_stats.total_yield_distributed, earned);
+    assert_eq!(final_stats.total_loss_realised, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(te.invoice.get_status(&active), 2);
+}
 // ============== MULTI-LP TESTS ==============
 
 #[test]
@@ -3233,10 +3393,11 @@ mod real_registry_integration {
     use soroban_sdk::{map, Map, String};
     use trusttrove_registry::{
         RegistryContract as RealRegistry, RegistryContractClient as RealRegistryClient,
+        VerificationStatus,
     };
 
     #[test]
-    fn test_full_lifecycle_with_real_registry() {
+    fn test_real_registry_revoke_reinstate_gates_create_and_funding() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
 
@@ -3268,6 +3429,14 @@ mod real_registry_integration {
         registry.verify_profile(&buyer, &true);
         assert!(registry.is_verified(&issuer));
         assert!(registry.is_verified(&buyer));
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Verified
+        );
+        assert_eq!(
+            registry.get_verification_status(&buyer),
+            VerificationStatus::Verified
+        );
 
         // --- Deploy real invoice, escrow, pool wired to the real registry ---
         let usdc_id = env.register_contract(None, MockToken);
@@ -3324,12 +3493,31 @@ mod real_registry_integration {
         );
         invoice.set_agent_registry_contract(&agent_registry_id);
 
-        // --- Drive the full lifecycle: create -> list -> fund -> repay ---
+        // A profile revoked before invoice creation is rejected by the real
+        // invoice contract, then becomes eligible again after reinstate.
         let face_value: u128 = 10_000_000_000;
         let discount_bps: u32 = 200;
         let due_date = env.ledger().timestamp() + 86400;
 
-        pool.deposit(&lp, &face_value);
+        registry.revoke(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Revoked
+        );
+        let create_while_revoked =
+            invoice.try_create(&issuer, &buyer, &face_value, &due_date, &usdc_id);
+        assert!(create_while_revoked.is_err());
+        assert!(
+            std::format!("{create_while_revoked:?}").contains("#4"),
+            "revoked issuer should fail invoice.create with IssuerNotVerified: {create_while_revoked:?}"
+        );
+        registry.reinstate(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Verified
+        );
+
+        pool.deposit(&lp, &(face_value * 3));
 
         let invoice_id = invoice.create(&issuer, &buyer, &face_value, &due_date, &usdc_id);
 
@@ -3357,8 +3545,108 @@ mod real_registry_integration {
 
         invoice.list_for_financing(&invoice_id, &discount_bps);
 
+        // Revocation after listing blocks pool funding. The failed cross-
+        // contract call must leave pool accounting exactly as it was.
+        let stats_before_issuer_rejection = pool.get_stats();
+        registry.revoke(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Revoked
+        );
+        let issuer_funding_rejection = pool.try_fund_invoice(&invoice_id);
+        assert!(issuer_funding_rejection.is_err());
+        assert!(
+            std::format!("{issuer_funding_rejection:?}").contains("#18"),
+            "revoked issuer should fail pool funding with IssuerNotVerified: {issuer_funding_rejection:?}"
+        );
+        let stats_after_issuer_rejection = pool.get_stats();
+        assert_eq!(
+            stats_after_issuer_rejection.total_deposits,
+            stats_before_issuer_rejection.total_deposits
+        );
+        assert_eq!(
+            stats_after_issuer_rejection.total_funded,
+            stats_before_issuer_rejection.total_funded
+        );
+        assert_eq!(
+            stats_after_issuer_rejection.active_invoice_count,
+            stats_before_issuer_rejection.active_invoice_count
+        );
+        assert_eq!(
+            stats_after_issuer_rejection.available_liquidity,
+            stats_before_issuer_rejection.available_liquidity
+        );
+        registry.reinstate(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Verified
+        );
+
         let funded = pool.fund_invoice(&invoice_id);
         assert!(funded);
+
+        // Repeat the listing/funding gate for a revoked buyer.
+        let second_due_date = env.ledger().timestamp() + 86400;
+        let second_invoice_id =
+            invoice.create(&issuer, &buyer, &face_value, &second_due_date, &usdc_id);
+        let second_payload = trusttrove_invoice::AttestationPayload {
+            domain_separator: BytesN::from_array(
+                &env,
+                &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
+            ),
+            invoice_id: second_invoice_id.clone(),
+            risk_score: 5000,
+            evidence_hash: BytesN::from_array(&env, &[8u8; 32]),
+            agent_id: test_agent_id(&env),
+            nonce: 2,
+        };
+        let second_payload_bytes = second_payload.to_xdr(&env);
+        let second_digest = env.crypto().keccak256(&second_payload_bytes).to_array();
+        let (second_sig, second_recid) = test_agent_signing_key()
+            .sign_prehash_recoverable(&second_digest)
+            .unwrap();
+        let mut second_sig_bytes = [0u8; 65];
+        second_sig_bytes[..64].copy_from_slice(&second_sig.to_bytes());
+        second_sig_bytes[64] = second_recid.to_byte();
+        let second_signature = BytesN::from_array(&env, &second_sig_bytes);
+        invoice.submit_attestation(&second_invoice_id, &second_payload_bytes, &second_signature);
+        invoice.list_for_financing(&second_invoice_id, &discount_bps);
+
+        let stats_before_buyer_rejection = pool.get_stats();
+        registry.revoke(&buyer);
+        assert_eq!(
+            registry.get_verification_status(&buyer),
+            VerificationStatus::Revoked
+        );
+        let buyer_funding_rejection = pool.try_fund_invoice(&second_invoice_id);
+        assert!(buyer_funding_rejection.is_err());
+        assert!(
+            std::format!("{buyer_funding_rejection:?}").contains("#19"),
+            "revoked buyer should fail pool funding with BuyerNotVerified: {buyer_funding_rejection:?}"
+        );
+        let stats_after_buyer_rejection = pool.get_stats();
+        assert_eq!(
+            stats_after_buyer_rejection.total_deposits,
+            stats_before_buyer_rejection.total_deposits
+        );
+        assert_eq!(
+            stats_after_buyer_rejection.total_funded,
+            stats_before_buyer_rejection.total_funded
+        );
+        assert_eq!(
+            stats_after_buyer_rejection.active_invoice_count,
+            stats_before_buyer_rejection.active_invoice_count
+        );
+        assert_eq!(
+            stats_after_buyer_rejection.available_liquidity,
+            stats_before_buyer_rejection.available_liquidity
+        );
+        registry.reinstate(&buyer);
+        assert_eq!(
+            registry.get_verification_status(&buyer),
+            VerificationStatus::Verified
+        );
+        assert!(pool.fund_invoice(&second_invoice_id));
 
         let record = invoice.get(&invoice_id);
         assert_eq!(record.status, trusttrove_invoice::InvoiceStatus::Funded);

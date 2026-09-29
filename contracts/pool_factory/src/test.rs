@@ -5,12 +5,14 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use soroban_sdk::{
-    testutils::{Address as _, Events as _},
-    Address, Bytes, BytesN, Env, Symbol, TryFromVal,
+    testutils::{Address as _, Events as _, Ledger as _},
+    xdr::ToXdr,
+    Address, Bytes, BytesN, Env, Map, String, Symbol, TryFromVal,
 };
 use trusttrove_escrow::EscrowContractClient;
 use trusttrove_invoice::InvoiceContractClient;
 use trusttrove_pool::PoolContractClient;
+use trusttrove_registry::{RegistryContract, RegistryContractClient};
 
 use crate::{DataKey, PoolFactoryContract, PoolFactoryContractClient};
 
@@ -39,10 +41,9 @@ fn setup() -> TestEnv {
 
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
-    // The pool only consults the registry in `fund_invoice`, so an address is
-    // enough here; `register_asset` reads it back off the invoice contract
-    // rather than taking it as a parameter.
-    let registry_id = Address::generate(&env);
+    let registry_id = env.register_contract(None, RegistryContract);
+    let registry = RegistryContractClient::new(&env, &registry_id);
+    registry.initialize(&admin);
 
     // Real invoice and escrow contracts: the pool's `initialize` cross-checks
     // the escrow's configured asset and the factory reads the invoice's
@@ -87,13 +88,28 @@ fn new_escrow(env: &Env, admin: &Address, asset: &Address) -> Address {
 }
 
 fn register_asset(te: &TestEnv, asset: &Address) -> Address {
+    let predicted_pool = te
+        .env
+        .deployer()
+        .with_address(
+            te.factory_id.clone(),
+            PoolFactoryContract::asset_salt(&te.env, asset),
+        )
+        .deployed_address();
     let escrow_id = if *asset == te.asset {
         te.escrow_id.clone()
     } else {
-        new_escrow(&te.env, &te.admin, asset)
+        new_escrow_for_pool(&te.env, &te.admin, asset, &predicted_pool)
     };
     te.factory
         .register_asset(asset, &te.pool_wasm_hash, &te.invoice_id, &escrow_id)
+}
+
+fn new_escrow_for_pool(env: &Env, admin: &Address, asset: &Address, pool: &Address) -> Address {
+    let escrow_id = env.register_contract(None, trusttrove_escrow::EscrowContract);
+    let escrow = EscrowContractClient::new(env, &escrow_id);
+    escrow.initialize(admin, pool, asset);
+    escrow_id
 }
 
 /// The `trusttrove_pool.wasm` artifact that `register_asset` deploys.
@@ -574,7 +590,236 @@ impl MockToken {
 #[contracttype]
 pub struct TKey(Address);
 
+#[contract]
+pub struct MockAgentRegistry;
+
+#[contractimpl]
+impl MockAgentRegistry {
+    pub fn get_agent(env: Env, agent_id: Symbol) -> Option<trusttrove_invoice::Agent> {
+        env.storage().persistent().get(&AgentKey(agent_id))
+    }
+
+    pub fn register_agent(env: Env, agent_id: Symbol, agent: trusttrove_invoice::Agent) {
+        env.storage().persistent().set(&AgentKey(agent_id), &agent);
+    }
+}
+
+#[contracttype]
+pub struct AgentKey(Symbol);
+
+const TEST_AGENT_SEED: [u8; 32] = [7; 32];
+
+fn test_agent_key() -> k256::ecdsa::SigningKey {
+    k256::ecdsa::SigningKey::from_slice(&TEST_AGENT_SEED).unwrap()
+}
+
+fn attest_invoice(env: &Env, invoice: &InvoiceContractClient, invoice_id: &BytesN<32>) {
+    let public_key = test_agent_key().verifying_key().to_encoded_point(false);
+    let mut public_key_bytes = [0u8; 65];
+    public_key_bytes.copy_from_slice(public_key.as_bytes());
+    let agent_id = Symbol::new(env, "test_agent");
+    let agent_registry_id = env.register_contract(None, MockAgentRegistry);
+    let agent_registry = MockAgentRegistryClient::new(env, &agent_registry_id);
+    agent_registry.register_agent(
+        &agent_id,
+        &trusttrove_invoice::Agent {
+            active: true,
+            pubkey: BytesN::from_array(env, &public_key_bytes),
+        },
+    );
+    invoice.set_agent_registry_contract(&agent_registry_id);
+
+    let payload = trusttrove_invoice::AttestationPayload {
+        domain_separator: BytesN::from_array(
+            env,
+            &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
+        ),
+        invoice_id: invoice_id.clone(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(env, &[9; 32]),
+        agent_id,
+        nonce: 1,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (signature, recovery_id) = test_agent_key().sign_prehash_recoverable(&digest).unwrap();
+    let mut signature_bytes = [0u8; 65];
+    signature_bytes[..64].copy_from_slice(&signature.to_bytes());
+    signature_bytes[64] = recovery_id.to_byte();
+    invoice.submit_attestation(
+        invoice_id,
+        &payload_bytes,
+        &BytesN::from_array(env, &signature_bytes),
+    );
+}
+
+fn create_listed_invoice(
+    te: &TestEnv,
+    issuer: &Address,
+    buyer: &Address,
+    asset: &Address,
+) -> BytesN<32> {
+    let invoice = InvoiceContractClient::new(&te.env, &te.invoice_id);
+    let due_date = te.env.ledger().timestamp() + 86_400;
+    let invoice_id = invoice.create(issuer, buyer, &1_000_000_000, &due_date, asset);
+    attest_invoice(&te.env, &invoice, &invoice_id);
+    invoice.list_for_financing(&invoice_id, &200);
+    invoice_id
+}
+
+fn assert_pool_stats_equal(actual: crate::types::PoolStats, expected: trusttrove_pool::PoolStats) {
+    assert_eq!(actual.total_deposits, expected.total_deposits);
+    assert_eq!(actual.total_funded, expected.total_funded);
+    assert_eq!(actual.available_liquidity, expected.available_liquidity);
+    assert_eq!(actual.utilization_rate_bps, expected.utilization_rate_bps);
+    assert_eq!(
+        actual.total_yield_distributed,
+        expected.total_yield_distributed
+    );
+    assert_eq!(actual.total_loss_realised, expected.total_loss_realised);
+    assert_eq!(actual.active_invoice_count, expected.active_invoice_count);
+    assert_eq!(actual.total_shares, expected.total_shares);
+    assert_eq!(actual.max_utilization_bps, expected.max_utilization_bps);
+}
+
 // --------------- New Tests ---------------
+
+#[test]
+fn test_factory_pools_fund_and_repay_invoices_for_their_own_assets() {
+    let te = setup();
+    // This integration path deploys two Wasm pools and invokes real invoice,
+    // escrow, and registry contracts; keep its host budget independent of the
+    // default unit-test resource ceiling.
+    te.env.budget().reset_unlimited();
+    let invoice = InvoiceContractClient::new(&te.env, &te.invoice_id);
+    let asset_a = te.env.register_contract(None, MockToken);
+    let asset_b = te.env.register_contract(None, MockToken);
+    invoice.add_supported_asset(&asset_a);
+    invoice.add_supported_asset(&asset_b);
+
+    let pool_a_address = register_asset(&te, &asset_a);
+    let pool_b_address = register_asset(&te, &asset_b);
+    assert_eq!(
+        te.factory.get_pool_for_asset(&asset_a),
+        Some(pool_a_address.clone())
+    );
+    assert_eq!(
+        te.factory.get_pool_for_asset(&asset_b),
+        Some(pool_b_address.clone())
+    );
+    let pool_a = PoolContractClient::new(&te.env, &pool_a_address);
+    let pool_b = PoolContractClient::new(&te.env, &pool_b_address);
+
+    let issuer = Address::generate(&te.env);
+    let buyer = Address::generate(&te.env);
+    let lp_a = Address::generate(&te.env);
+    let lp_b = Address::generate(&te.env);
+    let registry = RegistryContractClient::new(&te.env, &te.registry_id);
+    let metadata: Map<String, String> = Map::new(&te.env);
+    registry.register_issuer(&issuer, &metadata);
+    registry.register_buyer(&buyer, &metadata);
+    registry.verify_profile(&issuer, &true);
+    registry.verify_profile(&buyer, &true);
+
+    for (asset, lp) in [(&asset_a, &lp_a), (&asset_b, &lp_b)] {
+        let lp_key = TKey(lp.clone());
+        let buyer_key = TKey(buyer.clone());
+        te.env.as_contract(asset, || {
+            te.env
+                .storage()
+                .persistent()
+                .set(&lp_key, &100_000_000_000i128);
+            te.env
+                .storage()
+                .persistent()
+                .set(&buyer_key, &100_000_000_000i128);
+        });
+    }
+    pool_a.deposit(&lp_a, &2_000_000_000);
+    pool_b.deposit(&lp_b, &2_000_000_000);
+
+    let invoice_a = create_listed_invoice(&te, &issuer, &buyer, &asset_a);
+    let invoice_b = create_listed_invoice(&te, &issuer, &buyer, &asset_b);
+
+    // Each real pool rejects a listed invoice denominated in the other asset.
+    let wrong_a = pool_a.try_fund_invoice(&invoice_b);
+    let wrong_b = pool_b.try_fund_invoice(&invoice_a);
+    assert!(
+        std::format!("{wrong_a:?}").contains("#11"),
+        "expected AssetMismatch, got {wrong_a:?}"
+    );
+    assert!(
+        std::format!("{wrong_b:?}").contains("#11"),
+        "expected AssetMismatch, got {wrong_b:?}"
+    );
+    assert_eq!(invoice.get_status(&invoice_a), 1);
+    assert_eq!(invoice.get_status(&invoice_b), 1);
+    assert_eq!(pool_a.get_stats().total_funded, 0);
+    assert_eq!(pool_b.get_stats().total_funded, 0);
+
+    // Invoice authorizes one funding pool at a time; each invoice records the
+    // factory-resolved pool that funds its own asset.
+    invoice.set_pool_contract(&pool_a_address);
+    assert!(pool_a.fund_invoice(&invoice_a));
+    invoice.set_pool_contract(&pool_b_address);
+    assert!(pool_b.fund_invoice(&invoice_b));
+    assert_eq!(invoice.get_status(&invoice_a), 2);
+    assert_eq!(invoice.get_status(&invoice_b), 2);
+
+    let funded_amount = 1_000_000_000u128 * 9_800 / 10_000;
+    let stats_a_funded = pool_a.get_stats();
+    let stats_b_funded = pool_b.get_stats();
+    assert_eq!(stats_a_funded.total_funded, funded_amount);
+    assert_eq!(stats_b_funded.total_funded, funded_amount);
+    assert_eq!(stats_a_funded.active_invoice_count, 1);
+    assert_eq!(stats_b_funded.active_invoice_count, 1);
+
+    invoice.mark_shipped(&invoice_a);
+    invoice.confirm_delivery(&invoice_a, &issuer);
+    invoice.confirm_delivery(&invoice_a, &buyer);
+    invoice.mark_shipped(&invoice_b);
+    invoice.confirm_delivery(&invoice_b, &issuer);
+    invoice.confirm_delivery(&invoice_b, &buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_200);
+    invoice.set_escrow_contract(&pool_a.get_escrow_contract());
+    assert!(invoice.repay_early(&invoice_a));
+    invoice.set_escrow_contract(&pool_b.get_escrow_contract());
+    assert!(invoice.repay_early(&invoice_b));
+    assert_eq!(invoice.get_status(&invoice_a), 5);
+    assert_eq!(invoice.get_status(&invoice_b), 5);
+
+    let stats_a = pool_a.get_stats();
+    let stats_b = pool_b.get_stats();
+    assert_eq!(stats_a.total_funded, 0);
+    assert_eq!(stats_b.total_funded, 0);
+    assert_eq!(stats_a.active_invoice_count, 0);
+    assert_eq!(stats_b.active_invoice_count, 0);
+    assert!(stats_a.total_yield_distributed > 0);
+    assert!(stats_b.total_yield_distributed > 0);
+
+    let aggregate = te.factory.get_aggregate_stats();
+    assert_eq!(aggregate.len(), 2);
+    let (aggregate_pool_a, aggregate_stats_a) = aggregate.get(0).unwrap();
+    let (aggregate_pool_b, aggregate_stats_b) = aggregate.get(1).unwrap();
+    assert_eq!(aggregate_pool_a, pool_a_address);
+    assert_eq!(aggregate_pool_b, pool_b_address);
+    assert_pool_stats_equal(aggregate_stats_a.clone(), stats_a.clone());
+    assert_pool_stats_equal(aggregate_stats_b.clone(), stats_b.clone());
+    assert_eq!(
+        aggregate_stats_a.total_deposits + aggregate_stats_b.total_deposits,
+        stats_a.total_deposits + stats_b.total_deposits
+    );
+    assert_eq!(
+        aggregate_stats_a.total_yield_distributed + aggregate_stats_b.total_yield_distributed,
+        stats_a.total_yield_distributed + stats_b.total_yield_distributed
+    );
+    assert_eq!(
+        aggregate_stats_a.total_loss_realised + aggregate_stats_b.total_loss_realised,
+        stats_a.total_loss_realised + stats_b.total_loss_realised
+    );
+}
 
 #[test]
 fn test_pool_instances_do_not_cross_contaminate() {
