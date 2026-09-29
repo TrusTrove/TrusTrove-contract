@@ -277,6 +277,26 @@ EscrowEvent {
 | `LPYieldEarned(Address)` | `u128` | Cumulative yield earned (updated on withdraw) |
 | `LPInitialDeposit(Address)` | `u128` | Total principal deposited by LP (tracked for yield calculation) |
 
+#### SEP-41 Share Transfers
+
+LP shares move between addresses through two public entry points that share
+one balance-movement path (`move_shares`) and emit the same standard
+`transfer(from, to, amount)` event:
+
+- `transfer(from, to, amount)` — the standard SEP-41 entry point. Generic
+  `soroban_sdk::token::Client` consumers call this directly against the pool
+  address.
+- `transfer_from(spender, from, to, amount)` — moves shares against an
+  `approve` grant, debiting the allowance.
+- `transfer_shares(from, to, amount)` — **non-standard** legacy alias of
+  `transfer`, kept for integrators that predate the SEP-41 surface. New code
+  must use `transfer`.
+
+Transfers only move balances: `TotalShares`, `TotalDeposits`, `TotalFunded`,
+yield accounting, and share price are untouched. Self-transfers are no-ops.
+The recipient's `LPShares` entry is created on first credit, exactly as a
+deposit would create it.
+
 #### SEP-41 Allowance Keys
 
 | DataKey | Type | Description |

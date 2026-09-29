@@ -33,6 +33,17 @@ pub fn lp_withdrawn(env: &Env, lp: &Address, usdc_amount: u128, shares_burned: u
     );
 }
 
+/// Emitted by both SEP-41 share-movement entry points — `transfer` and
+/// `transfer_from` — using the standard `transfer(from, to, amount)` data
+/// shape, so generic token indexers can watch share movements the same way
+/// they watch any SEP-41 token.
+pub fn shares_transferred(env: &Env, from: &Address, to: &Address, amount: i128) {
+    env.events().publish(
+        (Symbol::new(env, "transfer"), from.clone()),
+        (to.clone(), amount),
+    );
+}
+
 pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_funded"), invoice_id.clone()),

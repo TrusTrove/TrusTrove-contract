@@ -1187,7 +1187,7 @@ fn test_expire_listing_transitions_to_expired_after_window() {
     client.set_expiry_window(&100);
     env.ledger().set_timestamp(env.ledger().timestamp() + 101);
 
-    let result = client.expire_listing(&invoice_id);
+    let result = client.expire_listing(&invoice_id, &issuer);
     assert!(result);
 
     let invoice = client.get(&invoice_id);
@@ -1683,7 +1683,7 @@ fn test_expire_listing_succeeds_by_issuer() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    let result = client.expire_listing(&invoice_id);
+    let result = client.expire_listing(&invoice_id, &issuer);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
@@ -1700,7 +1700,7 @@ fn test_expire_listing_succeeds_by_admin() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    let result = client.expire_listing(&invoice_id);
+    let result = client.expire_listing(&invoice_id, &issuer);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
@@ -1718,7 +1718,7 @@ fn test_expire_listing_early_panics() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 5 * 24 * 60 * 60);
 
-    client.expire_listing(&invoice_id);
+    client.expire_listing(&invoice_id, &issuer);
 }
 
 #[test]
@@ -1732,7 +1732,7 @@ fn test_expire_listing_wrong_status_panics() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
-    client.expire_listing(&invoice_id);
+    client.expire_listing(&invoice_id, &issuer);
 }
 
 #[test]
@@ -1751,7 +1751,7 @@ fn test_expire_listing_configurable_window() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + DEFAULT_DUE_OFFSET + 1);
 
-    let result = client.expire_listing(&invoice_id);
+    let result = client.expire_listing(&invoice_id, &issuer);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
@@ -1767,7 +1767,7 @@ fn test_expire_listing_exact_boundary() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60);
 
-    let result = client.expire_listing(&invoice_id);
+    let result = client.expire_listing(&invoice_id, &issuer);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 }
@@ -1785,7 +1785,7 @@ fn test_expire_listing_one_second_before_boundary_panics() {
     env.ledger()
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 - 1);
 
-    client.expire_listing(&invoice_id);
+    client.expire_listing(&invoice_id, &issuer);
 }
 
 #[test]
@@ -2020,7 +2020,7 @@ fn test_expire_listing_stranger_panics() {
         .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
 
     // Calling expire_listing without mocking auths for issuer or admin should panic due to failed require_auth.
-    client.expire_listing(&invoice_id);
+    client.expire_listing(&invoice_id, &issuer);
 }
 
 #[test]
@@ -2433,7 +2433,7 @@ fn prop_expiry_window_bounds_are_respected_across_values() {
             client.list_for_financing(&id, &DEFAULT_DISCOUNT_BPS);
             env.ledger()
                 .set_timestamp(env.ledger().timestamp() + window + 1);
-            let expired = client.expire_listing(&id);
+            let expired = client.expire_listing(&id, &issuer);
             prop_assert!(expired);
             prop_assert_eq!(client.get(&id).status, InvoiceStatus::Expired);
             Ok(())
@@ -3148,7 +3148,7 @@ fn test_repay_from_expired_rejected() {
 
     client.set_expiry_window(&100);
     env.ledger().set_timestamp(env.ledger().timestamp() + 101);
-    client.expire_listing(&invoice_id);
+    client.expire_listing(&invoice_id, &issuer);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
 
     client.repay(&invoice_id);
@@ -3915,4 +3915,367 @@ fn test_repay_early_reads_stored_funded_amount() {
     assert_eq!(inv.status, InvoiceStatus::Repaid);
     assert_eq!(inv.repaid_amount, face_value);
     assert_eq!(inv.remaining_balance, 0);
+}
+
+// ── Issue #872: expire_listing issuer path with explicit auth ────────────────
+//
+// The tests above run under `mock_all_auths()`, which masks the difference
+// between the contract's requested auth and what a real transaction provides.
+// This suite exercises expire_listing with explicit, transaction-shaped
+// signatures only: if the contract asks for auth the caller did not provide
+// (the old check_auth self-invoke), these fail exactly like mainnet would.
+
+/// Stand up the contract without `mock_all_auths()`. Configures the funding
+/// asset and agent registry with explicit admin signatures, mirroring the
+/// setup() fixture's state.
+fn setup_no_mock_auth() -> (
+    Env,
+    InvoiceContractClient<'static>,
+    Address,
+    Address,
+    Address,
+    Address,
+) {
+    let env = Env::default();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "initialize",
+            args: (admin.clone(), registry_id.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.initialize(&admin, &registry_id);
+
+    // Funding asset must be allow-listed by the admin (explicit signature).
+    let usdc = env.register_contract(None, MockToken);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "add_supported_asset",
+            args: (usdc.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.add_supported_asset(&usdc);
+
+    // Agent registry must be configured by the admin (explicit signature);
+    // register_agent itself needs no auth.
+    let agent_registry_id = env.register_contract(None, MockAgentRegistry);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "set_agent_registry_contract",
+            args: (agent_registry_id.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_agent_registry_contract(&agent_registry_id);
+
+    (env, client, issuer, buyer, admin, usdc)
+}
+
+/// Submit a valid agent attestation for `invoice_id` without any auth mocks —
+/// submit_attestation is permissionless and gated purely by the signature.
+fn attest_no_mock_auth(env: &Env, client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
+    let agent_id = Symbol::new(env, "test_agent");
+    let agent_registry_id = client
+        .get_agent_registry_contract()
+        .expect("agent registry configured");
+    let registry_client = MockAgentRegistryClient::new(env, &agent_registry_id);
+    registry_client.register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(env),
+        },
+    );
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    let signature = BytesN::from_array(env, &sig_bytes);
+
+    client.submit_attestation(invoice_id, &payload_bytes, &signature);
+}
+
+/// List `invoice_id` with an explicit issuer signature.
+fn list_with_explicit_issuer_auth(
+    env: &Env,
+    client: &InvoiceContractClient,
+    issuer: &Address,
+    invoice_id: &BytesN<32>,
+) {
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "list_for_financing",
+            args: (invoice_id.clone(), DEFAULT_DISCOUNT_BPS).into_val(env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.list_for_financing(invoice_id, &DEFAULT_DISCOUNT_BPS);
+}
+
+/// Regression test for issue #872: the stored issuer must be able to expire
+/// their own listing with real (non-mocked) authorization. It previously
+/// failed because the issuer check went through a private `check_auth`
+/// self-invoke that only "succeeded" under `mock_all_auths`; genuine issuer
+/// signatures fell through to the admin-only path and the call panicked.
+#[test]
+fn test_expire_listing_by_issuer_with_explicit_auth() {
+    let (env, client, issuer, buyer, _admin, usdc) = setup_no_mock_auth();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                DEFAULT_FACE_VALUE,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    attest_no_mock_auth(&env, &client, &invoice_id);
+    list_with_explicit_issuer_auth(&env, &client, &issuer, &invoice_id);
+
+    // Fast forward past the default 7-day expiry window.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
+
+    // The issuer explicitly signs the expiry of their own listing.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "expire_listing",
+            args: (invoice_id.clone(), issuer.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.expire_listing(&invoice_id, &issuer);
+    assert!(result);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
+}
+
+/// The admin fallback path must keep working with explicit authorization too.
+#[test]
+fn test_expire_listing_by_admin_with_explicit_auth() {
+    let (env, client, issuer, buyer, admin, usdc) = setup_no_mock_auth();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                DEFAULT_FACE_VALUE,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    attest_no_mock_auth(&env, &client, &invoice_id);
+    list_with_explicit_issuer_auth(&env, &client, &issuer, &invoice_id);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
+
+    // Only the admin authorizes; the contract must take the admin branch.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "expire_listing",
+            args: (invoice_id.clone(), admin.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let result = client.expire_listing(&invoice_id, &admin);
+    assert!(result);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
+}
+
+/// An unrelated caller must never be able to expire a listing: even with a
+/// valid signature, the caller-equality check rejects them with the typed
+/// `NotAuthorized` error.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_expire_listing_stranger_with_explicit_auth_panics() {
+    let (env, client, issuer, buyer, _admin, usdc) = setup_no_mock_auth();
+    let stranger = Address::generate(&env);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                DEFAULT_FACE_VALUE,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    attest_no_mock_auth(&env, &client, &invoice_id);
+    list_with_explicit_issuer_auth(&env, &client, &issuer, &invoice_id);
+
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 7 * 24 * 60 * 60 + 1);
+
+    // The stranger signs — neither the issuer nor the admin path matches.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &stranger,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "expire_listing",
+            args: (invoice_id.clone(), stranger.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.expire_listing(&invoice_id, &stranger);
+}
+
+/// The issuer cannot expire a listing before its window has passed (auth
+/// alone is not enough — the time check still applies).
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_expire_listing_unexpired_rejected_for_issuer_with_explicit_auth() {
+    let (env, client, issuer, buyer, _admin, usdc) = setup_no_mock_auth();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                DEFAULT_FACE_VALUE,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    attest_no_mock_auth(&env, &client, &invoice_id);
+    list_with_explicit_issuer_auth(&env, &client, &issuer, &invoice_id);
+
+    // Well before the 7-day window.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 5 * 24 * 60 * 60);
+
+    // Issuer signs — must still hit ListingNotExpired.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "expire_listing",
+            args: (invoice_id.clone(), issuer.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.expire_listing(&invoice_id, &issuer);
+}
+
+/// The admin cannot expire a listing before its window has passed either.
+#[test]
+#[should_panic(expected = "Error(Contract, #14)")]
+fn test_expire_listing_unexpired_rejected_for_admin_with_explicit_auth() {
+    let (env, client, issuer, buyer, admin, usdc) = setup_no_mock_auth();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                DEFAULT_FACE_VALUE,
+                due_date,
+                usdc.clone(),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    attest_no_mock_auth(&env, &client, &invoice_id);
+    list_with_explicit_issuer_auth(&env, &client, &issuer, &invoice_id);
+
+    // Well before the 7-day window.
+    env.ledger()
+        .set_timestamp(env.ledger().timestamp() + 5 * 24 * 60 * 60);
+
+    // Admin signs — must still hit ListingNotExpired.
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "expire_listing",
+            args: (invoice_id.clone(), admin.clone()).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.expire_listing(&invoice_id, &admin);
 }
