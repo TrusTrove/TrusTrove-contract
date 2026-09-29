@@ -5535,3 +5535,112 @@ fn test_transfer_same_address_no_op_via_generic_client() {
     assert_eq!(before.shares, after.shares);
     assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
 }
+
+// ============== EXPIRE-LISTING VS FUND-INVOICE RACE TESTS ==============
+//
+// These tests cover the interaction between invoice.expiry_listing() and
+// pool.fund_invoice() when a listed invoice's expiry window passes.
+// The threat model (docs/THREAT_MODEL.md, attack vector 6) treats this
+// as an "accepted race condition" but we pin the deterministic outcomes
+// on either side of the deadline so future refactors cannot silently flip
+// the boundary behavior.
+//
+// Note: invoice.expire_listing() requires issuer or admin auth. The
+// expire path's authorization has a separate open bug (see invoice crate
+// issue tracker); this test uses mock_all_auths_allowing_non_root_auth()
+// for the expire_listing call only to exercise the cross-contract flow.
+
+#[test]
+fn test_expire_listing_then_fund_invoice_fails_invoice_not_listed() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Create and list an invoice with a short expiry window
+    let due_date = te.env.ledger().timestamp() + 86400;
+    let invoice_id = te
+        .invoice
+        .create(&te.issuer, &te.buyer, &10_000_000_000, &due_date, &te.usdc_id);
+    attest_invoice(&te, &invoice_id);
+    te.invoice.list_for_financing(&invoice_id, &200);
+
+    // Verify invoice is Listed
+    assert_eq!(te.invoice.get_status(&invoice_id), 1);
+
+    // Set a short expiry window (100 seconds)
+    te.invoice.set_expiry_window(&100);
+
+    // Advance time to exactly listed_at + expiry_window
+    // listed_at is set to current timestamp when list_for_financing is called
+    let listed_at = te.env.ledger().timestamp();
+    let deadline = listed_at + 100;
+    te.env.ledger().set_timestamp(deadline);
+
+    // Expire the listing - using mock_all_auths to bypass the separate auth bug
+    te.env.mock_all_auths_allowing_non_root_auth();
+    let expired = te.invoice.expire_listing(&invoice_id, &te.issuer);
+    assert!(expired);
+
+    // Verify invoice status is now Expired (7)
+    assert_eq!(te.invoice.get_status(&invoice_id), 7);
+
+    // Verify invoice counts show the invoice under Expired
+    let counts = te.invoice.get_counts();
+    assert_eq!(counts.get(String::from_str(&te.env, "Listed")), Some(0));
+    assert_eq!(counts.get(String::from_str(&te.env, "Expired")), Some(1));
+
+    // Capture pool stats before attempting to fund
+    let stats_before = te.pool.get_stats();
+
+    // Try to fund the expired invoice - must fail with InvoiceNotListed (#8)
+    let result = te.pool.try_fund_invoice(&invoice_id);
+    assert!(result.is_err(), "fund_invoice must fail for expired invoice");
+
+    // Verify pool totals and active_invoice_count are unchanged
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_funded, stats_before.total_funded);
+    assert_eq!(stats_after.active_invoice_count, stats_before.active_invoice_count);
+    assert_eq!(stats_after.available_liquidity, stats_before.available_liquidity);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+}
+
+// Boundary case: at deadline - 1 second, funding succeeds and expiry is rejected.
+// This documents that funding wins at the exact deadline second (current_time < deadline).
+#[test]
+fn test_fund_invoice_succeeds_at_deadline_minus_one_expiry_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Create and list an invoice
+    let due_date = te.env.ledger().timestamp() + 86400;
+    let invoice_id = te
+        .invoice
+        .create(&te.issuer, &te.buyer, &10_000_000_000, &due_date, &te.usdc_id);
+    attest_invoice(&te, &invoice_id);
+    te.invoice.list_for_financing(&invoice_id, &200);
+
+    // Set a short expiry window (100 seconds)
+    te.invoice.set_expiry_window(&100);
+
+    // Advance time to deadline - 1 (one second before expiry)
+    let listed_at = te.env.ledger().timestamp();
+    let deadline = listed_at + 100;
+    te.env.ledger().set_timestamp(deadline - 1);
+
+    // Funding should succeed at deadline - 1
+    let funded = te.pool.fund_invoice(&invoice_id);
+    assert!(funded, "funding must succeed one second before expiry deadline");
+
+    // Verify invoice is now Funded (2)
+    assert_eq!(te.invoice.get_status(&invoice_id), 2);
+
+    // Verify pool state updated
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.active_invoice_count, 1);
+    assert_eq!(stats.total_funded, 9_800_000_000);
+
+    // Now try to expire - must fail with ListingNotExpired (#14)
+    // because the invoice is no longer Listed (it's Funded)
+    let result = te.invoice.try_expire_listing(&invoice_id, &te.issuer);
+    assert!(result.is_err(), "expire_listing must fail for funded invoice");
+}
