@@ -1532,6 +1532,46 @@ impl PoolContract {
         Self::utilization_bps_or_panic(&env, totals.funded, totals.deposits)
     }
 
+    /// Returns the pool's active funded amount for an invoice, if any.
+    ///
+    /// A pure read of the `DataKey::FundedInvoice(invoice_id)` persistent
+    /// entry that `fund_invoice` writes and the repayment and default paths
+    /// remove, so the result mirrors the invoice's funding lifecycle exactly:
+    /// * `None` before the invoice has ever been funded through this pool.
+    /// * `Some(amount)` while the pool holds an active funding for the
+    ///   invoice, where `amount` is the USDC amount committed at funding
+    ///   (`face_value * (10000 - discount_bps) / 10000`).
+    /// * `None` again after repayment (`receive_repayment` /
+    ///   `receive_repayment_with_refund`) or default (`handle_default`)
+    ///   removes the entry.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query the active funding for.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Never panics; this is a read-only storage lookup. No state is
+    /// written and no TTL is extended, so it can be called freely by
+    /// indexers and off-chain callers.
+    ///
+    /// # Returns
+    /// * `Option<u128>` - `Some(amount)` while the invoice is actively
+    ///   funded by this pool, `None` before funding and after
+    ///   repayment/default.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let funded = client.get_funded_amount(&invoice_id);
+    /// ```
+    pub fn get_funded_amount(env: Env, invoice_id: BytesN<32>) -> Option<u128> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id))
+    }
+
     /// Updates the pool's maximum utilization cap.
     ///
     /// The cap bounds the utilization (in basis points) that `fund_invoice`

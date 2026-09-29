@@ -5535,3 +5535,96 @@ fn test_transfer_same_address_no_op_via_generic_client() {
     assert_eq!(before.shares, after.shares);
     assert_eq!(te.pool.get_stats().total_shares, 10_000_000_000);
 }
+
+// ============== GET_FUNDED_AMOUNT VIEW TESTS (issue #839) ==============
+
+// The four states of `DataKey::FundedInvoice`, each reached through the
+// contract's real fund / repayment / default entry points rather than by
+// writing storage directly, so the assertions exercise the same lifecycle an
+// on-chain indexer would observe.
+
+// Unfunded: a listed invoice the pool has never funded has no
+// `FundedInvoice` entry, so the view reports `None`.
+#[test]
+fn test_get_funded_amount_returns_none_for_unfunded_invoice() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
+
+    // An invoice id the pool has never seen at all also reports `None`
+    // (the storage lookup never panics for unknown ids).
+    let unknown_id = BytesN::from_array(&te.env, &[0xAB; 32]);
+    assert_eq!(te.pool.get_funded_amount(&unknown_id), None);
+}
+
+// Funded: after `fund_invoice` commits capital, the view reports exactly
+// the amount that was funded.
+#[test]
+fn test_get_funded_amount_returns_amount_while_funded() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    // face_value=10_000_000_000, discount_bps=200
+    // funded_amount = 10_000_000_000 * (10000 - 200) / 10000 = 9_800_000_000
+    assert_eq!(
+        te.pool.get_funded_amount(&invoice_id),
+        Some(DEFAULT_FUNDED_AMOUNT)
+    );
+}
+
+// Repaid: the full production repayment path (ship -> confirm ->
+// `invoice.repay`, which calls back into `receive_repayment` and
+// `settle_repayment`) removes the `FundedInvoice` entry, so the view
+// returns to `None`.
+#[test]
+fn test_get_funded_amount_returns_none_after_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    assert_eq!(
+        te.pool.get_funded_amount(&invoice_id),
+        Some(DEFAULT_FUNDED_AMOUNT)
+    );
+
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
+    te.invoice.repay(&invoice_id);
+
+    assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
+}
+
+// Defaulted: the default path removes the `FundedInvoice` entry too, so
+// the view returns `None` after `handle_default` completes. This drives
+// `pool.handle_default` (the entry point `invoice.trigger_default`
+// invokes) like the rest of the default-path suite; the direct
+// `invoice.trigger_default` chain is currently pinned to panic on
+// self-re-entrancy by `test_trigger_default_drives_full_pool_and_escrow_chain`.
+#[test]
+fn test_get_funded_amount_returns_none_after_default() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    assert_eq!(
+        te.pool.get_funded_amount(&invoice_id),
+        Some(DEFAULT_FUNDED_AMOUNT)
+    );
+
+    // Advance past escrow's lock-age grace period so `escrow.handle_default`
+    // releases the locked funds back to the pool.
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
+    assert!(te.pool.handle_default(&invoice_id));
+
+    assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
+}
