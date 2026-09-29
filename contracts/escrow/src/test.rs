@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+extern crate alloc;
+
 // Lint baseline (issue #252): every destructured `env` here is consumed by the
 // test body — see `generate_invoice_id(&env, …)`, `Address::generate(&env)`,
 // `env.ledger()`, `env.set_auths(&[])`, `assert_last_event_*(&env, …)`, or by
@@ -7,6 +9,8 @@
 // semantics; do not do so. `cargo clippy --workspace --all-targets -- -D warnings`
 // must remain clean.
 
+use proptest::prelude::*;
+use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
@@ -1217,4 +1221,157 @@ fn test_handle_default_uninitialized_without_record_returns_false() {
     let invoice_id = generate_invoice_id(&env, 104);
     let caller = Address::generate(&env);
     assert!(!client.handle_default(&invoice_id, &caller));
+}
+
+#[derive(Clone, Debug)]
+enum EscrowOperation {
+    Lock { invoice: usize, amount: u128 },
+    ReleaseToPool { invoice: usize },
+    ReleaseToIssuer { invoice: usize },
+    HandleDefault { invoice: usize },
+    UnauthorizedDefault { invoice: usize },
+}
+
+fn escrow_operations() -> impl Strategy<Value = alloc::vec::Vec<EscrowOperation>> {
+    prop::collection::vec((0usize..4, 1u128..=1_000_000_000, 0u8..5), 1..=30).prop_map(
+        |operations| {
+            operations
+                .into_iter()
+                .map(|(invoice, amount, action)| match action {
+                    0 => EscrowOperation::Lock { invoice, amount },
+                    1 => EscrowOperation::ReleaseToPool { invoice },
+                    2 => EscrowOperation::ReleaseToIssuer { invoice },
+                    3 => EscrowOperation::HandleDefault { invoice },
+                    _ => EscrowOperation::UnauthorizedDefault { invoice },
+                })
+                .collect()
+        },
+    )
+}
+
+#[test]
+fn prop_escrow_balance_equals_sum_of_locked_records() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(&escrow_operations(), |operations| {
+            let (env, client, _admin, pool, issuer, usdc_id) = setup();
+            let invoice_ids = [
+                generate_invoice_id(&env, 200),
+                generate_invoice_id(&env, 201),
+                generate_invoice_id(&env, 202),
+                generate_invoice_id(&env, 203),
+            ];
+            let stranger = Address::generate(&env);
+            let mut expected_locks = [None; 4];
+            let mut history_lengths = [0u32; 4];
+
+            for operation in operations {
+                match operation {
+                    EscrowOperation::Lock { invoice, amount } => {
+                        let invoice_id = &invoice_ids[invoice];
+                        if expected_locks[invoice].is_some() {
+                            let balance_before = get_balance(&env, &usdc_id, &client.address);
+                            let history_before = client.get_history(invoice_id).len();
+                            let locked_before = client.get_locked(invoice_id);
+
+                            prop_assert!(client.try_lock(invoice_id, &amount, &issuer).is_err());
+                            prop_assert_eq!(
+                                get_balance(&env, &usdc_id, &client.address),
+                                balance_before
+                            );
+                            prop_assert_eq!(client.get_locked(invoice_id), locked_before);
+                            prop_assert_eq!(client.get_history(invoice_id).len(), history_before);
+                        } else {
+                            prop_assert!(client.lock(invoice_id, &amount, &issuer));
+                            expected_locks[invoice] = Some(amount);
+                        }
+                    }
+                    EscrowOperation::ReleaseToPool { invoice } => {
+                        let invoice_id = &invoice_ids[invoice];
+                        if let Some(amount) = expected_locks[invoice] {
+                            prop_assert!(client.release_to_pool(invoice_id, &amount));
+                            expected_locks[invoice] = None;
+                            prop_assert_eq!(client.get_locked(invoice_id), 0);
+                        } else {
+                            let balance_before = get_balance(&env, &usdc_id, &client.address);
+                            let history_before = client.get_history(invoice_id).len();
+
+                            prop_assert!(client.try_release_to_pool(invoice_id, &1).is_err());
+                            prop_assert_eq!(
+                                get_balance(&env, &usdc_id, &client.address),
+                                balance_before
+                            );
+                            prop_assert_eq!(client.get_locked(invoice_id), 0);
+                            prop_assert_eq!(client.get_history(invoice_id).len(), history_before);
+                        }
+                    }
+                    EscrowOperation::ReleaseToIssuer { invoice } => {
+                        let invoice_id = &invoice_ids[invoice];
+                        if expected_locks[invoice].is_some() {
+                            prop_assert!(client.release_to_issuer(invoice_id, &issuer));
+                            expected_locks[invoice] = None;
+                            prop_assert_eq!(client.get_locked(invoice_id), 0);
+                        } else {
+                            let balance_before = get_balance(&env, &usdc_id, &client.address);
+                            let history_before = client.get_history(invoice_id).len();
+
+                            prop_assert!(client
+                                .try_release_to_issuer(invoice_id, &issuer)
+                                .is_err());
+                            prop_assert_eq!(
+                                get_balance(&env, &usdc_id, &client.address),
+                                balance_before
+                            );
+                            prop_assert_eq!(client.get_locked(invoice_id), 0);
+                            prop_assert_eq!(client.get_history(invoice_id).len(), history_before);
+                        }
+                    }
+                    EscrowOperation::HandleDefault { invoice } => {
+                        let invoice_id = &invoice_ids[invoice];
+                        if expected_locks[invoice].is_some() {
+                            env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+                            prop_assert!(client.handle_default(invoice_id, &pool));
+                            expected_locks[invoice] = None;
+                            prop_assert_eq!(client.get_locked(invoice_id), 0);
+                        } else {
+                            prop_assert!(!client.handle_default(invoice_id, &pool));
+                        }
+                    }
+                    EscrowOperation::UnauthorizedDefault { invoice } => {
+                        let invoice_id = &invoice_ids[invoice];
+                        if expected_locks[invoice].is_some() {
+                            env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+                            let balance_before = get_balance(&env, &usdc_id, &client.address);
+                            let history_before = client.get_history(invoice_id).len();
+                            let locked_before = client.get_locked(invoice_id);
+
+                            prop_assert!(client.try_handle_default(invoice_id, &stranger).is_err());
+                            prop_assert_eq!(
+                                get_balance(&env, &usdc_id, &client.address),
+                                balance_before
+                            );
+                            prop_assert_eq!(client.get_locked(invoice_id), locked_before);
+                            prop_assert_eq!(client.get_history(invoice_id).len(), history_before);
+                        } else {
+                            prop_assert!(!client.handle_default(invoice_id, &stranger));
+                        }
+                    }
+                }
+
+                let mut total_locked = 0i128;
+                for (index, invoice_id) in invoice_ids.iter().enumerate() {
+                    let expected = expected_locks[index].unwrap_or(0);
+                    prop_assert_eq!(client.get_locked(invoice_id), expected);
+                    total_locked += expected as i128;
+
+                    let history_len = client.get_history(invoice_id).len();
+                    prop_assert!(history_len >= history_lengths[index]);
+                    history_lengths[index] = history_len;
+                }
+                prop_assert_eq!(get_balance(&env, &usdc_id, &client.address), total_locked);
+            }
+
+            Ok(())
+        })
+        .unwrap();
 }

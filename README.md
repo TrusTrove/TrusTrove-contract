@@ -161,7 +161,8 @@ get_protocol_fee_bps() → u32
 get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
-transfer(from, to, amount) → ()             ← SEP-41 share transfer
+transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
+transfer_shares(from, to, amount) → ()      ← non-standard legacy alias of transfer
 approve(from, spender, amount, expiration_ledger) → ()   ← SEP-41 grant
 allowance(from, spender) → i128                          ← 0 when spent/expired
 transfer_from(spender, from, to, amount) → ()            ← spender auth, spends grant

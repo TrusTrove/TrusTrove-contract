@@ -14,7 +14,7 @@ use soroban_sdk::{
         storage::{Instance as _, Persistent as _},
         Address as _, Events as _, Ledger,
     },
-    vec, Address, Env, IntoVal, String, Symbol, Vec,
+    vec, Address, Env, IntoVal, String, Symbol, TryIntoVal, Val, Vec,
 };
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
@@ -2141,4 +2141,232 @@ fn prop_metadata_empty_key_or_value_always_rejected() {
             Ok(())
         })
         .unwrap();
+}
+
+// ============== ISSUE #851: BATCH REGISTRATION CONSERVATION PROPTESTS ==============
+
+type BatchEntryPlan = (
+    usize,
+    std::vec::Vec<usize>,
+    std::collections::BTreeSet<usize>,
+    std::vec::Vec<std::vec::Vec<(std::string::String, std::string::String)>>,
+);
+
+/// Plan for a batch registration proptest: a pool of `unique_count` addresses,
+/// a vector of indices into that pool forming the batch (with possible
+/// duplicates), a subset of pool indices to pre-register, and a valid
+/// metadata map for every batch entry.
+fn batch_entry_plan() -> impl Strategy<Value = BatchEntryPlan> {
+    (1usize..=50).prop_flat_map(|unique_count| {
+        prop::collection::vec(0..unique_count, 1..=50).prop_flat_map(move |entry_indices| {
+            let entry_count = entry_indices.len();
+            (
+                Just(unique_count),
+                Just(entry_indices),
+                prop::collection::btree_set(0..unique_count, 0..=unique_count),
+                prop::collection::vec(valid_metadata_entries(), entry_count..=entry_count),
+            )
+        })
+    })
+}
+
+/// Asserts that the most recent `batch_registered` event carries exactly
+/// `expected_registered` and `expected_skipped` in its data payload.
+fn assert_batch_event_counts(env: &Env, expected_registered: u32, expected_skipped: u32) {
+    let all_events = env.events().all();
+    let mut found = false;
+    for i in (0..all_events.len()).rev() {
+        let event = all_events.get(i).expect("event index in range");
+        let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if topics.len() != 1 {
+            continue;
+        }
+        let topic_symbol: Symbol = match topics.get(0).unwrap().try_into_val(env) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if topic_symbol == Symbol::new(env, "batch_registered") {
+            let (registered, skipped): (u32, u32) = event
+                .2
+                .clone()
+                .try_into_val(env)
+                .expect("batch event data should be (u32, u32)");
+            assert_eq!(registered, expected_registered);
+            assert_eq!(skipped, expected_skipped);
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "batch_registered event not found");
+}
+
+/// Runs the batch-registration conservation proptest for either issuers
+/// (`is_buyer = false`) or buyers (`is_buyer = true`).
+fn run_batch_register_prop_test(is_buyer: bool) {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(20));
+    runner
+        .run(
+            &batch_entry_plan(),
+            |(unique_count, entry_indices, preregistered, metadata_per_entry)| {
+                let (env, client) = setup();
+                let admin = Address::generate(&env);
+                client.initialize(&admin);
+
+                // Build the deterministic address pool.
+                let addresses: std::vec::Vec<Address> =
+                    (0..unique_count).map(|_| Address::generate(&env)).collect();
+
+                // Pre-register the chosen addresses and snapshot their profiles
+                // so we can prove skipped entries are unchanged.
+                let mut preregistered_profiles = std::vec::Vec::new();
+                let preregister_metadata = build_metadata(&env, &metadata_per_entry[0]);
+                for idx in &preregistered {
+                    let addr = addresses[*idx].clone();
+                    if is_buyer {
+                        client.register_buyer(&addr, &preregister_metadata);
+                    } else {
+                        client.register_issuer(&addr, &preregister_metadata);
+                    }
+                    preregistered_profiles.push((addr, client.get_profile(&addresses[*idx])));
+                }
+
+                // Build the batch entries from the generated plan.
+                let mut entries = Vec::new(&env);
+                for (i, idx) in entry_indices.iter().enumerate() {
+                    let addr = addresses[*idx].clone();
+                    let metadata = build_metadata(&env, &metadata_per_entry[i]);
+                    entries.push_back((addr, metadata));
+                }
+
+                // Invoke the batch function under test.
+                let skipped = if is_buyer {
+                    client.batch_register_buyers(&entries)
+                } else {
+                    client.batch_register_issuers(&entries)
+                };
+
+                // Recompute the expected outcome from the plan.
+                let mut seen = std::collections::HashSet::new();
+                let mut expected_registered: u32 = 0;
+                let mut expected_skipped = Vec::new(&env);
+                for idx in &entry_indices {
+                    if preregistered.contains(idx) || seen.contains(idx) {
+                        expected_skipped.push_back(addresses[*idx].clone());
+                    } else {
+                        seen.insert(*idx);
+                        expected_registered += 1;
+                    }
+                }
+
+                // Conservation: every entry is either registered or skipped.
+                prop_assert_eq!(
+                    expected_registered + expected_skipped.len(),
+                    entry_indices.len() as u32
+                );
+                prop_assert_eq!(skipped, expected_skipped.clone());
+
+                // Newly registered addresses are Pending with the right role;
+                // pre-registered skipped addresses are untouched.
+                for (i, idx) in entry_indices.iter().enumerate() {
+                    let addr = addresses[*idx].clone();
+                    let already_registered =
+                        preregistered.contains(idx) || entry_indices[..i].contains(idx);
+                    if already_registered {
+                        if let Some((_, before)) =
+                            preregistered_profiles.iter().find(|(a, _)| a == &addr)
+                        {
+                            let after = client.get_profile(&addr);
+                            prop_assert_eq!(before.packed_flags, after.packed_flags);
+                            prop_assert_eq!(before.registered_at, after.registered_at);
+                            prop_assert_eq!(before.metadata.clone(), after.metadata.clone());
+                        }
+                    } else {
+                        let profile = client.get_profile(&addr);
+                        prop_assert_eq!(
+                            profile.role(),
+                            if is_buyer { Role::Buyer } else { Role::Issuer }
+                        );
+                        prop_assert_eq!(
+                            client.get_verification_status(&addr),
+                            VerificationStatus::Pending
+                        );
+                        if is_buyer {
+                            let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
+                            prop_assert_eq!(profile.metadata, expected_metadata);
+                        } else {
+                            prop_assert_eq!(profile.metadata.len(), 0);
+                        }
+                    }
+                }
+
+                // The emitted batch event carries the same counts.
+                assert_batch_event_counts(&env, expected_registered, expected_skipped.len());
+
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn prop_batch_register_issuers_conserves_entries() {
+    run_batch_register_prop_test(false);
+}
+
+#[test]
+fn prop_batch_register_buyers_conserves_entries() {
+    run_batch_register_prop_test(true);
+}
+
+#[test]
+fn test_batch_register_issuers_exceeds_limit_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err(), "batch over 50 entries should panic");
+
+    for (address, _) in entries.iter() {
+        assert_eq!(
+            client.get_verification_status(&address),
+            VerificationStatus::Unregistered
+        );
+    }
+}
+
+#[test]
+fn test_batch_register_buyers_exceeds_limit_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_buyers(&entries);
+    }));
+    assert!(result.is_err(), "batch over 50 entries should panic");
+
+    for (address, _) in entries.iter() {
+        assert_eq!(
+            client.get_verification_status(&address),
+            VerificationStatus::Unregistered
+        );
+    }
 }

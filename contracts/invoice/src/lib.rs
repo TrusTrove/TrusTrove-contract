@@ -1625,16 +1625,42 @@ impl InvoiceContract {
             .unwrap_or(7 * 24 * 60 * 60)
     }
 
-    /// Helper to check authorization for a given address.
-    /// This is invoked dynamically via `try_invoke_contract` in `expire_listing`.
-    /// Rust's dead-code analysis can't see the dynamic dispatch via `Symbol`, so
-    /// the `#[allow(dead_code)]` keeps it in the WASM dispatch table.
-    #[allow(dead_code)]
-    fn check_auth(_env: Env, address: Address) {
-        address.require_auth();
-    }
+    /// Expires a listing whose expiry window has passed.
+    ///
+    /// Callable by the invoice's stored issuer or the contract admin — the
+    /// same dual-caller pattern as `confirm_delivery` and escrow's
+    /// `handle_default`: `caller` must explicitly authorize, and is then
+    /// verified against the stored issuer and admin. The previous
+    /// `try_invoke_contract`-based issuer probe (a private `check_auth`
+    /// self-call) violated Soroban's no-re-entry rule under real signatures,
+    /// so the issuer path could never authenticate outside mocked tests.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice whose listing should be expired.
+    /// * `caller` - The address authorizing the expiry (issuer or admin).
+    ///
+    /// # Auth
+    /// Requires authorization from `caller`, who must be the invoice's stored
+    /// issuer or the stored admin address.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice or admin cannot be found.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Listed`.
+    /// * `InvoiceError::NotAuthorized` if `caller` is neither the issuer nor the admin.
+    /// * `InvoiceError::ListingNotExpired` if `now < listed_at + expiry_window`.
+    /// * `InvoiceError::MathOverflow` if `listed_at + expiry_window` overflows.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the listing is expired.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.expire_listing(&invoice_id, &issuer);
+    /// ```
+    pub fn expire_listing(env: Env, invoice_id: BytesN<32>, caller: Address) -> bool {
+        caller.require_auth();
 
-    pub fn expire_listing(env: Env, invoice_id: BytesN<32>) -> bool {
         let inv_key = DataKey::Invoice(invoice_id.clone());
         let mut invoice: Invoice = env
             .storage()
@@ -1652,16 +1678,8 @@ impl InvoiceContract {
             .get(&DataKey::Admin)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
 
-        let is_issuer = env
-            .try_invoke_contract::<(), soroban_sdk::Error>(
-                &env.current_contract_address(),
-                &Symbol::new(&env, "check_auth"),
-                (invoice.issuer.clone(),).into_val(&env),
-            )
-            .is_ok();
-
-        if !is_issuer {
-            admin.require_auth();
+        if caller != invoice.issuer && caller != admin {
+            panic_with_error!(&env, InvoiceError::NotAuthorized);
         }
 
         let listed_at = invoice.listed_at.unwrap_or(0);

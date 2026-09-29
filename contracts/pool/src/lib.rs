@@ -659,7 +659,63 @@ impl PoolContract {
         usdc_to_return
     }
 
+    /// Moves `amount` LP shares from `from` to `to` — the standard SEP-41
+    /// `transfer` entry point.
+    ///
+    /// This is the function generic `soroban_sdk::token::Client` integrations
+    /// call. It shares one balance-movement path with `transfer_from`
+    /// (`Self::move_shares`), so authorization, balance checks, and the
+    /// `shares_transferred` event behave identically on both routes. A
+    /// previous attempt introduced two competing `transfer` definitions (the
+    /// SEP-41 entry point and `transfer_shares` logic under the same name);
+    /// this single entry point plus the shared `move_shares` helper is the
+    /// duplicate-free resolution.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `from` - The address transferring shares (must authorize).
+    /// * `to` - The address receiving shares.
+    /// * `amount` - The number of shares to move.
+    ///
+    /// # Auth
+    /// Requires authorization from `from` (via `from.require_auth()`).
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidAmount` if `amount` is zero or negative.
+    /// * `NoShares` if `from` has no shares.
+    /// * `InsufficientBalance` if `from` does not own enough shares.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned. Emits `shares_transferred`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let shares_token = soroban_sdk::token::Client::new(&env, &pool_id);
+    /// shares_token.transfer(&lp, &recipient, &5_000_000_000);
+    /// ```
+    pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        Self::require_initialized(&env);
+        from.require_auth();
+        if amount <= 0 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        Self::move_shares(&env, &from, &to, amount as u128);
+        events::shares_transferred(&env, &from, &to, amount);
+        Self::extend_instance_ttl(&env);
+    }
+
     /// Transfers LP shares from one address to another.
+    ///
+    /// # Non-standard
+    /// This is a **legacy, non-standard** entry point kept for existing
+    /// integrators that predate the SEP-41 share-token surface. It performs
+    /// exactly the same checks and movement as the standard
+    /// [`Self::transfer`] (same `from.require_auth()`, same `move_shares`
+    /// path, same events) but takes `amount: i128` purely for historical
+    /// call-signature compatibility. New integrations — especially generic
+    /// `soroban_sdk::token::Client` consumers — must use [`Self::transfer`].
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -708,6 +764,7 @@ impl PoolContract {
         }
 
         Self::move_shares(&env, &from, &to, amount as u128);
+        events::shares_transferred(&env, &from, &to, amount);
         Self::extend_instance_ttl(&env);
     }
 
@@ -870,6 +927,7 @@ impl PoolContract {
         }
 
         Self::move_shares(&env, &from, &to, amount as u128);
+        events::shares_transferred(&env, &from, &to, amount);
         Self::extend_instance_ttl(&env);
     }
 
