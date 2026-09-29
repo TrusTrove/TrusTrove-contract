@@ -2,9 +2,11 @@
 ## Agent Registry Wiring
 
 `AGENT_REGISTRY_CONTRACT` in `.env.example` refers to the agent-registry
-contract from the separate `underwrite-contract` repo. Wiring it in is a
-manual, optional step and is **not** performed by `deploy.sh` or
-`deploy.ps1`:
+contract from the separate `underwrite-contract` repo. `deploy.sh` and
+`deploy.ps1` wire it automatically **when** `AGENT_REGISTRY_CONTRACT` is
+set in `.env`; otherwise the step is skipped with a clear warning.
+
+To wire it manually (or re-wire it after rotating the agent registry):
 
 1. Deploy the agent-registry contract from the `underwrite-contract` repo.
 2. Set `AGENT_REGISTRY_CONTRACT` in your `.env` to its address.
@@ -15,7 +17,8 @@ manual, optional step and is **not** performed by `deploy.sh` or
      --id "$INVOICE_CONTRACT_ID" \
      --source "$DEPLOYER_ACCOUNT" \
      --network "$STELLAR_NETWORK" \
-     -- set_agent_registry_contract --contract "$AGENT_REGISTRY_CONTRACT"
+     -- set_agent_registry_contract \
+        --agent_registry_contract "$AGENT_REGISTRY_CONTRACT"
    ```
 
 This step is only required if agent-attested invoice submission is used;
