@@ -2707,7 +2707,7 @@ fn prop_status_indexes_and_counters_partition_all_invoices() {
                             // the ledger forward before this listing.
                             let listed_at = client.get(id).listed_at.unwrap_or(0);
                             env.ledger().set_timestamp(listed_at + 1);
-                            client.expire_listing(id);
+                            client.expire_listing(id, &issuer);
                             status[target] = 7;
                         }
                         _ => {
