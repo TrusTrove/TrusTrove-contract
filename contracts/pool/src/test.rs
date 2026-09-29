@@ -1,5 +1,7 @@
 #![cfg(test)]
 
+extern crate std;
+
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
@@ -3391,10 +3393,11 @@ mod real_registry_integration {
     use soroban_sdk::{map, Map, String};
     use trusttrove_registry::{
         RegistryContract as RealRegistry, RegistryContractClient as RealRegistryClient,
+        VerificationStatus,
     };
 
     #[test]
-    fn test_full_lifecycle_with_real_registry() {
+    fn test_real_registry_revoke_reinstate_gates_create_and_funding() {
         let env = Env::default();
         env.mock_all_auths_allowing_non_root_auth();
 
@@ -3426,6 +3429,14 @@ mod real_registry_integration {
         registry.verify_profile(&buyer, &true);
         assert!(registry.is_verified(&issuer));
         assert!(registry.is_verified(&buyer));
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Verified
+        );
+        assert_eq!(
+            registry.get_verification_status(&buyer),
+            VerificationStatus::Verified
+        );
 
         // --- Deploy real invoice, escrow, pool wired to the real registry ---
         let usdc_id = env.register_contract(None, MockToken);
@@ -3482,12 +3493,31 @@ mod real_registry_integration {
         );
         invoice.set_agent_registry_contract(&agent_registry_id);
 
-        // --- Drive the full lifecycle: create -> list -> fund -> repay ---
+        // A profile revoked before invoice creation is rejected by the real
+        // invoice contract, then becomes eligible again after reinstate.
         let face_value: u128 = 10_000_000_000;
         let discount_bps: u32 = 200;
         let due_date = env.ledger().timestamp() + 86400;
 
-        pool.deposit(&lp, &face_value);
+        registry.revoke(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Revoked
+        );
+        let create_while_revoked =
+            invoice.try_create(&issuer, &buyer, &face_value, &due_date, &usdc_id);
+        assert!(create_while_revoked.is_err());
+        assert!(
+            std::format!("{create_while_revoked:?}").contains("#4"),
+            "revoked issuer should fail invoice.create with IssuerNotVerified: {create_while_revoked:?}"
+        );
+        registry.reinstate(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Verified
+        );
+
+        pool.deposit(&lp, &(face_value * 3));
 
         let invoice_id = invoice.create(&issuer, &buyer, &face_value, &due_date, &usdc_id);
 
@@ -3515,8 +3545,108 @@ mod real_registry_integration {
 
         invoice.list_for_financing(&invoice_id, &discount_bps);
 
+        // Revocation after listing blocks pool funding. The failed cross-
+        // contract call must leave pool accounting exactly as it was.
+        let stats_before_issuer_rejection = pool.get_stats();
+        registry.revoke(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Revoked
+        );
+        let issuer_funding_rejection = pool.try_fund_invoice(&invoice_id);
+        assert!(issuer_funding_rejection.is_err());
+        assert!(
+            std::format!("{issuer_funding_rejection:?}").contains("#18"),
+            "revoked issuer should fail pool funding with IssuerNotVerified: {issuer_funding_rejection:?}"
+        );
+        let stats_after_issuer_rejection = pool.get_stats();
+        assert_eq!(
+            stats_after_issuer_rejection.total_deposits,
+            stats_before_issuer_rejection.total_deposits
+        );
+        assert_eq!(
+            stats_after_issuer_rejection.total_funded,
+            stats_before_issuer_rejection.total_funded
+        );
+        assert_eq!(
+            stats_after_issuer_rejection.active_invoice_count,
+            stats_before_issuer_rejection.active_invoice_count
+        );
+        assert_eq!(
+            stats_after_issuer_rejection.available_liquidity,
+            stats_before_issuer_rejection.available_liquidity
+        );
+        registry.reinstate(&issuer);
+        assert_eq!(
+            registry.get_verification_status(&issuer),
+            VerificationStatus::Verified
+        );
+
         let funded = pool.fund_invoice(&invoice_id);
         assert!(funded);
+
+        // Repeat the listing/funding gate for a revoked buyer.
+        let second_due_date = env.ledger().timestamp() + 86400;
+        let second_invoice_id =
+            invoice.create(&issuer, &buyer, &face_value, &second_due_date, &usdc_id);
+        let second_payload = trusttrove_invoice::AttestationPayload {
+            domain_separator: BytesN::from_array(
+                &env,
+                &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
+            ),
+            invoice_id: second_invoice_id.clone(),
+            risk_score: 5000,
+            evidence_hash: BytesN::from_array(&env, &[8u8; 32]),
+            agent_id: test_agent_id(&env),
+            nonce: 2,
+        };
+        let second_payload_bytes = second_payload.to_xdr(&env);
+        let second_digest = env.crypto().keccak256(&second_payload_bytes).to_array();
+        let (second_sig, second_recid) = test_agent_signing_key()
+            .sign_prehash_recoverable(&second_digest)
+            .unwrap();
+        let mut second_sig_bytes = [0u8; 65];
+        second_sig_bytes[..64].copy_from_slice(&second_sig.to_bytes());
+        second_sig_bytes[64] = second_recid.to_byte();
+        let second_signature = BytesN::from_array(&env, &second_sig_bytes);
+        invoice.submit_attestation(&second_invoice_id, &second_payload_bytes, &second_signature);
+        invoice.list_for_financing(&second_invoice_id, &discount_bps);
+
+        let stats_before_buyer_rejection = pool.get_stats();
+        registry.revoke(&buyer);
+        assert_eq!(
+            registry.get_verification_status(&buyer),
+            VerificationStatus::Revoked
+        );
+        let buyer_funding_rejection = pool.try_fund_invoice(&second_invoice_id);
+        assert!(buyer_funding_rejection.is_err());
+        assert!(
+            std::format!("{buyer_funding_rejection:?}").contains("#19"),
+            "revoked buyer should fail pool funding with BuyerNotVerified: {buyer_funding_rejection:?}"
+        );
+        let stats_after_buyer_rejection = pool.get_stats();
+        assert_eq!(
+            stats_after_buyer_rejection.total_deposits,
+            stats_before_buyer_rejection.total_deposits
+        );
+        assert_eq!(
+            stats_after_buyer_rejection.total_funded,
+            stats_before_buyer_rejection.total_funded
+        );
+        assert_eq!(
+            stats_after_buyer_rejection.active_invoice_count,
+            stats_before_buyer_rejection.active_invoice_count
+        );
+        assert_eq!(
+            stats_after_buyer_rejection.available_liquidity,
+            stats_before_buyer_rejection.available_liquidity
+        );
+        registry.reinstate(&buyer);
+        assert_eq!(
+            registry.get_verification_status(&buyer),
+            VerificationStatus::Verified
+        );
+        assert!(pool.fund_invoice(&second_invoice_id));
 
         let record = invoice.get(&invoice_id);
         assert_eq!(record.status, trusttrove_invoice::InvoiceStatus::Funded);
