@@ -1615,6 +1615,164 @@ fn test_repay_early_against_real_pool_and_escrow() {
     assert_eq!(te.invoice.get_status(&invoice_id), 5); // Repaid
 }
 
+// Issue #876: nonzero protocol fees must also flow through the real early
+// repayment path, including the subsequent LP withdrawal.
+#[test]
+fn test_nonzero_protocol_fee_with_real_early_repayment_and_withdrawal() {
+    let te = setup();
+    let deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1_000u32;
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+
+    let elapsed = 43_200u64;
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + elapsed);
+    let earned = DEFAULT_YIELD_AMOUNT * elapsed as u128 / 86_400;
+    let fee = earned * fee_bps as u128 / 10_000;
+    let lp_yield = earned - fee;
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let treasury_before = usdc.balance(&treasury);
+
+    assert!(te.invoice.repay_early(&invoice_id));
+    assert_eq!(usdc.balance(&treasury) - treasury_before, fee as i128);
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_yield_distributed, lp_yield);
+    assert_eq!(stats.total_deposits, deposit + lp_yield);
+    assert_eq!(stats.total_funded, 0);
+    assert_eq!(stats.active_invoice_count, 0);
+
+    let position = te.pool.get_lp_position(&te.lp);
+    let before_withdraw = usdc.balance(&te.lp);
+    let returned = te.pool.withdraw(&te.lp, &position.shares);
+    assert_eq!(returned, deposit + lp_yield);
+    assert_eq!(usdc.balance(&te.lp) - before_withdraw, returned as i128);
+    assert_eq!(te.pool.get_stats().total_deposits, 0);
+    assert_eq!(te.invoice.get_status(&invoice_id), 5);
+}
+
+// Issue #878: interleave several real invoices while checking shared pool
+// counters and the price used to admit a late LP after yield and loss.
+#[test]
+fn test_multi_invoice_mixed_repayment_default_and_late_depositor() {
+    let te = setup();
+    let lp2 = Address::generate(&te.env);
+    let lp3 = Address::generate(&te.env);
+    let lp2_key = TKey(lp2.clone());
+    let lp3_key = TKey(lp3.clone());
+    for (lp, key) in [(&lp2, &lp2_key), (&lp3, &lp3_key)] {
+        te.env.as_contract(&te.usdc_id, || {
+            te.env
+                .storage()
+                .persistent()
+                .set(key, &100_000_000_000_000i128);
+        });
+        te.registry.register(lp);
+    }
+    te.pool.set_max_utilization(&te.admin, &6_000);
+    te.pool.deposit(&te.lp, &40_000_000_000);
+    te.pool.deposit(&lp2, &20_000_000_000);
+
+    let repaid = create_and_list(&te, &te.usdc_id);
+    let defaulted = create_and_list(&te, &te.usdc_id);
+    let active = create_and_list(&te, &te.usdc_id);
+    for id in [&repaid, &defaulted, &active] {
+        te.pool.fund_invoice(id);
+        let stats = te.pool.get_stats();
+        assert_eq!(
+            stats.available_liquidity,
+            stats.total_deposits - stats.total_funded
+        );
+        assert!(stats.utilization_rate_bps <= stats.max_utilization_bps);
+    }
+    assert_eq!(te.pool.get_stats().active_invoice_count, 3);
+    assert_eq!(te.pool.get_stats().total_funded, DEFAULT_FUNDED_AMOUNT * 3);
+
+    te.invoice.mark_shipped(&repaid);
+    te.invoice.confirm_delivery(&repaid, &te.issuer);
+    te.invoice.confirm_delivery(&repaid, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_200);
+    assert!(te.invoice.repay_early(&repaid));
+    let earned = DEFAULT_YIELD_AMOUNT / 2;
+    let after_repay = te.pool.get_stats();
+    assert_eq!(after_repay.total_yield_distributed, earned);
+    assert_eq!(after_repay.active_invoice_count, 2);
+    assert_eq!(
+        after_repay.available_liquidity,
+        after_repay.total_deposits - after_repay.total_funded
+    );
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_201);
+    assert!(te.pool.handle_default(&defaulted));
+    assert_eq!(te.invoice.get_status(&defaulted), 6);
+    let after_default = te.pool.get_stats();
+    assert_eq!(after_default.total_loss_realised, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(after_default.active_invoice_count, 1);
+    assert_eq!(
+        after_default.available_liquidity,
+        after_default.total_deposits - after_default.total_funded
+    );
+    assert_eq!(after_default.total_yield_distributed, earned);
+
+    let lp1_before = te.pool.get_lp_position(&te.lp);
+    let lp2_before = te.pool.get_lp_position(&lp2);
+    let before_late_deposit = te.pool.get_stats();
+    te.pool.deposit(&lp3, &10_000_000_000);
+    let lp3_position = te.pool.get_lp_position(&lp3);
+    assert_eq!(
+        lp3_position.shares,
+        10_000_000_000 * before_late_deposit.total_shares / before_late_deposit.total_deposits
+    );
+    assert_eq!(lp3_position.yield_earned, 0);
+    assert!(lp3_position.usdc_value <= 10_000_000_000);
+    assert!(10_000_000_000 - lp3_position.usdc_value <= 1);
+    assert_eq!(te.pool.get_lp_position(&te.lp).shares, lp1_before.shares);
+    assert_eq!(te.pool.get_lp_position(&lp2).shares, lp2_before.shares);
+
+    for (index, lp) in [&te.lp, &lp2, &lp3].iter().enumerate() {
+        let position = te.pool.get_lp_position(lp);
+        if position.shares > 0 {
+            let stats = te.pool.get_stats();
+            let position_value = position.shares * stats.total_deposits / stats.total_shares;
+            let remaining_lps = (3 - index) as u128;
+            let withdrawal_value =
+                core::cmp::min(position_value, stats.available_liquidity / remaining_lps);
+            let withdrawal_shares = withdrawal_value * stats.total_shares / stats.total_deposits;
+            if withdrawal_shares > 0 {
+                te.pool.withdraw(lp, &withdrawal_shares);
+                let after = te.pool.get_stats();
+                assert_eq!(
+                    after.available_liquidity,
+                    after.total_deposits - after.total_funded
+                );
+                assert_eq!(after.total_yield_distributed, earned);
+                assert_eq!(after.total_loss_realised, DEFAULT_FUNDED_AMOUNT);
+                assert_eq!(after.active_invoice_count, 1);
+            }
+        }
+    }
+    let final_stats = te.pool.get_stats();
+    assert_eq!(
+        final_stats.available_liquidity,
+        final_stats.total_deposits - final_stats.total_funded
+    );
+    assert_eq!(final_stats.active_invoice_count, 1);
+    assert_eq!(final_stats.total_yield_distributed, earned);
+    assert_eq!(final_stats.total_loss_realised, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(te.invoice.get_status(&active), 2);
+}
 // ============== MULTI-LP TESTS ==============
 
 #[test]
