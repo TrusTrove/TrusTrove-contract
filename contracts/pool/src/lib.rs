@@ -83,11 +83,10 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `AlreadyInitialized` if the contract has already been initialized.
-    /// * `InvalidConfiguration` if any two of `admin`, `invoice_contract`,
-    ///   `escrow_contract`, `funding_asset`, and `registry_contract` are the
-    ///   same address, or if `share_name`/`share_symbol` is empty (a wallet
-    ///   that cannot render the share token is treated as a misconfigured
-    ///   deploy rather than a pool to be lived with).
+    /// * `InvalidConfiguration` if core contract addresses collide, if
+    ///   `treasury` equals the pool itself or any settlement contract address,
+    ///   or if `share_name`/`share_symbol` is empty (a wallet that cannot render
+    ///   the share token is treated as a misconfigured deploy).
     /// * `EscrowAssetMismatch` if `escrow_contract`'s configured USDC asset
     ///   does not match `funding_asset`.
     ///
@@ -137,6 +136,14 @@ impl PoolContract {
         if share_name.is_empty() || share_symbol.is_empty() {
             panic_with_error!(&env, PoolError::InvalidConfiguration);
         }
+        Self::assert_valid_treasury(
+            &env,
+            &treasury,
+            &invoice_contract,
+            &escrow_contract,
+            &funding_asset,
+            &registry_contract,
+        );
 
         // Cross-check that the escrow contract being wired in was itself
         // initialized with the same funding_asset. A mismatch here would only
@@ -1647,6 +1654,8 @@ impl PoolContract {
     /// # Panics
     /// * `NotInitialized` if the pool is not initialized.
     /// * `FeeTooHigh` if `fee_bps` exceeds `MAX_PROTOCOL_FEE_BPS` (2000 bps).
+    /// * `InvalidConfiguration` if `treasury` is the pool, invoice, escrow,
+    ///   registry, or funding-asset address.
     ///
     /// # Returns
     /// * `bool` - `true` when the fee is updated.
@@ -1657,6 +1666,18 @@ impl PoolContract {
         if fee_bps > MAX_PROTOCOL_FEE_BPS {
             panic_with_error!(&env, PoolError::FeeTooHigh);
         }
+        let invoice_contract = Self::invoice_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let escrow_contract = Self::escrow_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        Self::assert_valid_treasury(
+            &env,
+            &treasury,
+            &invoice_contract,
+            &escrow_contract,
+            &Self::funding_asset(&env),
+            &Self::registry_contract(&env),
+        );
         let old_fee_bps = env
             .storage()
             .instance()
@@ -1706,6 +1727,26 @@ impl PoolContract {
     fn require_initialized(env: &Env) {
         if !env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(env, PoolError::NotInitialized);
+        }
+    }
+
+    /// Prevents protocol fees from being routed to the pool itself or to one
+    /// of the contracts that participate in its settlement wiring.
+    fn assert_valid_treasury(
+        env: &Env,
+        treasury: &Address,
+        invoice_contract: &Address,
+        escrow_contract: &Address,
+        funding_asset: &Address,
+        registry_contract: &Address,
+    ) {
+        if treasury == &env.current_contract_address()
+            || treasury == invoice_contract
+            || treasury == escrow_contract
+            || treasury == funding_asset
+            || treasury == registry_contract
+        {
+            panic_with_error!(env, PoolError::InvalidConfiguration);
         }
     }
 

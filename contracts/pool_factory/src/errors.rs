@@ -10,4 +10,7 @@ pub enum PoolFactoryError {
     /// contract it was handed, because that invoice contract has not been
     /// initialized (or is not an invoice contract at all).
     InvoiceNotInitialized = 4,
+    /// `register_existing_pool` was given an address that does not expose a
+    /// pool initialized for the requested asset.
+    InvalidPool = 5,
 }

@@ -174,6 +174,20 @@ fn setup() -> Setup {
     (env, client, issuer, buyer, registry_client, usdc_asset)
 }
 
+fn assert_wiring_setter_rejects(
+    env: &Env,
+    client: &InvoiceContractClient,
+    method: &str,
+    candidate: &Address,
+) {
+    let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
+        &client.address,
+        &Symbol::new(env, method),
+        (candidate.clone(),).into_val(env),
+    );
+    assert!(result.is_err(), "{method} accepted a conflicting address");
+}
+
 #[allow(dead_code)]
 type SetupWithAdmin = (
     Env,
@@ -1813,6 +1827,76 @@ fn test_set_pool_contract_emits_event() {
             .into_val(&env)
     );
     <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
+fn test_set_pool_contract_rejects_conflicting_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let admin = client.get_admin().unwrap();
+    let registry = client.get_registry_contract().unwrap();
+    let escrow = Address::generate(&env);
+    let agent_registry = Address::generate(&env);
+    client.set_escrow_contract(&escrow);
+    client.set_agent_registry_contract(&agent_registry);
+
+    for candidate in [
+        admin,
+        client.address.clone(),
+        registry,
+        escrow,
+        agent_registry,
+    ] {
+        assert_wiring_setter_rejects(&env, &client, "set_pool_contract", &candidate);
+    }
+}
+
+#[test]
+fn test_set_escrow_contract_rejects_conflicting_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let admin = client.get_admin().unwrap();
+    let registry = client.get_registry_contract().unwrap();
+    let pool = Address::generate(&env);
+    let agent_registry = Address::generate(&env);
+    client.set_pool_contract(&pool);
+    client.set_agent_registry_contract(&agent_registry);
+
+    for candidate in [
+        admin,
+        client.address.clone(),
+        registry,
+        pool,
+        agent_registry,
+    ] {
+        assert_wiring_setter_rejects(&env, &client, "set_escrow_contract", &candidate);
+    }
+}
+
+#[test]
+fn test_set_agent_registry_contract_rejects_conflicting_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let admin = client.get_admin().unwrap();
+    let registry = client.get_registry_contract().unwrap();
+    let pool = Address::generate(&env);
+    let escrow = Address::generate(&env);
+    client.set_pool_contract(&pool);
+    client.set_escrow_contract(&escrow);
+
+    for candidate in [admin, client.address.clone(), registry, pool, escrow] {
+        assert_wiring_setter_rejects(&env, &client, "set_agent_registry_contract", &candidate);
+    }
+}
+
+#[test]
+fn test_initialize_rejects_conflicting_registry_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    for registry in [admin.clone(), contract_id.clone()] {
+        assert!(client.try_initialize(&admin, &registry).is_err());
+    }
 }
 
 #[test]

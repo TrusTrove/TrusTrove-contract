@@ -2995,6 +2995,43 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
     }
 }
 
+#[test]
+fn test_initialize_rejects_treasury_aliases() {
+    let te = setup();
+    let invoice_id = te.invoice.address.clone();
+    let registry_id = te.registry.address.clone();
+
+    // Each attempt gets a fresh pool address so the test covers treasury
+    // aliases to the pool, invoice, escrow, registry, and funding asset.
+    for role in 0..5 {
+        let pool_id = te.env.register_contract(None, PoolContract);
+        let treasury = match role {
+            0 => pool_id.clone(),
+            1 => invoice_id.clone(),
+            2 => te.escrow_id.clone(),
+            3 => registry_id.clone(),
+            _ => te.usdc_id.clone(),
+        };
+        let pool = PoolContractClient::new(&te.env, &pool_id);
+        let result = pool.try_initialize(
+            &te.admin,
+            &invoice_id,
+            &te.escrow_id,
+            &te.usdc_id,
+            &registry_id,
+            &treasury,
+            &DEFAULT_MIN_INITIAL_DEPOSIT,
+            &String::from_str(&te.env, TEST_SHARE_NAME),
+            &String::from_str(&te.env, TEST_SHARE_SYMBOL),
+            &DEFAULT_SHARE_DECIMALS,
+        );
+        assert!(
+            result.is_err(),
+            "treasury alias for role {role} was accepted"
+        );
+    }
+}
+
 // ============== ISSUE #265: PREVENT ALREADYFUNDED SILENT SHADOWING ==============
 
 // If a `FundedInvoice` entry already exists for an invoice id, fund_invoice
@@ -4464,6 +4501,25 @@ fn test_set_protocol_fee_at_max_cap_succeeds() {
     assert!(ok);
     assert_eq!(te.pool.get_protocol_fee_bps(), 2000);
     assert_eq!(te.pool.get_treasury(), treasury);
+}
+
+#[test]
+fn test_set_protocol_fee_rejects_treasury_aliases() {
+    let te = setup();
+    let forbidden_treasuries = [
+        te.pool_id.clone(),
+        te.invoice.address.clone(),
+        te.escrow_id.clone(),
+        te.registry.address.clone(),
+        te.usdc_id.clone(),
+    ];
+
+    for treasury in forbidden_treasuries {
+        assert!(
+            te.pool.try_set_protocol_fee(&500, &treasury).is_err(),
+            "treasury alias was accepted"
+        );
+    }
 }
 
 // ============== ISSUE #770: DEFAULT-ZERO PROTOCOL FEE ACCOUNTING REGRESSION ==============

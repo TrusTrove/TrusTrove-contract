@@ -630,13 +630,63 @@ Emitted when the registry admin role is transferred.
 
 ---
 
+## Pool Factory Contract
+
+**Contract:** `pool_factory_contract`
+**Source:** `contracts/pool_factory/src/events.rs`
+
+### `contract_initialized`
+
+Emitted when the pool factory is initialized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"contract_initialized"` |
+| `topic[1]` | `Address` | Admin address |
+| **Data** | `()` | None |
+
+**Emitted by:** `initialize()` in `contracts/pool_factory/src/lib.rs`
+
+---
+
+### `pool_instance_created`
+
+Emitted when `register_asset()` deploys and initializes a new pool instance.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"pool_instance_created"` |
+| `topic[1]` | `Address` | Registered asset address |
+| **Data** | `Address` | Newly deployed pool address |
+
+**Emitted by:** `register_asset()` in `contracts/pool_factory/src/lib.rs`
+
+---
+
+### `existing_pool_registered`
+
+Emitted when `register_existing_pool()` registers a pre-existing pool for an asset.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"existing_pool_registered"` |
+| `topic[1]` | `Address` | Registered asset address |
+| **Data** | `Address` | Existing pool address |
+
+**Emitted by:** `register_existing_pool()` in `contracts/pool_factory/src/lib.rs`
+
+---
+
 ## Cross-Reference: Duplicate Event Names
 
 Note that some event names appear in multiple contracts. When indexing, filter by contract address:
 
 | Event Name | Contracts |
 |------------|-----------|
-| `contract_initialized` | `invoice_contract`, `registry_contract` |
+| `contract_initialized` | `invoice_contract`, `registry_contract`, `pool_factory_contract` |
 | `invoice_funded` | `invoice_contract`, `pool_contract` |
 | `invoice_defaulted` | `invoice_contract`, `pool_contract` |
 | `ownership_transferred` | All four contracts |
