@@ -671,32 +671,17 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::Counter, &next_counter);
 
+        // Build the preimage with a handful of host calls: `append` copies a
+        // whole XDR blob and `extend_from_array` copies a fixed-size integer,
+        // instead of one `push_back` (one host call) per byte. The component
+        // order is unchanged, so invoice ids stay byte-for-byte identical.
         let mut hash_input = Bytes::new(&env);
-        let issuer_xdr = issuer.clone().to_xdr(&env);
-        let buyer_xdr = buyer.clone().to_xdr(&env);
-
-        // Safely append all XDR bytes without assuming a fixed length
-        for b in issuer_xdr.iter() {
-            hash_input.push_back(b);
-        }
-        for b in buyer_xdr.iter() {
-            hash_input.push_back(b);
-        }
-        for b in face_value.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        for b in due_date.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        for b in counter.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        {
-            let asset_xdr = funding_asset.clone().to_xdr(&env);
-            for b in asset_xdr.iter() {
-                hash_input.push_back(b);
-            }
-        }
+        hash_input.append(&issuer.clone().to_xdr(&env));
+        hash_input.append(&buyer.clone().to_xdr(&env));
+        hash_input.extend_from_array(&face_value.to_be_bytes());
+        hash_input.extend_from_array(&due_date.to_be_bytes());
+        hash_input.extend_from_array(&counter.to_be_bytes());
+        hash_input.append(&funding_asset.clone().to_xdr(&env));
         let invoice_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
 
         let invoice = Invoice {

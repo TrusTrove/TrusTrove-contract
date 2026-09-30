@@ -7,7 +7,7 @@ use soroban_sdk::{
     testutils::{Address as _, Events as _, Ledger},
     token,
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, Bytes, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
 };
 
 use crate::{
@@ -645,6 +645,48 @@ fn test_create_invoice_with_verified_parties() {
     assert_eq!(invoice.funding_pool, None);
     assert!(!invoice.issuer_confirmed);
     assert!(!invoice.buyer_confirmed);
+}
+
+/// Golden vector for the invoice id (#834).
+///
+/// `create` builds the SHA-256 preimage with a handful of host calls
+/// (`Bytes::append` + `extend_from_array`) instead of one `push_back` per byte.
+/// This test rebuilds the preimage with the **pre-refactor** byte-at-a-time
+/// algorithm and asserts the resulting id is byte-for-byte identical, so the
+/// optimization cannot silently change invoice ids.
+#[test]
+fn test_create_invoice_id_matches_pre_refactor_preimage() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let face_value: u128 = 1_000_000_000;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+
+    // Reference preimage: issuer_xdr || buyer_xdr || face_value || due_date ||
+    // counter || asset_xdr, appended one byte at a time. The first invoice on a
+    // fresh contract hashes counter = 0 (the value read before the increment).
+    let mut reference = Bytes::new(&env);
+    for b in issuer.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    for b in buyer.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    for b in face_value.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in due_date.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in 0u64.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in usdc.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    let expected: BytesN<32> = env.crypto().sha256(&reference).into();
+
+    assert_eq!(invoice_id, expected, "invoice id changed across the refactor");
 }
 
 #[test]
