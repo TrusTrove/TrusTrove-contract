@@ -4417,40 +4417,54 @@ fn prop_protocol_fee_split_conserves_yield_for_all_fee_bps() {
                 // Yield conservation: the two halves of the split reassemble
                 // the whole yield, both as computed and as observed in the
                 // treasury balance and TotalYieldDistributed.
-                prop_assert_eq!(
+                            prop_assert_eq!(
                     protocol_cut + lp_yield,
                     yield_amount,
-                    "protocol cut {protocol_cut} + LP yield {lp_yield} must equal yield {yield_amount}"
+                    "protocol cut {} + LP yield {} must equal yield {}",
+                    protocol_cut,
+                    lp_yield,
+                    yield_amount
                 );
                 prop_assert_eq!(
                     treasury_delta + yield_delta,
                     yield_amount,
-                    "observed treasury delta {treasury_delta} + yield delta {yield_delta} must equal yield {yield_amount}"
+                    "observed treasury delta {} + yield delta {} must equal yield {}",
+                    treasury_delta,
+                    yield_delta,
+                    yield_amount
                 );
                 // The cut can never exceed fee_bps of the yield.
                 prop_assert!(
                     protocol_cut <= (yield_amount * (fee_bps as i128)) / 10_000,
-                    "protocol cut {protocol_cut} exceeds {fee_bps} bps of yield {yield_amount}"
+                    "protocol cut {} exceeds {} bps of yield {}",
+                    protocol_cut,
+                    fee_bps,
+                    yield_amount
                 );
                 // Treasury balance delta equals the protocol cut.
                 prop_assert_eq!(
                     treasury_delta,
                     protocol_cut,
-                    "treasury delta {treasury_delta} must equal protocol cut {protocol_cut}"
+                    "treasury delta {} must equal protocol cut {}",
+                    treasury_delta,
+                    protocol_cut
                 );
                 // TotalYieldDistributed delta equals the LP yield.
                 prop_assert_eq!(
                     yield_delta,
                     lp_yield,
-                    "yield delta {yield_delta} must equal LP yield {lp_yield}"
+                    "yield delta {} must equal LP yield {}",
+                    yield_delta,
+                    lp_yield
                 );
                 // TotalDeposits grows by exactly the LP share of the yield.
                 prop_assert_eq!(
                     deposits_delta,
                     lp_yield,
-                    "deposits delta {deposits_delta} must equal LP yield {lp_yield}"
+                    "deposits delta {} must equal LP yield {}",
+                    deposits_delta,
+                    lp_yield
                 );
-
                 // Zero-fee edge case: nothing may reach the treasury and the
                 // full yield must land in TotalDeposits.
                 if fee_bps == 0 {
