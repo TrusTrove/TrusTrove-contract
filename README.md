@@ -74,10 +74,25 @@ Tracks verified SME issuers and buyers.
 initialize(admin)
 register_issuer(address, metadata) → bool
 register_buyer(address, metadata) → bool
+batch_register_issuers(entries) → Vec<Address>   ← admin only, max 50, returns skipped
+batch_register_buyers(entries) → Vec<Address>    ← admin only, max 50, returns skipped
 is_verified(address) → bool
 get_profile(address) → Profile
+get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
+list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
 ```
+
+**The registry is enumerable without replaying events.** Every registration
+path — single and batch, issuer and buyer — appends the new address to a
+per-role index (`ProfileIndex(role, n)`) and bumps a per-role counter
+(`ProfileCount(role)`), both TTL-extended like a profile entry. So an indexer
+or admin dashboard can call `get_profile_count(role)` to size its last page and
+then page through `list_profiles(role, start, limit)` with `limit ≤ 50`
+(`PageSizeExceeded` above the cap). Skipped/already-registered batch entries
+are never indexed twice, pages are contiguous and non-overlapping, and revoked
+profiles remain enumerated (revocation flips verification, it does not
+deregister the profile).
 
 **Revocation is prospective, not retroactive.** `is_verified()` is re-checked
 at every point where new business gets committed — `invoice.create()`,
