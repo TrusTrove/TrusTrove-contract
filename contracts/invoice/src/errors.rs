@@ -28,4 +28,5 @@ pub enum InvoiceError {
     VerificationRequired = 23,
     CrossContractCallFailed = 24,
     RepaymentExceedsBalance = 25,
+    InvalidConfiguration = 26,
 }
