@@ -1794,6 +1794,43 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id).status as u32
     }
 
+    /// Returns `true` when `invoice_id` is currently a member of `status`'s
+    /// index.
+    ///
+    /// Backed by [`DataKey::StatusMembership`], so the check is O(1): a single
+    /// persistent-storage read whose cost does not grow with the number of
+    /// invoices sharing that status. The marker is written when an invoice
+    /// enters a status (`create` / [`Self::list_for_financing`] and every
+    /// status transition routed through `move_status_index`) and removed when
+    /// it leaves, so a `false` result means the invoice is not — or is no
+    /// longer — in that status.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `status` - The status to check membership against.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic. An unknown `invoice_id` simply returns `false`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if the invoice currently belongs to `status`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let listed = client.has_status_membership(&InvoiceStatus::Listed, &invoice_id);
+    /// ```
+    pub fn has_status_membership(
+        env: Env,
+        status: InvoiceStatus,
+        invoice_id: BytesN<32>,
+    ) -> bool {
+        read_status_membership(&env, status, &invoice_id)
+    }
+
     /// Returns the face value of an invoice.
     ///
     /// # Arguments
@@ -2366,6 +2403,11 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
 
 /// Adds an invoice ID to the status index if not already present.
 ///
+/// Duplicate detection uses the O(1) [`DataKey::StatusMembership`] marker
+/// instead of scanning every `StatusIndexEntry` row, and the marker is written
+/// (with the usual `TTL_THRESHOLD`/`TTL_EXTEND_TO` extension) as soon as the
+/// entry is appended.
+///
 /// # Arguments
 /// * `env` - The Soroban environment.
 /// * `status` - The invoice status.
@@ -2377,22 +2419,15 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
 /// # Returns
 /// * `()` - No value is returned.
 fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
+    // O(1) membership check — the previous implementation looped over every
+    // `StatusIndexEntry` of this status to find duplicates (issue #831).
+    if read_status_membership(env, status, invoice_id) {
+        return; // Already a member, skip duplicate
+    }
+
     let status_u32 = status as u32;
     let count_key = DataKey::StatusIndexCount(status_u32);
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Check if invoice_id already exists in this status index
-    for i in 0..count {
-        let entry_key = DataKey::StatusIndexEntry(status_u32, i);
-        let existing_id: BytesN<32> = env
-            .storage()
-            .persistent()
-            .get(&entry_key)
-            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
-        if existing_id == *invoice_id {
-            return; // Already exists, skip duplicate
-        }
-    }
 
     let entry_key = DataKey::StatusIndexEntry(status_u32, count);
     env.storage().persistent().set(&entry_key, invoice_id);
@@ -2403,13 +2438,17 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
     env.storage()
         .persistent()
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    write_status_membership(env, status, invoice_id);
 }
 
 /// Moves an invoice ID from one status index to another, with idempotency for replayed transitions.
 ///
-/// This function checks if the invoice is already in the target status index before performing
-/// any operations. If already present, it returns early without modifying counts or indexes,
-/// making replayed transitions a no-op.
+/// Both sides of the move are driven by the O(1) [`DataKey::StatusMembership`]
+/// marker: the target status is checked with a single storage read (the
+/// previous implementation scanned every `StatusIndexEntry` row of the target
+/// status), the marker for `from` is removed, and `extend_status_index` writes
+/// the marker for `to`. A replayed transition therefore returns early without
+/// modifying counts or indexes.
 ///
 /// # Arguments
 /// * `env` - The Soroban environment.
@@ -2423,25 +2462,58 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
 /// # Returns
 /// * `()` - No value is returned.
 fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to: InvoiceStatus) {
-    // Check if invoice is already in the target status index (idempotency for replayed transitions)
-    let to_u32 = to as u32;
-    let count_key = DataKey::StatusIndexCount(to_u32);
-    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-    for i in 0..count {
-        let entry_key = DataKey::StatusIndexEntry(to_u32, i);
-        let existing_id: BytesN<32> = env
-            .storage()
-            .persistent()
-            .get(&entry_key)
-            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
-        if existing_id == *invoice_id {
-            return; // Already in target index, skip all operations
-        }
+    // O(1) idempotency check for replayed transitions: membership in the
+    // target status means every step below has already been applied.
+    if read_status_membership(env, to, invoice_id) {
+        return;
     }
 
     decrement_status_count(env, from);
     increment_status_count(env, to);
+    clear_status_membership(env, from, invoice_id);
     extend_status_index(env, to, invoice_id);
+}
+
+/// Storage key for a status-membership marker.
+///
+/// `DataKey::StatusMembership` is declared as `(InvoiceStatus, u64)`, so the
+/// 32-byte invoice ID is projected onto its first 8 bytes (big-endian). The
+/// projection is pure and depends only on `invoice_id`, which lets every status
+/// transition derive the marker key directly — no extra lookup required.
+fn status_membership_key(status: InvoiceStatus, invoice_id: &BytesN<32>) -> DataKey {
+    let id_bytes = invoice_id.to_array();
+    let mut short_id = [0u8; 8];
+    short_id.copy_from_slice(&id_bytes[..8]);
+    DataKey::StatusMembership(status, u64::from_be_bytes(short_id))
+}
+
+/// O(1) membership probe: one persistent-storage read, independent of how many
+/// invoices share `status`.
+fn read_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) -> bool {
+    env.storage()
+        .persistent()
+        .get::<_, bool>(&status_membership_key(status, invoice_id))
+        .unwrap_or(false)
+}
+
+/// Marks `invoice_id` as a member of `status`, extending the entry's TTL with
+/// the same threshold/extension policy as the rest of invoice storage.
+fn write_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
+    let key = status_membership_key(status, invoice_id);
+    env.storage().persistent().set(&key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+}
+
+/// Removes the membership marker when an invoice leaves `status`.
+///
+/// Removing a marker that is already absent (e.g. legacy rows written before
+/// markers existed) is a silent no-op.
+fn clear_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
+    env.storage()
+        .persistent()
+        .remove(&status_membership_key(status, invoice_id));
 }
 
 fn increment_status_count(env: &Env, status: InvoiceStatus) {
