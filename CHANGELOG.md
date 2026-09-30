@@ -18,6 +18,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (#757)
 - `pool`: `allowance_approved` event emitted on every successful
   `approve` (#756)
+- `pool`: `get_funded_amount(invoice_id)` read-only view returning
+  `Option<u128>` for the pool's active funding of an invoice: `Some(amount)`
+  while funded, `None` before funding and after repayment/default (#839)
 - `pool`: `protocol_fee_updated` event assertion coverage for
   `set_protocol_fee` (#767)
 - Deployment scripts now pass the full `pool.initialize` argument list
