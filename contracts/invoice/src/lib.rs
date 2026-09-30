@@ -1902,6 +1902,30 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id).funding_asset
     }
 
+    /// Returns the funded amount of an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotInitialized` if the contract has not been initialized.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `u128` - The amount funded against this invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let funded = client.get_funded_amount(&invoice_id);
+    /// ```
+    pub fn get_funded_amount(env: Env, invoice_id: BytesN<32>) -> u128 {
+        Self::get_invoice(&env, invoice_id).funded_amount
+    }
+
     /// Retrieves the full invoice record by ID.
     ///
     /// # Arguments

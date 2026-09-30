@@ -3265,6 +3265,7 @@ fn test_view_functions_initialized_existing_invoice() {
     assert_eq!(client.get_face_value(&invoice_id), face_value);
     assert_eq!(client.get_funding_asset(&invoice_id), usdc);
     assert_eq!(client.get_discount_bps(&invoice_id), 250);
+    assert_eq!(client.get_funded_amount(&invoice_id), 0);
     assert_eq!(client.get_status(&invoice_id), InvoiceStatus::Listed as u32);
 
     let inv = client.get(&invoice_id);
@@ -3302,6 +3303,51 @@ fn test_get_discount_bps_missing_invoice_panics() {
     let (env, client, _, _, _, _) = setup();
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_discount_bps(&fake_id);
+}
+
+#[test]
+fn test_get_funded_amount_returns_zero_before_funding() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    assert_eq!(client.get_funded_amount(&invoice_id), 0);
+}
+
+#[test]
+fn test_get_funded_amount_returns_correct_value_after_funding() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let face_value = DEFAULT_FACE_VALUE;
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &250);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    let funded_amount = face_value * 95 / 100;
+    client.mark_funded(&invoice_id, &pool, &usdc, &funded_amount);
+
+    assert_eq!(client.get_funded_amount(&invoice_id), funded_amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_funded_amount_missing_invoice_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_funded_amount(&fake_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_get_funded_amount_uninitialized_panics() {
+    let env = Env::default();
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_funded_amount(&fake_id);
 }
 
 #[test]
