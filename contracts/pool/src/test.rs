@@ -4143,7 +4143,7 @@ fn test_preview_deposit_matches_deposit_across_share_prices() {
     // Empty pool: the first deposit mints one share per asset unit.
     let amount = 10_000_000_000;
     assert_eq!(
-        te.pool.preview_deposit(&amount),
+        te.pool.preview_deposit(amount),
         te.pool.deposit(&te.lp, &amount)
     );
 
@@ -4151,7 +4151,7 @@ fn test_preview_deposit_matches_deposit_across_share_prices() {
     for amount in [1u128, 2, 17, 1_000_000, 5_000_000_000] {
         let lp = create_lp_with_balance(&te, 100_000_000_000_000);
         assert_eq!(
-            te.pool.preview_deposit(&amount),
+            te.pool.preview_deposit(amount),
             te.pool.deposit(&lp, &amount)
         );
     }
@@ -4162,7 +4162,7 @@ fn test_preview_deposit_matches_deposit_across_share_prices() {
     for amount in [2u128, 3, 5, 102, 1_000_000, 5_000_000_000] {
         let lp = create_lp_with_balance(&te, 100_000_000_000_000);
         assert_eq!(
-            te.pool.preview_deposit(&amount),
+            te.pool.preview_deposit(amount),
             te.pool.deposit(&lp, &amount)
         );
     }
