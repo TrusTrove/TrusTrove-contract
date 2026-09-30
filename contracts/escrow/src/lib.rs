@@ -159,6 +159,7 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `InvalidAmount` if the amount is zero.
     /// * `AlreadyLocked` if the invoice is already locked.
+    /// * `ContractPaused` if the contract is paused.
     ///
     /// # Returns
     /// * `bool` - `true` when the funds are locked.
@@ -168,6 +169,7 @@ impl EscrowContract {
     /// client.lock(&invoice_id, &amount, &issuer);
     /// ```
     pub fn lock(env: Env, invoice_id: BytesN<32>, amount: u128, issuer: Address) -> bool {
+        Self::require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
         if amount == 0 || amount > i128::MAX as u128 {
@@ -214,6 +216,7 @@ impl EscrowContract {
     /// * `NotFound` if no escrow record exists for the invoice.
     /// * `InvalidRecipient` if issuer is escrow or pool contract address.
     /// * `InvalidRecipient` if issuer does not match the stored issuer address.
+    /// * `ContractPaused` if the contract is paused.
     ///
     /// # Returns
     /// * `bool` - `true` when funds are released.
@@ -223,6 +226,7 @@ impl EscrowContract {
     /// client.release_to_issuer(&invoice_id, &issuer);
     /// ```
     pub fn release_to_issuer(env: Env, invoice_id: BytesN<32>, issuer: Address) -> bool {
+        Self::require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
         if issuer == env.current_contract_address() || issuer == pool {
@@ -281,6 +285,7 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if no escrow record exists for the invoice.
     /// * `InvalidAmount` if `repayment_amount` is zero.
+    /// * `ContractPaused` if the contract is paused.
     ///
     /// # Returns
     /// * `bool` - `true` when funds are returned.
@@ -290,6 +295,7 @@ impl EscrowContract {
     /// client.release_to_pool(&invoice_id, &repayment_amount);
     /// ```
     pub fn release_to_pool(env: Env, invoice_id: BytesN<32>, repayment_amount: u128) -> bool {
+        Self::require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
         if repayment_amount == 0 || repayment_amount > i128::MAX as u128 {
@@ -338,6 +344,7 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized and a lock record exists for the invoice.
     /// * `NotAuthorized` if `caller` is neither the admin nor the pool contract.
     /// * `NotAuthorized` if the record has not been locked long enough to satisfy the grace period.
+    /// * `ContractPaused` if the contract is paused.
     ///
     /// # Coupling with `invoice.trigger_default`
     /// This grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from
@@ -364,6 +371,7 @@ impl EscrowContract {
     /// let result = client.handle_default(&invoice_id, &caller);
     /// ```
     pub fn handle_default(env: Env, invoice_id: BytesN<32>, caller: Address) -> bool {
+        Self::require_not_paused(&env);
         let key = DataKey::Locked(invoice_id.clone());
         let Some(record) = env.storage().persistent().get::<_, EscrowRecord>(&key) else {
             return false;
@@ -493,6 +501,93 @@ impl EscrowContract {
             .unwrap_or(Vec::new(&env))
     }
 
+    /// Pauses the contract, blocking all state-changing operations.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the contract has not been initialized.
+    /// * `NotAuthorized` if the caller is not the admin.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.pause();
+    /// ```
+    pub fn pause(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        Self::extend_instance_ttl(&env);
+        events::paused(&env, &admin);
+    }
+
+    /// Unpauses the contract, allowing state-changing operations.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin address.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the contract has not been initialized.
+    /// * `NotAuthorized` if the caller is not the admin.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.unpause();
+    /// ```
+    pub fn unpause(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        Self::extend_instance_ttl(&env);
+        events::unpaused(&env, &admin);
+    }
+
+    /// Returns whether the contract is currently paused.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// None. This is a read-only view.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if the contract is paused, `false` otherwise.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let is_paused = client.is_paused();
+    /// ```
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     fn append_history(
         env: &Env,
         invoice_id: &BytesN<32>,
@@ -533,5 +628,11 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized));
         pool.require_auth();
         pool
+    }
+
+    fn require_not_paused(env: &Env) {
+        if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+            panic_with_error!(env, EscrowError::ContractPaused);
+        }
     }
 }

@@ -1119,6 +1119,172 @@ impl PoolContract {
         true
     }
 
+    /// Batch funds multiple listed invoices in a single transaction.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_ids` - A vector of invoice IDs to fund.
+    ///
+    /// # Auth
+    /// **Permissionless.** Any caller can trigger batch funding.
+    ///
+    /// # Panics
+    /// * `BatchSizeExceeded` if `invoice_ids.len() > 50`.
+    /// * Other panics from `fund_invoice` (status, verification, asset, liquidity, utilization) apply per entry.
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The list of invoice IDs that were successfully funded.
+    ///   Invoices are skipped (not included in the return value) if funding would exceed
+    ///   utilization or liquidity limits, or if they fail eligibility checks.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let funded = client.batch_fund_invoice(&invoice_ids);
+    /// ```
+    pub fn batch_fund_invoice(env: Env, invoice_ids: Vec<BytesN<32>>) -> Vec<BytesN<32>> {
+        Self::require_initialized(&env);
+        if invoice_ids.len() > 50 {
+            panic_with_error!(&env, PoolError::BatchSizeExceeded);
+        }
+
+        let invoice_contract = Self::invoice_contract(&env)
+            .expect("pool is not initialized: invoice contract missing");
+        let registry_id = Self::registry_contract(&env);
+        let usdc_id = Self::funding_asset(&env);
+        let escrow_contract =
+            Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing");
+        let pool_address = env.current_contract_address();
+
+        let mut funded: Vec<BytesN<32>> = Vec::new(&env);
+        let totals = Self::totals(&env);
+        let mut total_deposits = totals.deposits;
+        let mut total_funded = totals.funded;
+        let mut active_count = totals.active_invoices;
+        let max_utilization_bps = totals.max_utilization_bps;
+
+        for invoice_id in invoice_ids.iter() {
+            // Check if already funded
+            let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+            if env.storage().persistent().has(&funded_key) {
+                continue;
+            }
+
+            // Get funding terms from invoice contract
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let (invoice_status, face_value, discount_bps): (u32, u128, u32) = env.invoke_contract(
+                &invoice_contract,
+                &Symbol::new(&env, "get_funding_terms"),
+                args,
+            );
+            if invoice_status != 1 {
+                continue;
+            }
+
+            // Verify issuer
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let issuer: Address =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_issuer"), args);
+            let mut args = Vec::new(&env);
+            args.push_back(issuer.into_val(&env));
+            let issuer_verified: bool =
+                env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
+            if !issuer_verified {
+                continue;
+            }
+
+            // Verify buyer
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let buyer: Address =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_buyer"), args);
+            let mut args = Vec::new(&env);
+            args.push_back(buyer.into_val(&env));
+            let buyer_verified: bool =
+                env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
+            if !buyer_verified {
+                continue;
+            }
+
+            // Check asset match
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let invoice_asset: Address = env.invoke_contract(
+                &invoice_contract,
+                &Symbol::new(&env, "get_funding_asset"),
+                args,
+            );
+            if invoice_asset != usdc_id {
+                continue;
+            }
+
+            // Calculate funded amount
+            let funded_amount = face_value
+                .checked_mul(10000 - discount_bps as u128)
+                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))
+                / 10000;
+            if funded_amount == 0 {
+                continue;
+            }
+
+            // Check liquidity
+            let available = total_deposits - total_funded;
+            if funded_amount > available {
+                continue;
+            }
+
+            // Check utilization cap
+            let new_total_funded_check = total_funded + funded_amount;
+            let utilization_after =
+                Self::utilization_bps_or_panic(&env, new_total_funded_check, total_deposits);
+            if utilization_after > max_utilization_bps {
+                continue;
+            }
+
+            // Commit pool state
+            total_funded = new_total_funded_check;
+            active_count += 1;
+
+            env.storage()
+                .instance()
+                .set(&DataKey::TotalFunded, &total_funded);
+            env.storage()
+                .instance()
+                .set(&DataKey::ActiveInvoiceCount, &active_count);
+
+            env.storage().persistent().set(&funded_key, &funded_amount);
+            env.storage()
+                .persistent()
+                .extend_ttl(&funded_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+            // Lock in escrow
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            args.push_back(funded_amount.into_val(&env));
+            args.push_back(issuer.into_val(&env));
+            let _: bool = env.invoke_contract(&escrow_contract, &Symbol::new(&env, "lock"), args);
+
+            // Mark as funded
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            args.push_back(pool_address.into_val(&env));
+            args.push_back(usdc_id.into_val(&env));
+            args.push_back(funded_amount.into_val(&env));
+            let _: bool =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "mark_funded"), args);
+
+            events::invoice_funded(&env, &invoice_id, funded_amount);
+            funded.push_back(invoice_id.clone());
+        }
+
+        if !funded.is_empty() {
+            Self::extend_instance_ttl(&env);
+            events::batch_invoices_funded(&env, funded.len() as u32, (invoice_ids.len() - funded.len()) as u32);
+        }
+        funded
+    }
+
     /// Receives invoice repayment and updates pool liquidity metrics.
     ///
     /// # Arguments

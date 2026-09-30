@@ -741,6 +741,176 @@ impl InvoiceContract {
         invoice_id
     }
 
+    /// Batch creates multiple invoices in a single transaction.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer address (must be the same for all invoices).
+    /// * `entries` - A vector of `(buyer, face_value, due_date, funding_asset)` tuples.
+    ///
+    /// # Auth
+    /// Requires authorization from `issuer`.
+    ///
+    /// # Panics
+    /// * `BatchSizeExceeded` if `entries.len() > 50`.
+    /// * Other panics from `create()` apply per entry (verification, face value, due date, supported asset).
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The list of invoice IDs that were successfully created.
+    ///   Failed entries are skipped and not included in the return value.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let created = client.batch_create(&issuer, &entries);
+    /// ```
+    pub fn batch_create(
+        env: Env,
+        issuer: Address,
+        entries: Vec<(Address, u128, u64, Address)>,
+    ) -> Vec<BytesN<32>> {
+        if entries.len() > 50 {
+            panic_with_error!(&env, InvoiceError::BatchSizeExceeded);
+        }
+
+        issuer.require_auth();
+
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        let now = env.ledger().timestamp();
+        let max_due_date = now
+            .checked_add(MAX_INVOICE_LIFETIME_SECONDS)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+
+        let mut created: Vec<BytesN<32>> = Vec::new(&env);
+        let mut failed: u32 = 0;
+
+        for entry in entries.iter() {
+            let (buyer, face_value, due_date, funding_asset) = entry;
+
+            // Validate participants
+            if issuer == *buyer {
+                failed += 1;
+                continue;
+            }
+
+            // Verify issuer and buyer
+            require_verified(&env, &registry_id, &issuer, InvoiceError::IssuerNotVerified);
+            require_verified(&env, &registry_id, buyer, InvoiceError::BuyerNotVerified);
+
+            // Check supported asset
+            if !env
+                .storage()
+                .persistent()
+                .has(&DataKey::SupportedAsset(funding_asset.clone()))
+            {
+                failed += 1;
+                continue;
+            }
+
+            // Validate face value
+            if face_value == 0 || face_value > MAX_FACE_VALUE {
+                failed += 1;
+                continue;
+            }
+
+            // Validate due date
+            if due_date <= &now || due_date > &max_due_date {
+                failed += 1;
+                continue;
+            }
+
+            // Generate invoice ID
+            let counter: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::Counter)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            let next_counter = counter
+                .checked_add(1)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::CounterOverflow));
+            env.storage()
+                .instance()
+                .set(&DataKey::Counter, &next_counter);
+
+            let mut hash_input = Bytes::new(&env);
+            let issuer_xdr = issuer.clone().to_xdr(&env);
+            let buyer_xdr = buyer.clone().to_xdr(&env);
+
+            for b in issuer_xdr.iter() {
+                hash_input.push_back(b);
+            }
+            for b in buyer_xdr.iter() {
+                hash_input.push_back(b);
+            }
+            for b in face_value.to_be_bytes() {
+                hash_input.push_back(b);
+            }
+            for b in due_date.to_be_bytes() {
+                hash_input.push_back(b);
+            }
+            for b in counter.to_be_bytes() {
+                hash_input.push_back(b);
+            }
+            {
+                let asset_xdr = funding_asset.clone().to_xdr(&env);
+                for b in asset_xdr.iter() {
+                    hash_input.push_back(b);
+                }
+            }
+            let invoice_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
+
+            let invoice = Invoice {
+                id: invoice_id.clone(),
+                issuer: issuer.clone(),
+                buyer: buyer.clone(),
+                face_value: *face_value,
+                discount_bps: 0,
+                funded_amount: 0,
+                due_date: *due_date,
+                status: InvoiceStatus::Created,
+                created_at: now,
+                listed_at: None,
+                funded_at: None,
+                shipped_at: None,
+                issuer_confirmed: false,
+                buyer_confirmed: false,
+                repaid_at: None,
+                funding_asset: funding_asset.clone(),
+                funding_pool: None,
+                repaid_amount: 0,
+                remaining_balance: *face_value,
+            };
+
+            let inv_key = DataKey::Invoice(invoice_id.clone());
+            Self::save_invoice(&env, inv_key, &invoice);
+
+            self::extend_issuer_index(&env, &issuer, &invoice_id);
+            self::extend_buyer_index(&env, buyer, &invoice_id);
+            self::extend_status_index(&env, InvoiceStatus::Created, &invoice_id);
+            increment_status_count(&env, InvoiceStatus::Created);
+            Self::extend_instance_ttl(&env);
+
+            events::invoice_created(
+                &env,
+                &invoice_id,
+                &invoice.issuer,
+                &invoice.buyer,
+                *face_value,
+                funding_asset,
+            );
+            created.push_back(invoice_id);
+        }
+
+        if !created.is_empty() {
+            events::batch_invoices_created(&env, created.len() as u32, failed);
+        }
+        created
+    }
+
     /// Lists a created invoice for financing with a discount.
     ///
     /// # Arguments
@@ -839,6 +1009,128 @@ impl InvoiceContract {
         );
         events::invoice_listed(&env, &invoice_id, discount_bps);
         true
+    }
+
+    /// Batch lists multiple created invoices for financing with discounts.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer address (must be the same for all invoices).
+    /// * `entries` - A vector of `(invoice_id, discount_bps)` tuples.
+    ///
+    /// # Auth
+    /// Requires authorization from `issuer`.
+    ///
+    /// # Panics
+    /// * `BatchSizeExceeded` if `entries.len() > 50`.
+    /// * Other panics from `list_for_financing` apply per entry (attestation, status, verification, discount bounds).
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The list of invoice IDs that failed validation.
+    ///   Empty if all invoices were successfully listed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let failed = client.batch_list_for_financing(&issuer, &entries);
+    /// ```
+    pub fn batch_list_for_financing(
+        env: Env,
+        issuer: Address,
+        entries: Vec<(BytesN<32>, u32)>,
+    ) -> Vec<BytesN<32>> {
+        if entries.len() > 50 {
+            panic_with_error!(&env, InvoiceError::BatchSizeExceeded);
+        }
+
+        issuer.require_auth();
+
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        let mut failed: Vec<BytesN<32>> = Vec::new(&env);
+        let mut listed: u32 = 0;
+
+        for entry in entries.iter() {
+            let (invoice_id, discount_bps) = entry;
+
+            let inv_key = DataKey::Invoice(invoice_id.clone());
+            let mut invoice: Invoice = match env.storage().persistent().get(&inv_key) {
+                Some(inv) => inv,
+                None => {
+                    failed.push_back(invoice_id.clone());
+                    continue;
+                }
+            };
+
+            // Check attestation
+            if !env
+                .storage()
+                .persistent()
+                .has(&DataKey::Attestation(invoice_id.clone()))
+            {
+                failed.push_back(invoice_id.clone());
+                continue;
+            }
+
+            // Check status
+            if invoice.status != InvoiceStatus::Created {
+                failed.push_back(invoice_id.clone());
+                continue;
+            }
+
+            // Verify issuer matches
+            if invoice.issuer != issuer {
+                failed.push_back(invoice_id.clone());
+                continue;
+            }
+
+            // Re-verify issuer and buyer
+            require_verified(
+                &env,
+                &registry_id,
+                &invoice.issuer,
+                InvoiceError::IssuerNotVerified,
+            );
+            require_verified(
+                &env,
+                &registry_id,
+                &invoice.buyer,
+                InvoiceError::BuyerNotVerified,
+            );
+
+            // Validate discount
+            if discount_bps == 0 {
+                failed.push_back(invoice_id.clone());
+                continue;
+            }
+            if discount_bps > 5000 {
+                failed.push_back(invoice_id.clone());
+                continue;
+            }
+
+            // Update invoice
+            invoice.status = InvoiceStatus::Listed;
+            invoice.discount_bps = *discount_bps;
+            invoice.listed_at = Some(env.ledger().timestamp());
+            Self::save_invoice(&env, inv_key, &invoice);
+
+            move_status_index(
+                &env,
+                invoice_id,
+                InvoiceStatus::Created,
+                InvoiceStatus::Listed,
+            );
+            events::invoice_listed(&env, invoice_id, *discount_bps);
+            listed += 1;
+        }
+
+        if listed > 0 {
+            Self::extend_instance_ttl(&env);
+        }
+        failed
     }
 
     /// Submits a signed risk attestation from a registered Underwrite agent

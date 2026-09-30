@@ -19,4 +19,6 @@ pub enum EscrowError {
     InvalidRecipient = 7,
     /// Returned when attempting to initialize with colliding addresses (e.g., pool_contract == usdc_asset).
     InvalidConfig = 8,
+    /// Returned when attempting to perform a state-changing operation while the contract is paused.
+    ContractPaused = 9,
 }

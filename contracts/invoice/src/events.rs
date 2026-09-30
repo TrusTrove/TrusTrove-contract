@@ -182,3 +182,9 @@ pub fn escrow_contract_updated(env: &Env, old: &Address, new: &Address) {
         (),
     );
 }
+
+/// Emitted by `batch_create` when multiple invoices are created in a single transaction.
+pub fn batch_invoices_created(env: &Env, count: u32, failed: u32) {
+    env.events()
+        .publish((Symbol::new(env, "batch_invoices_created"),), (count, failed));
+}

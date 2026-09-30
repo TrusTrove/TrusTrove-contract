@@ -29,4 +29,6 @@ pub enum InvoiceError {
     CrossContractCallFailed = 24,
     RepaymentExceedsBalance = 25,
     InvalidConfiguration = 26,
+    /// Batch size exceeds the maximum allowed (50 entries).
+    BatchSizeExceeded = 27,
 }
