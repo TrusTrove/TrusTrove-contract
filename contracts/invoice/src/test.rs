@@ -1,5 +1,9 @@
 #![cfg(test)]
 
+// Links std for the test build only: the crate itself is no_std, but the
+// property-based tests use host-side std::vec::Vec bookkeeping.
+extern crate std;
+
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
@@ -2518,6 +2522,292 @@ fn prop_expiry_window_bounds_are_respected_across_values() {
             prop_assert_eq!(client.get(&id).status, InvoiceStatus::Expired);
             Ok(())
         })
+        .unwrap();
+}
+
+// ── Issue #849: list_for_financing rejects every discount_bps outside 1..=5000 ─
+
+/// Status keys tracked by the `StatusCount` counters, in `InvoiceStatus`
+/// declaration order. Used to sum and compare `get_counts()` maps.
+const ALL_COUNT_KEYS: [&str; 8] = [
+    "Created",
+    "Listed",
+    "Funded",
+    "Active",
+    "Confirmed",
+    "Repaid",
+    "Defaulted",
+    "Expired",
+];
+
+const ALL_STATUSES: [InvoiceStatus; 8] = [
+    InvoiceStatus::Created,
+    InvoiceStatus::Listed,
+    InvoiceStatus::Funded,
+    InvoiceStatus::Active,
+    InvoiceStatus::Confirmed,
+    InvoiceStatus::Repaid,
+    InvoiceStatus::Defaulted,
+    InvoiceStatus::Expired,
+];
+
+fn count_sum(env: &Env, counts: &soroban_sdk::Map<String, u64>) -> u64 {
+    let mut sum = 0u64;
+    for key in ALL_COUNT_KEYS {
+        let key = String::from_str(env, key);
+        sum += counts.get(key).unwrap_or(0);
+    }
+    sum
+}
+
+#[test]
+fn prop_list_rejects_every_discount_bps_outside_1_to_5000() {
+    // Invariant: `list_for_financing` accepts a discount if and only if
+    // 1 <= discount_bps <= 5000. The existing
+    // `prop_discount_bps_within_limit_always_lists_invoice` only covers the
+    // accepted range; this property covers the rejected side: 0 must fail
+    // with `InvalidDiscount`, every value above 5000 (up to u32::MAX) must
+    // fail with `DiscountTooHigh`, and a rejected call must leave the
+    // invoice and the status counters untouched.
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(Just(0u32), 5001u32..=u32::MAX),
+            |(zero_discount, high_discount)| {
+                for discount_bps in [zero_discount, high_discount] {
+                    let (env, client, issuer, buyer, _, usdc) = setup();
+                    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+                    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+                    attest(&env, &client, &id);
+                    let counts_before = client.get_counts();
+
+                    let error: soroban_sdk::Error = client
+                        .try_list_for_financing(&id, &discount_bps)
+                        .expect_err("discount outside 1..=5000 must be rejected")
+                        .unwrap();
+                    if discount_bps == 0 {
+                        prop_assert_eq!(error, InvoiceError::InvalidDiscount.into());
+                    } else {
+                        prop_assert_eq!(error, InvoiceError::DiscountTooHigh.into());
+                    }
+
+                    // A rejected call must leave the invoice untouched.
+                    let invoice = client.get(&id);
+                    prop_assert_eq!(invoice.status, InvoiceStatus::Created);
+                    prop_assert_eq!(invoice.discount_bps, 0);
+
+                    // ... and leave the status counters unchanged.
+                    let counts_after = client.get_counts();
+                    prop_assert_eq!(count_sum(&env, &counts_after), 1);
+                    for key in ALL_COUNT_KEYS {
+                        let key = String::from_str(&env, key);
+                        prop_assert_eq!(counts_before.get(key.clone()), counts_after.get(key));
+                    }
+                }
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_list_for_financing_discount_bps_boundary_cases() {
+    // Boundary values 1, 5000, 5001 (and 0) pinned as explicit cases with the
+    // exact typed errors and post-call state, complementing the existing
+    // should_panic boundary unit tests.
+    for (discount_bps, expected) in [
+        (1u32, None),
+        (5000, None),
+        (0, Some(InvoiceError::InvalidDiscount)),
+        (5001, Some(InvoiceError::DiscountTooHigh)),
+    ] {
+        let (env, client, issuer, buyer, _, usdc) = setup();
+        let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+        let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        attest(&env, &client, &id);
+        match expected {
+            None => {
+                assert!(client.list_for_financing(&id, &discount_bps));
+                let invoice = client.get(&id);
+                assert_eq!(invoice.status, InvoiceStatus::Listed);
+                assert_eq!(invoice.discount_bps, discount_bps);
+            }
+            Some(expected_error) => {
+                let error: soroban_sdk::Error = client
+                    .try_list_for_financing(&id, &discount_bps)
+                    .expect_err("boundary discount outside 1..=5000 must be rejected")
+                    .unwrap();
+                assert_eq!(error, expected_error.into());
+                let invoice = client.get(&id);
+                assert_eq!(invoice.status, InvoiceStatus::Created);
+                assert_eq!(invoice.discount_bps, 0);
+                assert_eq!(count_sum(&env, &client.get_counts()), 1);
+            }
+        }
+    }
+}
+
+// ── Issue #847: status indexes and counters partition all invoices ────────────
+
+#[test]
+fn prop_status_indexes_and_counters_partition_all_invoices() {
+    // Invariant: after any sequence of `create`, `list_for_financing`,
+    // `mark_funded`, `mark_shipped`, `confirm_delivery`, `repay`,
+    // `trigger_default` and `expire_listing`, (a) the sum of all values in
+    // `get_counts()` equals the number of invoices created, (b) every
+    // invoice id appears in exactly one `get_by_status(s)` list, and (c)
+    // that `s` equals `get(id).status`. This exercises `move_status_index`,
+    // `extend_status_index` and the separate `StatusCount` counters, which
+    // are maintained independently of each other and of the invoice record.
+    // Status-transition legality is covered by #436; this property is
+    // index/counter conservation only. Replayed no-op transitions (calling
+    // `mark_defaulted` twice) cover `move_status_index` idempotency.
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(
+                proptest::collection::vec(0usize..8, 32),
+                proptest::collection::vec(0usize..4, 32),
+                1usize..=4usize,
+            ),
+            |(ops, targets, n_invoices)| {
+                let (env, client, issuer, buyer, _, usdc) = setup();
+                // Minimal listing-expiry window so Expire ops can succeed.
+                client.set_expiry_window(&1);
+                let pool = mock_pool_with_asset(&env, &usdc);
+                client.set_pool_contract(&pool);
+                let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+                client.set_escrow_contract(&escrow);
+                let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+                let mut ids: std::vec::Vec<BytesN<32>> = std::vec::Vec::new();
+                let mut status: std::vec::Vec<usize> = std::vec::Vec::new();
+                for i in 0..n_invoices {
+                    let face_value = 1_000_000u128 + (i as u128) * 1_000;
+                    let id =
+                        client.create(&issuer, &buyer, &face_value, &(due_date + i as u64), &usdc);
+                    attest(&env, &client, &id);
+                    ids.push(id);
+                    status.push(0);
+                }
+
+                // Asserts (a)-(c). Runs after every attempted step; ops whose
+                // preconditions do not hold are skipped because a rejected
+                // (and reverted) call says nothing about index conservation.
+                let check_partition =
+                    |statuses: &std::vec::Vec<usize>| -> Result<(), TestCaseError> {
+                        let counts = client.get_counts();
+                        prop_assert_eq!(count_sum(&env, &counts), n_invoices as u64);
+                        let mut seen: std::vec::Vec<(BytesN<32>, usize)> = std::vec::Vec::new();
+                        for (s, list_status) in ALL_STATUSES.iter().enumerate() {
+                            let list = client.get_by_status(list_status);
+                            prop_assert_eq!(
+                                counts
+                                    .get(String::from_str(&env, list_status.as_str()))
+                                    .unwrap_or(0),
+                                list.len() as u64
+                            );
+                            for invoice in list.iter() {
+                                prop_assert_eq!(invoice.status as u32, *list_status as u32);
+                                seen.push((invoice.id.clone(), s));
+                            }
+                        }
+                        prop_assert_eq!(seen.len(), n_invoices);
+                        for id in ids.iter() {
+                            let occurrences =
+                                seen.iter().filter(|(seen_id, _)| seen_id == id).count();
+                            prop_assert_eq!(occurrences, 1);
+                        }
+                        for (i, id) in ids.iter().enumerate() {
+                            prop_assert_eq!(
+                                client.get(id).status as u32,
+                                ALL_STATUSES[statuses[i]] as u32
+                            );
+                        }
+                        Ok(())
+                    };
+
+                for (step, op) in ops.iter().enumerate() {
+                    let op = *op;
+                    let target = targets[step] % n_invoices;
+                    let s = status[target];
+                    let id = &ids[target];
+                    let runnable = match op {
+                        0 => s == 0,
+                        1 => s == 1,
+                        2 => s == 2,
+                        3 => s == 3,
+                        4 => s == 2 || s == 3 || s == 4,
+                        5 => s == 2 || s == 3 || s == 4,
+                        6 => s == 1,
+                        7 => s == 6,
+                        _ => false,
+                    };
+                    if !runnable {
+                        continue;
+                    }
+                    match op {
+                        0 => {
+                            client.list_for_financing(id, &1000);
+                            status[target] = 1;
+                        }
+                        1 => {
+                            client.mark_funded(id, &pool, &usdc, &1_000_000);
+                            status[target] = 2;
+                        }
+                        2 => {
+                            client.mark_shipped(id);
+                            status[target] = 3;
+                        }
+                        3 => {
+                            client.confirm_delivery(id, &issuer);
+                            client.confirm_delivery(id, &buyer);
+                            status[target] = 4;
+                        }
+                        4 => {
+                            let invoice = client.get(id);
+                            mint_tokens(&env, &usdc, &invoice.buyer, 10_000_000_000);
+                            client.repay(id);
+                            status[target] = 5;
+                        }
+                        5 => {
+                            // Advance the ledger past every due date so the
+                            // trigger_default due-date gate passes.
+                            env.ledger().set_timestamp(due_date + n_invoices as u64 + 1);
+                            client.trigger_default(id);
+                            status[target] = 6;
+                            // Replayed no-op transition: calling
+                            // `mark_defaulted` again right after the
+                            // transition must succeed without touching the
+                            // indexes or counters.
+                            let replayed = client.mark_defaulted(id);
+                            prop_assert!(replayed);
+                            prop_assert_eq!(client.get(id).status, InvoiceStatus::Defaulted);
+                        }
+                        6 => {
+                            // Advance the clock to the listing's own expiry
+                            // deadline (window is 1s): listed_at may be later
+                            // than the batch base time if earlier ops moved
+                            // the ledger forward before this listing.
+                            let listed_at = client.get(id).listed_at.unwrap_or(0);
+                            env.ledger().set_timestamp(listed_at + 1);
+                            client.expire_listing(id, &issuer);
+                            status[target] = 7;
+                        }
+                        _ => {
+                            // Replayed no-op transition: `mark_defaulted` on
+                            // an already-Defaulted invoice returns true
+                            // without touching indexes or counters, covering
+                            // `move_status_index` idempotency.
+                            let replayed = client.mark_defaulted(id);
+                            prop_assert!(replayed);
+                        }
+                    }
+                    check_partition(&status)?;
+                }
+                Ok(())
+            },
+        )
         .unwrap();
 }
 
