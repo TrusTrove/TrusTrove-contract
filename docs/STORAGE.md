@@ -68,6 +68,21 @@ All contracts follow a consistent TTL extension pattern:
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
 
+#### Profile Enumeration Index
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `ProfileIndex(Role, u32)` | `Address` | The `index`-th registered address for `Role::Issuer` / `Role::Buyer`, in registration order |
+| `ProfileCount(Role)` | `u32` | Number of populated `ProfileIndex` slots for that role |
+
+Both keys are written by **every** registration path (`register_issuer`,
+`register_buyer`, `batch_register_issuers`, `batch_register_buyers`) and are
+TTL-extended with the same threshold/target as a profile entry
+(`persistent().extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO)`), on write and on read.
+Entries skipped as already-registered are never indexed twice, so
+`ProfileCount(role)` always equals the number of addresses reachable through
+`list_profiles(role, …)`.
+
 #### Profile Structure
 
 ```
@@ -75,6 +90,7 @@ Profile {
     address:      Address,          // Stellar address (also the key)
     packed_flags: u32,              // Bit 0: role (0=Issuer, 1=Buyer)
                                     // Bit 1: verified status
+                                    // Bit 2: revoked status
     registered_at: u64,             // Unix timestamp of registration
     metadata:     Map<String, String>, // Arbitrary key-value metadata
 }
@@ -82,7 +98,17 @@ Profile {
 
 #### Indexing Notes
 
-- Profiles are looked up by `is_verified(address)` — no secondary index exists.
+- Profiles are looked up by `is_verified(address)`; the per-role
+  `ProfileIndex` / `ProfileCount` keys back the enumeration views
+  `get_profile_count(role)` and `list_profiles(role, start, limit)`.
+- `list_profiles` returns pages of at most 50 addresses (the same cap as the
+  batch registration entry points) and panics with `PageSizeExceeded` (`#8`)
+  above it, so a single call can never walk the whole index. Pages are
+  contiguous and non-overlapping: page `n` is
+  `list_profiles(role, n * limit, limit)`.
+- The index is append-only. The registry has no deregistration path —
+  `revoke` only flips the profile's verification flags — so a slot is never
+  rewritten or freed, and revoked profiles stay enumerated.
 - `get_profile(address)` returns the full `Profile` struct or panics with
   `NotFound` if absent.
 - `get_verification_status(address)` returns a three-valued enum
@@ -90,7 +116,9 @@ Profile {
 
 ### Storage Key Count
 
-**Approximately 1 key per registered address.**
+**Approximately 2 keys per registered address** — one `Profile` record and one
+`ProfileIndex(role, n)` slot — **plus 2 constant `ProfileCount(role)` keys**
+(one per role) that exist once the first profile of that role is registered.
 
 ---
 

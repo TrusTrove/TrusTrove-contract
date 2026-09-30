@@ -18,6 +18,13 @@ const MAX_METADATA_SIZE: u32 = 20;
 const MAX_METADATA_KEY_LEN: u32 = 64;
 /// Maximum length of a single metadata value.
 const MAX_METADATA_VALUE_LEN: u32 = 512;
+/// Maximum number of addresses a single `list_profiles` call may return.
+///
+/// Mirrors the 50-entry cap enforced on `batch_register_issuers` /
+/// `batch_register_buyers`, so enumeration stays bounded per transaction no
+/// matter how many profiles a role accumulates. Callers page through the index
+/// with `start` / `limit` instead of asking for everything at once.
+const MAX_LIST_LIMIT: u32 = 50;
 
 #[contract]
 pub struct RegistryContract;
@@ -59,8 +66,10 @@ impl RegistryContract {
     /// Registers a new issuer profile with initial metadata.
     ///
     /// The profile is stored under `DataKey::Profile(address)` in persistent
-    /// storage with its TTL extended, and an `issuer_registered` event is
-    /// emitted on success.
+    /// storage with its TTL extended, the address is appended to the issuer
+    /// enumeration index (`DataKey::ProfileIndex(Role::Issuer, n)` /
+    /// `DataKey::ProfileCount(Role::Issuer)`), and an `issuer_registered` event
+    /// is emitted on success.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -105,6 +114,7 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::index_profile(&env, &Role::Issuer, &address);
         events::issuer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -112,6 +122,10 @@ impl RegistryContract {
 
     // Returns the list of addresses that were skipped (already registered) so
     // the caller knows exactly which entries were not processed (#66).
+    //
+    // Only freshly created profiles are appended to the issuer enumeration
+    // index; entries skipped as already-registered are never indexed twice
+    // (#841).
     pub fn batch_register_issuers(
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
@@ -148,6 +162,7 @@ impl RegistryContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::index_profile(&env, &Role::Issuer, &address);
             events::issuer_registered(&env, &address);
             registered += 1;
         }
@@ -182,6 +197,11 @@ impl RegistryContract {
     /// # Returns
     /// * `Vec<Address>` - The list of addresses that were skipped (already
     ///   registered).
+    ///
+    /// # Indexing
+    /// Only freshly created profiles are appended to the buyer enumeration
+    /// index; entries skipped as already-registered are never indexed twice
+    /// (#841).
     pub fn batch_register_buyers(
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
@@ -211,6 +231,7 @@ impl RegistryContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::index_profile(&env, &Role::Buyer, &address);
             events::buyer_registered(&env, &address);
             registered += 1;
         }
@@ -226,7 +247,9 @@ impl RegistryContract {
     /// Registers a new buyer profile with initial metadata.
     ///
     /// The profile is stored under `DataKey::Profile(address)` in persistent
-    /// storage with its TTL extended, and a `buyer_registered` event is
+    /// storage with its TTL extended, the address is appended to the buyer
+    /// enumeration index (`DataKey::ProfileIndex(Role::Buyer, n)` /
+    /// `DataKey::ProfileCount(Role::Buyer)`), and a `buyer_registered` event is
     /// emitted on success.
     ///
     /// # Arguments
@@ -272,6 +295,7 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::index_profile(&env, &Role::Buyer, &address);
         events::buyer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -451,6 +475,130 @@ impl RegistryContract {
             Some(p) if p.revoked() => VerificationStatus::Revoked,
             Some(_) => VerificationStatus::Pending,
         }
+    }
+
+    /// Returns how many profiles are registered for `role`.
+    ///
+    /// This is the O(1) companion to the other registry views: it answers
+    /// "how many issuers/buyers exist?" without the caller having to know an
+    /// address up front and without replaying the registration event stream.
+    /// The count is derived from the same `DataKey::ProfileCount(role)` entry
+    /// the enumeration index is appended under, so it always matches the number
+    /// of addresses reachable through
+    /// [`list_profiles`](Self::list_profiles) for `role`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `role` - The role to count (`Role::Issuer` or `Role::Buyer`).
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * Does not panic — a role with no registrations (or an uninitialized
+    ///   contract) reports `0`.
+    ///
+    /// # Returns
+    /// * `u32` - The number of profiles registered for `role`, counting
+    ///   revoked profiles as well (revocation only flips verification; it does
+    ///   not deregister the profile or remove its index slot).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let issuer_count = client.get_profile_count(&Role::Issuer);
+    /// ```
+    pub fn get_profile_count(env: Env, role: Role) -> u32 {
+        let count_key = DataKey::ProfileCount(role);
+        match env.storage().persistent().get::<_, u32>(&count_key) {
+            Some(count) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                count
+            }
+            // A missing counter means "no registrations yet" — there is no
+            // entry to keep alive, and nothing to extend.
+            None => 0,
+        }
+    }
+
+    /// Returns a page of registered addresses for `role`, in registration
+    /// order.
+    ///
+    /// Together with [`get_profile_count`](Self::get_profile_count) this
+    /// replaces "replay `issuer_registered` / `buyer_registered` from genesis"
+    /// with a bounded on-chain read, which is what an indexer or an admin
+    /// dashboard needs to page through the registry.
+    ///
+    /// Pages are contiguous and non-overlapping: page `n` is
+    /// `list_profiles(role, n * limit, limit)`, and each address appears in
+    /// exactly one page, so walking `start = 0, limit, 2*limit, ...` until a
+    /// page comes back shorter than `limit` enumerates every registered
+    /// address for `role` exactly once.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `role` - The role to enumerate (`Role::Issuer` or `Role::Buyer`).
+    /// * `start` - Zero-based index of the first address to return. Values at
+    ///   or beyond `get_profile_count(role)` yield an empty page.
+    /// * `limit` - Maximum number of addresses to return. Must be
+    ///   `<= MAX_LIST_LIMIT` (50); `0` yields an empty page.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * `RegistryError::PageSizeExceeded` if `limit > MAX_LIST_LIMIT`.
+    ///
+    /// # Returns
+    /// * `Vec<Address>` - Up to `limit` registered addresses for `role`,
+    ///   starting at index `start`, in registration order.
+    ///
+    /// # Cost
+    /// Bounded by `limit`: at most `limit` storage reads plus TTL extensions,
+    /// never the whole index. A `start` past the end of the index reads nothing
+    /// beyond the role's counter.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let page = client.list_profiles(&Role::Issuer, &0, &25);
+    /// ```
+    pub fn list_profiles(env: Env, role: Role, start: u32, limit: u32) -> Vec<Address> {
+        if limit > MAX_LIST_LIMIT {
+            panic_with_error!(&env, RegistryError::PageSizeExceeded);
+        }
+
+        let count_key = DataKey::ProfileCount(role.clone());
+        let count: u32 = match env.storage().persistent().get::<_, u32>(&count_key) {
+            Some(count) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                count
+            }
+            None => 0,
+        };
+
+        // Clamp the window to the indexed range so a page that runs off the end
+        // returns a short (possibly empty) page instead of panicking, and use
+        // a saturating bound so a `start` near `u32::MAX` cannot overflow.
+        let end = start.saturating_add(limit).min(count);
+
+        let mut addresses: Vec<Address> = Vec::new(&env);
+        let mut index = start;
+        while index < end {
+            let index_key = DataKey::ProfileIndex(role.clone(), index);
+            // A slot can be missing if its entry aged out while the profile
+            // itself survived, so skip gaps instead of failing the whole page.
+            if let Some(address) = env.storage().persistent().get::<_, Address>(&index_key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&index_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                addresses.push_back(address);
+            }
+            index += 1;
+        }
+        addresses
     }
 
     /// Revokes a registered profile by setting its verification status to `false`.
@@ -700,5 +848,38 @@ impl RegistryContract {
                 panic_with_error!(env, RegistryError::InvalidMetadata);
             }
         }
+    }
+
+    /// Appends `address` to the enumeration index for `role` and bumps that
+    /// role's profile counter.
+    ///
+    /// Every registration path funnels through here, so the counter and the
+    /// index can never drift apart: the count is exactly the number of index
+    /// slots written. Callers must only reach this for a profile that was just
+    /// created — entries skipped as already-registered are not indexed a
+    /// second time.
+    ///
+    /// Both keys are persistent and get the same TTL bump as a profile entry,
+    /// so a registry that is still being used keeps its enumeration alive
+    /// alongside the profiles it points at.
+    fn index_profile(env: &Env, role: &Role, address: &Address) {
+        let count_key = DataKey::ProfileCount(role.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+        let index_key = DataKey::ProfileIndex(role.clone(), count);
+        env.storage().persistent().set(&index_key, address);
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        // `saturating_add` rather than `+ 1`: a count this large is not
+        // reachable, and saturating keeps the write from panicking in a
+        // release build with overflow checks on.
+        env.storage()
+            .persistent()
+            .set(&count_key, &count.saturating_add(1));
+        env.storage()
+            .persistent()
+            .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 }

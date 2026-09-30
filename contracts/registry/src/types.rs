@@ -82,4 +82,20 @@ impl Profile {
 pub enum DataKey {
     Admin,
     Profile(Address),
+    /// The `index`-th registered address for `role`, in registration order.
+    ///
+    /// Written once per successful registration by every registration path
+    /// (`register_issuer`, `register_buyer`, `batch_register_issuers` and
+    /// `batch_register_buyers`) so the registry can be enumerated without an
+    /// off-chain replay of the `issuer_registered` / `buyer_registered` event
+    /// stream. Entries are append-only: the registry has no deregistration
+    /// path, so an index slot is never rewritten or freed.
+    ProfileIndex(Role, u32),
+    /// Number of populated `ProfileIndex` slots for `role`.
+    ///
+    /// Backs [`RegistryContract::get_profile_count`](crate::RegistryContract::get_profile_count)
+    /// and doubles as the exclusive upper bound (the total number of indexed
+    /// addresses) for `list_profiles`, so a caller can size the last page
+    /// without first enumerating.
+    ProfileCount(Role),
 }
