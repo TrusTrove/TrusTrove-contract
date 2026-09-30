@@ -174,7 +174,8 @@ terms.
 | Admin calls `set_max_utilization` to 0 | All `fund_invoice` calls will fail (utilization ≥ 0% ≥ cap of 0) | This is a denial-of-service vector available to admin |
 | Calling `revoke` on an unregistered address | Panics with `NotFound` | Per spec |
 | Calling `batch_register_issuers` with more than 50 entries | Panics with `BatchSizeExceeded` | Gas protection |
-| A buyer repays *less* than `face_value` | Not possible on the buyer path — `invoice.repay` transfers the full `face_value` from buyer to pool | Partial amounts are only possible through `escrow::release_to_pool` during default / partial-repayment flows; see [Resolved](#resolved) |
+| A buyer repays *less* than `face_value` | Supported — `invoice.repay_partial(invoice_id, amount)` accepts any `amount` up to `remaining_balance`, keeps the invoice in its current status and tracks the balance on the `Invoice` record | `invoice.repay` settles only the outstanding remainder; `escrow::release_to_pool` likewise accepts a partial `repayment_amount` on the default path. See [Resolved](#resolved) |
+| Buyer repays part of an invoice, then it defaults before the balance clears | `escrow.handle_default` returns only the locked `funded_amount` to the pool; the installments already parked in escrow are not swept | Installments reach the pool only when `repay_partial` drives `remaining_balance` to zero (the escrow record is removed on release), so they stay in the escrow contract on the default path |
 | An issuer creates an invoice with `due_date = current_time + 1` second | Invoice accepted | `create` requires `due_date > env.ledger().timestamp()` (strict); `now + 1` passes, `now` does not |
 | The pool has exactly 0 USDC balance after funding all deposits | `withdraw` succeeds for unfunded amounts, but funded invoices are locked | Escrow holds funded USDC, pool holds only unfunded USDC |
 | `trigger_default` while status is exactly at `due_date` (timestamp) | Panics with `DueDateNotPassed` | The guard is `if current_time <= due_date`, so one full second must elapse past `due_date` before default can fire |
@@ -210,13 +211,13 @@ are provided where available.
 - Automated fuzz testing across all four contracts
 - Smart-contract upgrade mechanism (`__constructor` + `__upgrade`)
 
-> **Note:** Partial repayments are now supported on the **escrow** path
-> (`escrow::release_to_pool(invoice_id, repayment_amount)` accepts a
-> partial `repayment_amount` and tracks the residual in the escrow
-> record). They are **not** yet supported on the buyer-driven repayment
-> path (`invoice::repay` still requires the full `face_value`). This
-> item has been removed from the active scope above and moved to the
-> [Resolved](#resolved) section.
+> **Note:** Partial repayments are supported on both paths. On the
+> **escrow** path, `escrow::release_to_pool(invoice_id, repayment_amount)`
+> accepts a partial `repayment_amount` and tracks the residual in the
+> escrow record. On the **buyer-driven** path,
+> `invoice.repay_partial(invoice_id, amount)` accumulates installments
+> against the invoice's `remaining_balance` and only releases the escrow
+> to the pool once that balance reaches zero. See [Resolved](#resolved).
 
 ---
 
@@ -241,9 +242,14 @@ the 2025-07-25 revision.
   a `repayment_amount` that may be less than the original locked amount,
   keeps the residual escrow record in place, and emits history events
   per partial release. See PR #120
-  (`feat/partial-repayment-default-flow`). Buyer-driven partial
-  repayments via `invoice.repay` remain a future-feature — see
-  [Known Gaps](#known-gaps).
+  (`feat/partial-repayment-default-flow`).
+- **Buyer-driven partial repayment.** `invoice.repay_partial(invoice_id,
+  amount)` accepts an installment up to the invoice's
+  `remaining_balance`, leaves the invoice in its current status while a
+  balance remains, and transitions to `Repaid` only once `repaid_amount`
+  reaches `face_value`. Overpayments are rejected with
+  `InvoiceError::RepaymentExceedsBalance` (error code 25). See issue
+  [#728](https://github.com/TrusTrove/TrusTrove-contract/issues/728).
 - **Security findings #94, #96, #98, #103.** Addressed together in
   PR #124 (`fix: address security issues #94, #96, #98, #103`).
 
