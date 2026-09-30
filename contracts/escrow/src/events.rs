@@ -58,3 +58,13 @@ pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address
         new_admin.clone(),
     );
 }
+
+pub fn paused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "paused"), admin.clone()), ());
+}
+
+pub fn unpaused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "unpaused"), admin.clone()), ());
+}

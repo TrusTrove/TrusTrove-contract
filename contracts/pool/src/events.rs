@@ -103,3 +103,9 @@ pub fn allowance_approved(
         (spender.clone(), amount, expiration_ledger),
     );
 }
+
+/// Emitted by `batch_fund_invoice` when multiple invoices are funded in a single transaction.
+pub fn batch_invoices_funded(env: &Env, count: u32, skipped: u32) {
+    env.events()
+        .publish((Symbol::new(env, "batch_invoices_funded"),), (count, skipped));
+}

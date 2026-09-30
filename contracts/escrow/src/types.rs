@@ -86,4 +86,6 @@ pub enum DataKey {
     /// Event history for a given invoice. The inner `BytesN<32>` is the
     /// invoice ID. Value type: `Vec<EscrowEvent>`.
     History(BytesN<32>),
+    /// Pause state for the contract. Value type: `bool`.
+    Paused,
 }

@@ -32,4 +32,6 @@ pub enum PoolError {
     /// `approve` was given an `expiration_ledger` at or before the current
     /// ledger sequence while also granting a non-zero amount.
     InvalidExpiration = 25,
+    /// Batch size exceeds the maximum allowed (50 entries).
+    BatchSizeExceeded = 26,
 }
