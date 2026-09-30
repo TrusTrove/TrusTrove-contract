@@ -4143,16 +4143,16 @@ fn test_preview_deposit_matches_deposit_across_share_prices() {
     // Empty pool: the first deposit mints one share per asset unit.
     let amount = 10_000_000_000;
     assert_eq!(
-        te.pool.preview_deposit(amount),
-        te.pool.deposit(&te.lp, amount)
+        te.pool.preview_deposit(&amount),
+        te.pool.deposit(&te.lp, &amount)
     );
 
     // At par, every subsequent amount also mints 1:1 shares.
     for amount in [1u128, 2, 17, 1_000_000, 5_000_000_000] {
         let lp = create_lp_with_balance(&te, 100_000_000_000_000);
         assert_eq!(
-            te.pool.preview_deposit(amount),
-            te.pool.deposit(&lp, amount)
+            te.pool.preview_deposit(&amount),
+            te.pool.deposit(&lp, &amount)
         );
     }
 
@@ -4162,8 +4162,8 @@ fn test_preview_deposit_matches_deposit_across_share_prices() {
     for amount in [2u128, 3, 5, 102, 1_000_000, 5_000_000_000] {
         let lp = create_lp_with_balance(&te, 100_000_000_000_000);
         assert_eq!(
-            te.pool.preview_deposit(amount),
-            te.pool.deposit(&lp, amount)
+            te.pool.preview_deposit(&amount),
+            te.pool.deposit(&lp, &amount)
         );
     }
 }
@@ -4171,7 +4171,7 @@ fn test_preview_deposit_matches_deposit_across_share_prices() {
 #[test]
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_preview_deposit_zero_amount_panics_invalid_amount() {
-    setup().pool.preview_deposit(0);
+    setup().pool.preview_deposit(&0);
 }
 
 #[test]
@@ -4179,7 +4179,7 @@ fn test_preview_deposit_zero_amount_panics_invalid_amount() {
 fn test_preview_initial_deposit_below_minimum_panics_invalid_amount() {
     setup()
         .pool
-        .preview_deposit(DEFAULT_MIN_INITIAL_DEPOSIT - 1);
+        .preview_deposit(&(DEFAULT_MIN_INITIAL_DEPOSIT - 1));
 }
 
 #[test]
@@ -4188,7 +4188,7 @@ fn test_preview_deposit_that_rounds_to_zero_panics_minimum_deposit() {
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
     fund_and_repay_invoice(&te);
-    te.pool.preview_deposit(1);
+    te.pool.preview_deposit(&1);
 }
 
 // Once repayment raises the share price above 1, a depositor's immediate
