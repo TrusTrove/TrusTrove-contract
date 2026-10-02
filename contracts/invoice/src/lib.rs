@@ -1823,11 +1823,7 @@ impl InvoiceContract {
     /// ```ignore
     /// let listed = client.has_status_membership(&InvoiceStatus::Listed, &invoice_id);
     /// ```
-    pub fn has_status_membership(
-        env: Env,
-        status: InvoiceStatus,
-        invoice_id: BytesN<32>,
-    ) -> bool {
+    pub fn has_status_membership(env: Env, status: InvoiceStatus, invoice_id: BytesN<32>) -> bool {
         read_status_membership(&env, status, &invoice_id)
     }
 
