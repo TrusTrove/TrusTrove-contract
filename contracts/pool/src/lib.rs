@@ -187,6 +187,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxUtilizationBps, &DEFAULT_MAX_UTILIZATION_BPS);
+        env.storage().instance().set(&DataKey::FeeBps, &0u32); // Default to 0% fee
         env.storage()
             .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
@@ -350,6 +351,50 @@ impl PoolContract {
     /// ```
     pub fn get_admin(env: Env) -> Address {
         Self::admin(&env).expect("pool is not initialized: admin missing")
+    }
+
+    /// Returns the protocol fee in basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `FeeBps`).
+    ///
+    /// # Returns
+    /// * `u32` - The protocol fee in basis points.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let fee_bps = client.get_fee_bps();
+    /// ```
+    pub fn get_fee_bps(env: Env) -> u32 {
+        Self::fee_bps(&env).expect("pool is not initialized: fee bps missing")
+    }
+
+    /// Returns the treasury address for protocol fee distribution.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * Panics if the contract has not been initialized (missing `TreasuryAddress`).
+    ///
+    /// # Returns
+    /// * `Address` - The treasury address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let treasury = client.get_treasury_address();
+    /// ```
+    pub fn get_treasury_address(env: Env) -> Address {
+        Self::treasury_address(&env).expect("pool is not initialized: treasury address missing")
     }
 
     /// Returns the invoice contract address configured for the pool.
@@ -1729,6 +1774,14 @@ impl PoolContract {
             .expect("pool is not initialized: registry contract missing")
     }
 
+    fn fee_bps(env: &Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::FeeBps)
+    }
+
+    fn treasury_address(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::TreasuryAddress)
+    }
+
     fn totals(env: &Env) -> PoolTotals {
         PoolTotals {
             shares: env
@@ -1807,22 +1860,29 @@ impl PoolContract {
         }
 
         let yield_amount = amount - funded_amount - refund;
-        let totals = Self::totals(env);
-        let total_deposits = totals.deposits;
-        let total_funded = totals.funded;
-        let total_yield = totals.yield_distributed;
 
+        // Calculate protocol fee split. `ProtocolFeeBps` is the live slot
+        // written by `set_protocol_fee`; the legacy `DataKey::FeeBps` slot is
+        // always zero and is no longer consulted here.
         let fee_bps = env
             .storage()
             .instance()
             .get(&DataKey::ProtocolFeeBps)
             .unwrap_or(0u32);
         let protocol_cut = if fee_bps > 0 {
-            yield_amount * (fee_bps as u128) / 10_000
+            yield_amount
+                .checked_mul(fee_bps as u128)
+                .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow))
+                / 10_000
         } else {
             0
         };
         let lp_yield = yield_amount - protocol_cut;
+
+        let totals = Self::totals(env);
+        let total_deposits = totals.deposits;
+        let total_funded = totals.funded;
+        let total_yield = totals.yield_distributed;
 
         if protocol_cut > 0 {
             if let Some(treasury) = env
@@ -1843,6 +1903,8 @@ impl PoolContract {
         let new_total_funded = total_funded
             .checked_sub(funded_amount)
             .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+
+        // Add LP yield (not full yield) to TotalDeposits and TotalYieldDistributed
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + lp_yield));
@@ -1863,7 +1925,8 @@ impl PoolContract {
 
         env.storage().persistent().remove(&funded_key);
 
-        events::repayment_received(env, invoice_id, amount, yield_amount);
+        // Update event to include protocol cut information
+        events::repayment_received(env, invoice_id, amount, lp_yield, protocol_cut);
         Self::extend_instance_ttl(env);
     }
 
