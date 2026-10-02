@@ -4,7 +4,7 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Events as _, Ledger},
+    testutils::{storage::Persistent as _, Address as _, Events as _, Ledger},
     token,
     xdr::ToXdr,
     Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
@@ -1498,6 +1498,171 @@ fn test_get_by_status_filters_correctly() {
     assert_eq!(created.len(), 1);
     let listed = client.get_by_status(&InvoiceStatus::Listed);
     assert_eq!(listed.len(), 1);
+}
+
+// ============== O(1) STATUS MEMBERSHIP MARKERS (issues #831 / #835) ==============
+
+/// Reads the raw `DataKey::StatusMembership` marker straight from contract
+/// storage, so these tests assert on the key itself and not only on the
+/// public query helper.
+fn raw_status_membership(
+    env: &Env,
+    client: &InvoiceContractClient,
+    status: InvoiceStatus,
+    invoice_id: &BytesN<32>,
+) -> bool {
+    let key = crate::status_membership_key(status, invoice_id);
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get::<_, bool>(&key)
+            .unwrap_or(false)
+    })
+}
+
+#[test]
+fn test_status_membership_marker_written_on_create_and_rolled_on_transitions() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // `create()` writes the `Created` marker, and it carries the same TTL
+    // policy as every other invoice storage entry.
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Created,
+        &invoice_id
+    ));
+    assert!(client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
+    let created_key = crate::status_membership_key(InvoiceStatus::Created, &invoice_id);
+    let marker_ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&created_key)
+    });
+    assert!(
+        marker_ttl >= TTL_THRESHOLD,
+        "membership marker TTL should be extended, got {marker_ttl}"
+    );
+
+    // No other status may claim membership yet.
+    for status in [
+        InvoiceStatus::Listed,
+        InvoiceStatus::Funded,
+        InvoiceStatus::Active,
+        InvoiceStatus::Confirmed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Expired,
+    ] {
+        assert!(!raw_status_membership(&env, &client, status, &invoice_id));
+        assert!(!client.has_status_membership(&status, &invoice_id));
+    }
+
+    // Created -> Listed: old marker cleared, new marker set.
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Created,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Listed,
+        &invoice_id
+    ));
+
+    // Listed -> Funded.
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Listed,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Funded,
+        &invoice_id
+    ));
+
+    // Funded -> Active.
+    client.mark_shipped(&invoice_id);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Funded,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Active,
+        &invoice_id
+    ));
+
+    // Active -> Confirmed (both parties confirm).
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Active,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Confirmed,
+        &invoice_id
+    ));
+
+    // Confirmed -> Defaulted once the due date is reached.
+    env.ledger().set_timestamp(due_date);
+    client.trigger_default(&invoice_id);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Confirmed,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Defaulted,
+        &invoice_id
+    ));
+
+    // The query helper mirrors the raw storage state after every step above.
+    assert!(!client.has_status_membership(&InvoiceStatus::Confirmed, &invoice_id));
+    assert!(client.has_status_membership(&InvoiceStatus::Defaulted, &invoice_id));
+}
+
+#[test]
+fn test_has_status_membership_rejects_prior_unknown_and_never_held() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Current status hits in O(1); statuses never held do not.
+    assert!(client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Repaid, &invoice_id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Expired, &invoice_id));
+
+    // A prior status reads `false` once the invoice has transitioned out.
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    assert!(!client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
+    assert!(client.has_status_membership(&InvoiceStatus::Listed, &invoice_id));
+
+    // An invoice id that was never created has no membership anywhere.
+    let unknown_id = BytesN::from_array(&env, &[0xABu8; 32]);
+    assert!(!client.has_status_membership(&InvoiceStatus::Listed, &unknown_id));
 }
 
 #[test]

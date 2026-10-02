@@ -69,7 +69,7 @@
                   }
                 },
                 {
-                  "u64": 11618290
+                  "u64": 31191252
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -323,7 +323,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                  "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
                 }
               }
             },
@@ -342,7 +342,7 @@
                   "symbol": "Invoice"
                 },
                 {
-                  "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                  "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
                 }
               ]
             },
@@ -362,7 +362,7 @@
                       "symbol": "Invoice"
                     },
                     {
-                      "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                      "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
                     }
                   ]
                 },
@@ -406,7 +406,7 @@
                         "symbol": "due_date"
                       },
                       "val": {
-                        "u64": 11618290
+                        "u64": 31191252
                       }
                     },
                     {
@@ -456,7 +456,7 @@
                         "symbol": "id"
                       },
                       "val": {
-                        "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                        "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
                       }
                     },
                     {
@@ -623,7 +623,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                  "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
                 }
               }
             },
@@ -764,7 +764,66 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                  "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "StatusMembership"
+                },
+                {
+                  "vec": [
+                    {
+                      "symbol": "Created"
+                    }
+                  ]
+                },
+                {
+                  "u64": 13973677897626893827
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "StatusMembership"
+                    },
+                    {
+                      "vec": [
+                        {
+                          "symbol": "Created"
+                        }
+                      ]
+                    },
+                    {
+                      "u64": 13973677897626893827
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "bool": true
                 }
               }
             },
@@ -1294,7 +1353,7 @@
                   }
                 },
                 {
-                  "u64": 11618290
+                  "u64": 31191252
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -1416,7 +1475,7 @@
                 "symbol": "invoice_created"
               },
               {
-                "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -1455,7 +1514,7 @@
               }
             ],
             "data": {
-              "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+              "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
             }
           }
         }
@@ -1481,7 +1540,7 @@
               }
             ],
             "data": {
-              "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+              "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
             }
           }
         }
@@ -1542,7 +1601,7 @@
                     "symbol": "due_date"
                   },
                   "val": {
-                    "u64": 11618290
+                    "u64": 31191252
                   }
                 },
                 {
@@ -1592,7 +1651,7 @@
                     "symbol": "id"
                   },
                   "val": {
-                    "bytes": "4fd47593ea21155fafbc47d463bc6f3682e9c73402e0e7c6931d37a38eb6bcb5"
+                    "bytes": "c1ec7a031dc73e03bd09a136bb9fbe9b8056aba7310e56ad9836bc0327e6fdbf"
                   }
                 },
                 {

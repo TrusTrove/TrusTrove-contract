@@ -1,6 +1,6 @@
 # Limitations
 
-> **Updated:** 2026-09-26
+> **Updated:** 2026-09-30
 > **Applies to:** TrusTrove protocol on Stellar testnet
 
 This document captures known limitations, testnet-specific constraints,
@@ -107,9 +107,17 @@ The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta
   minimal cost as they only read from storage.
 - Index enumeration functions (`get_by_status`, `get_by_issuer`,
   `get_by_buyer`) scale linearly with the number of entries and may become
-  expensive for issuers/buyers with many invoices. The status index also
-  performs O(1) membership checks via `DataKey::StatusMembership` to filter
-  out removed entries without loading the full invoice.
+  expensive for issuers/buyers with many invoices. The same linear cost
+  applies on the write side: the `extend_issuer_index`, `extend_buyer_index`,
+  and `extend_status_index` helpers scan the whole index to deduplicate
+  before appending, and `move_status_index` scans the target status index
+  on every transition. `get_by_status` additionally hydrates every indexed
+  invoice and filters by status at read time, so stale rows left behind by
+  a transition are skipped only by loading and checking the full invoice —
+  there is no O(1) membership marker (`DataKey::StatusMembership` does not
+  exist in `contracts/invoice/src/lib.rs`). Both reads and writes are
+  therefore O(n) in the size of the index; this is tracked for optimization
+  in [#831](https://github.com/TrusTrove/TrusTrove-contract/issues/831).
 - `get_invoice_count_by_issuer` and `get_invoice_count_by_buyer` avoid that
   cost entirely: they read a single stored counter (`u32`) in O(1), so
   pagination and badge UIs should prefer them over `.len()` on the
@@ -225,14 +233,20 @@ are provided where available.
 These limitations were previously listed here but have been fixed since
 the 2025-07-25 revision.
 
-- **Index entries not compacted on status transition.** `move_status_index`
-  now performs an O(1) remove from the old status membership set
-  (`DataKey::StatusMembership`) and an O(1) append to the new status
-  index, so `get_by_status()` filters stale entries via the membership
-  marker at constant cost. Historical `StatusIndexEntry` rows that point
-  to a moved invoice still occupy a slot in the per-status index but
-  are skipped at read time — they are not reclaimed on disk. See
-  PR #121 (*Fix O(n) status index filtering with O(1) membership lookup*).
+> **Correction (issue
+> [#835](https://github.com/TrusTrove/TrusTrove-contract/issues/835)):**
+> An earlier entry here claimed that "Index entries not compacted on status
+> transition" was resolved because `move_status_index` performs O(1)
+> membership checks via `DataKey::StatusMembership` (crediting PR #121).
+> No such storage key exists anywhere in `contracts/invoice/src/lib.rs`.
+> In reality `move_status_index` and the `extend_*_index` helpers linearly
+> scan the index on every transition, index rows are still not compacted,
+> and `get_by_status` skips stale rows only by loading each invoice and
+> comparing its status. The item remains open and the O(n) linear-scan
+> behaviour is tracked in
+> [#831](https://github.com/TrusTrove/TrusTrove-contract/issues/831);
+> this document will be updated again when that lands.
+
 - **Pool does not track individual LP yield accrual.** `pool::withdraw`
   now writes `DataKey::LPYieldEarned(lp)` and `pool::get_lp_position`
   returns the running yield figure per LP. Yield is therefore visible
@@ -258,9 +272,11 @@ the 2025-07-25 revision.
 - [#294 — Testnet limitation docs](https://github.com/TrusTrove/TrusTrove-contract/issues/294)
 - [#307 — General repo documentation](https://github.com/TrusTrove/TrusTrove-contract/issues/307)
 - [#460 — LIMITATIONS.md stale date](https://github.com/TrusTrove/TrusTrove-contract/issues/460) (this PR fixes it)
+- [#831 — Index helpers linearly scan whole indexes](https://github.com/TrusTrove/TrusTrove-contract/issues/831) (open — tracks the linear-scan performance work; update this document when a real index/membership structure lands)
+- [#835 — LIMITATIONS.md documents a `DataKey::StatusMembership` that does not exist](https://github.com/TrusTrove/TrusTrove-contract/issues/835) (this PR fixes it)
 
 Resolved items reference the PRs that closed them:
 
-- Issue #67 — status index O(1) filtering (closed by PR #121)
+- Issue #67 — status index filtering (closed by PR #121; the O(1) membership claim was retracted — see [#835](https://github.com/TrusTrove/TrusTrove-contract/issues/835) and [#831](https://github.com/TrusTrove/TrusTrove-contract/issues/831))
 - Issues #94, #96, #98, #103 — security (closed by PR #124)
 - Partial default repayment (closed by PR #120)
