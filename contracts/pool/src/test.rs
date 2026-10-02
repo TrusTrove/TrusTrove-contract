@@ -4414,40 +4414,39 @@ fn prop_protocol_fee_split_conserves_yield_for_all_fee_bps() {
                 let protocol_cut = (yield_amount * (fee_bps as i128)) / 10_000;
                 let lp_yield = yield_amount - protocol_cut;
 
-// Yield conservation: the two halves of the split reassemble
-        // the whole yield, both as computed and as observed in the
-        // treasury balance and TotalYieldDistributed.
-        prop_assert_eq!(protocol_cut + lp_yield, yield_amount);
-        prop_assert_eq!(treasury_delta + yield_delta, yield_amount);
+                // Yield conservation: the two halves of the split reassemble
+                // the whole yield, both as computed and as observed in the
+                // treasury balance and TotalYieldDistributed.
+                prop_assert_eq!(protocol_cut + lp_yield, yield_amount);
+                prop_assert_eq!(treasury_delta + yield_delta, yield_amount);
 
-        // The cut can never exceed fee_bps of the yield.
-        prop_assert!(
-            protocol_cut <= (yield_amount * (fee_bps as i128)) / 10_000,
-            "protocol cut exceeds bps cut"
-        );
+                // The cut can never exceed fee_bps of the yield.
+                prop_assert!(
+                    protocol_cut <= (yield_amount * (fee_bps as i128)) / 10_000,
+                    "protocol cut exceeds bps cut"
+                );
 
-        // Treasury balance delta equals the protocol cut.
-        prop_assert_eq!(treasury_delta, protocol_cut);
+                // Treasury balance delta equals the protocol cut.
+                prop_assert_eq!(treasury_delta, protocol_cut);
 
-        // TotalYieldDistributed delta equals the LP yield.
-        prop_assert_eq!(yield_delta, lp_yield);
+                // TotalYieldDistributed delta equals the LP yield.
+                prop_assert_eq!(yield_delta, lp_yield);
 
-        // TotalDeposits grows by exactly the LP share of the yield.
-        prop_assert_eq!(deposits_delta, lp_yield);
+                // TotalDeposits grows by exactly the LP share of the yield.
+                prop_assert_eq!(deposits_delta, lp_yield);
 
-        // Zero-fee edge case: nothing may reach the treasury and the
-        // full yield must land in TotalDeposits.
-        if fee_bps == 0 {
-            prop_assert_eq!(treasury_delta, 0);
-            prop_assert_eq!(deposits_delta, yield_amount);
-        }
+                // Zero-fee edge case: nothing may reach the treasury and the
+                // full yield must land in TotalDeposits.
+                if fee_bps == 0 {
+                    prop_assert_eq!(treasury_delta, 0);
+                    prop_assert_eq!(deposits_delta, yield_amount);
                 }
+
                 Ok(())
             },
         )
         .unwrap();
 }
-
 // ============== ISSUE #774: GAS BENCHMARK FOR DEPOSIT / WITHDRAW ==============
 
 #[test]
