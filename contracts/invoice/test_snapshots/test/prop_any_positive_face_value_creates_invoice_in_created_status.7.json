@@ -65,7 +65,7 @@
                 {
                   "u128": {
                     "hi": 0,
-                    "lo": 387672903154527
+                    "lo": 91008118748100
                   }
                 },
                 {
@@ -323,7 +323,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                  "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
                 }
               }
             },
@@ -342,7 +342,7 @@
                   "symbol": "Invoice"
                 },
                 {
-                  "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                  "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
                 }
               ]
             },
@@ -362,7 +362,7 @@
                       "symbol": "Invoice"
                     },
                     {
-                      "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                      "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
                     }
                   ]
                 },
@@ -416,7 +416,7 @@
                       "val": {
                         "u128": {
                           "hi": 0,
-                          "lo": 387672903154527
+                          "lo": 91008118748100
                         }
                       }
                     },
@@ -456,7 +456,7 @@
                         "symbol": "id"
                       },
                       "val": {
-                        "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                        "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
                       }
                     },
                     {
@@ -488,7 +488,7 @@
                       "val": {
                         "u128": {
                           "hi": 0,
-                          "lo": 387672903154527
+                          "lo": 91008118748100
                         }
                       }
                     },
@@ -623,7 +623,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                  "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
                 }
               }
             },
@@ -764,7 +764,66 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                  "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "StatusMembership"
+                },
+                {
+                  "vec": [
+                    {
+                      "symbol": "Created"
+                    }
+                  ]
+                },
+                {
+                  "u64": 742477874446958338
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "StatusMembership"
+                    },
+                    {
+                      "vec": [
+                        {
+                          "symbol": "Created"
+                        }
+                      ]
+                    },
+                    {
+                      "u64": 742477874446958338
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "bool": true
                 }
               }
             },
@@ -1290,7 +1349,7 @@
                 {
                   "u128": {
                     "hi": 0,
-                    "lo": 387672903154527
+                    "lo": 91008118748100
                   }
                 },
                 {
@@ -1416,7 +1475,7 @@
                 "symbol": "invoice_created"
               },
               {
-                "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -1431,7 +1490,7 @@
             "data": {
               "u128": {
                 "hi": 0,
-                "lo": 387672903154527
+                "lo": 91008118748100
               }
             }
           }
@@ -1455,7 +1514,7 @@
               }
             ],
             "data": {
-              "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+              "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
             }
           }
         }
@@ -1481,7 +1540,7 @@
               }
             ],
             "data": {
-              "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+              "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
             }
           }
         }
@@ -1552,7 +1611,7 @@
                   "val": {
                     "u128": {
                       "hi": 0,
-                      "lo": 387672903154527
+                      "lo": 91008118748100
                     }
                   }
                 },
@@ -1592,7 +1651,7 @@
                     "symbol": "id"
                   },
                   "val": {
-                    "bytes": "44f89a9c776b561f02572d56d17fa6837ea0afbfd6880d81c67c8efa5c3f341f"
+                    "bytes": "0a4dcfb167ff7f02b6e964ba3ba20de081b4ba55b6cd0a9e27bc6cbd726da8d1"
                   }
                 },
                 {
@@ -1624,7 +1683,7 @@
                   "val": {
                     "u128": {
                       "hi": 0,
-                      "lo": 387672903154527
+                      "lo": 91008118748100
                     }
                   }
                 },
