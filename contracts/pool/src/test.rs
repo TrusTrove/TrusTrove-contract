@@ -15,8 +15,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    DataKey, PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    constants::MAX_PROTOCOL_FEE_BPS, DataKey, PoolContract, PoolContractClient,
+    DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -4370,6 +4370,83 @@ fn test_nonzero_protocol_fee_splits_receive_repayment_with_refund() {
     );
 }
 
+// ============== ISSUE #846: PROPT — FEE SPLIT CONSERVES YIELD ==============
+
+// For every fee_bps in 0..=MAX_PROTOCOL_FEE_BPS and every yield settled
+// through `settle_repayment`, the protocol cut plus the yield credited back
+// to LPs must reassemble the yield that arrived: the fee split only
+// redistributes yield between treasury and LPs, it never mints or destroys
+// any. Uses proptest's TestRunner API directly so rustfmt formats normally;
+// the case budget matches the other property tests (10) to stay within CI
+// time budgets for the Soroban in-process host.
+#[test]
+fn prop_protocol_fee_split_conserves_yield_for_all_fee_bps() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(0i128..=10_000_000_000_000i128, 0u32..=MAX_PROTOCOL_FEE_BPS),
+            |(yield_amount, fee_bps)| {
+                let te = setup();
+                te.pool.deposit(&te.lp, &100_000_000_000);
+                let invoice_id = create_and_list(&te, &te.usdc_id);
+                te.pool.fund_invoice(&invoice_id);
+
+                let treasury = Address::generate(&te.env);
+                te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+                let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+                let treasury_before = usdc.balance(&treasury);
+                let before = te.pool.get_stats();
+
+                // Repay the funded principal plus the arbitrary yield under
+                // test, so `settle_repayment` sees exactly `yield_amount` of
+                // surplus to split.
+                let amount = DEFAULT_FUNDED_AMOUNT + (yield_amount as u128);
+                let settled = te.pool.receive_repayment(&invoice_id, &amount);
+                prop_assert!(settled);
+
+                let treasury_delta = usdc.balance(&treasury) - treasury_before;
+                let after = te.pool.get_stats();
+                let yield_delta =
+                    (after.total_yield_distributed - before.total_yield_distributed) as i128;
+                let deposits_delta = (after.total_deposits - before.total_deposits) as i128;
+
+                let protocol_cut = (yield_amount * (fee_bps as i128)) / 10_000;
+                let lp_yield = yield_amount - protocol_cut;
+
+                // Yield conservation: the two halves of the split reassemble
+                // the whole yield, both as computed and as observed in the
+                // treasury balance and TotalYieldDistributed.
+                prop_assert_eq!(protocol_cut + lp_yield, yield_amount);
+                prop_assert_eq!(treasury_delta + yield_delta, yield_amount);
+
+                // The cut can never exceed fee_bps of the yield.
+                prop_assert!(
+                    protocol_cut <= (yield_amount * (fee_bps as i128)) / 10_000,
+                    "protocol cut exceeds bps cut"
+                );
+
+                // Treasury balance delta equals the protocol cut.
+                prop_assert_eq!(treasury_delta, protocol_cut);
+
+                // TotalYieldDistributed delta equals the LP yield.
+                prop_assert_eq!(yield_delta, lp_yield);
+
+                // TotalDeposits grows by exactly the LP share of the yield.
+                prop_assert_eq!(deposits_delta, lp_yield);
+
+                // Zero-fee edge case: nothing may reach the treasury and the
+                // full yield must land in TotalDeposits.
+                if fee_bps == 0 {
+                    prop_assert_eq!(treasury_delta, 0);
+                    prop_assert_eq!(deposits_delta, yield_amount);
+                }
+
+                Ok(())
+            },
+        )
+        .unwrap();
+}
 // ============== ISSUE #774: GAS BENCHMARK FOR DEPOSIT / WITHDRAW ==============
 
 #[test]
