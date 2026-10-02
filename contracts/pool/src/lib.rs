@@ -537,6 +537,60 @@ impl PoolContract {
         shares_to_issue
     }
 
+    /// Returns the number of shares a deposit would issue at the current share price.
+    ///
+    /// Uses the same integer division and initial-deposit rules as [`Self::deposit`].
+    /// This is a read-only query and does not require authorization.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    /// * `InvalidAmount` if `usdc_amount` is zero or the initial deposit is below
+    ///   this instance's configured minimum.
+    /// * `MinimumDeposit` if the amount would round down to zero shares.
+    /// * `Overflow` if `usdc_amount * total_shares` overflows `u128`.
+    ///
+    /// # Returns
+    /// * `u128` - The number of shares that `deposit` would issue.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let shares = client.preview_deposit(10_000_000);
+    /// ```
+    pub fn preview_deposit(env: Env, usdc_amount: u128) -> u128 {
+        Self::require_initialized(&env);
+        if usdc_amount == 0 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let totals = Self::totals(&env);
+        let total_shares = totals.shares;
+        let total_deposits = totals.deposits;
+
+        if (total_shares == 0 || total_deposits == 0)
+            && usdc_amount < Self::min_initial_deposit(&env)
+        {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+
+        let shares_to_issue = if total_shares == 0 || total_deposits == 0 {
+            usdc_amount
+        } else {
+            let scaled = usdc_amount
+                .checked_mul(total_shares)
+                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+            scaled / total_deposits
+        };
+
+        if shares_to_issue == 0 {
+            panic_with_error!(&env, PoolError::MinimumDeposit);
+        }
+
+        shares_to_issue
+    }
+
     /// Withdraws shares from the pool and transfers USDC to the LP.
     ///
     /// # Arguments
