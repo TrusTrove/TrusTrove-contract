@@ -1528,7 +1528,12 @@ fn test_status_membership_marker_written_on_create_and_rolled_on_transitions() {
 
     // `create()` writes the `Created` marker, and it carries the same TTL
     // policy as every other invoice storage entry.
-    assert!(raw_status_membership(&env, &client, InvoiceStatus::Created, &invoice_id));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Created,
+        &invoice_id
+    ));
     assert!(client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
     let created_key = crate::status_membership_key(InvoiceStatus::Created, &invoice_id);
     let marker_ttl = env.as_contract(&client.address, || {
@@ -1556,32 +1561,82 @@ fn test_status_membership_marker_written_on_create_and_rolled_on_transitions() {
     // Created -> Listed: old marker cleared, new marker set.
     attest(&env, &client, &invoice_id);
     client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
-    assert!(!raw_status_membership(&env, &client, InvoiceStatus::Created, &invoice_id));
-    assert!(raw_status_membership(&env, &client, InvoiceStatus::Listed, &invoice_id));
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Created,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Listed,
+        &invoice_id
+    ));
 
     // Listed -> Funded.
     let pool = mock_pool_with_asset(&env, &usdc);
     client.set_pool_contract(&pool);
     client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
-    assert!(!raw_status_membership(&env, &client, InvoiceStatus::Listed, &invoice_id));
-    assert!(raw_status_membership(&env, &client, InvoiceStatus::Funded, &invoice_id));
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Listed,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Funded,
+        &invoice_id
+    ));
 
     // Funded -> Active.
     client.mark_shipped(&invoice_id);
-    assert!(!raw_status_membership(&env, &client, InvoiceStatus::Funded, &invoice_id));
-    assert!(raw_status_membership(&env, &client, InvoiceStatus::Active, &invoice_id));
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Funded,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Active,
+        &invoice_id
+    ));
 
     // Active -> Confirmed (both parties confirm).
     client.confirm_delivery(&invoice_id, &issuer);
     client.confirm_delivery(&invoice_id, &buyer);
-    assert!(!raw_status_membership(&env, &client, InvoiceStatus::Active, &invoice_id));
-    assert!(raw_status_membership(&env, &client, InvoiceStatus::Confirmed, &invoice_id));
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Active,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Confirmed,
+        &invoice_id
+    ));
 
     // Confirmed -> Defaulted once the due date is reached.
     env.ledger().set_timestamp(due_date);
     client.trigger_default(&invoice_id);
-    assert!(!raw_status_membership(&env, &client, InvoiceStatus::Confirmed, &invoice_id));
-    assert!(raw_status_membership(&env, &client, InvoiceStatus::Defaulted, &invoice_id));
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Confirmed,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Defaulted,
+        &invoice_id
+    ));
 
     // The query helper mirrors the raw storage state after every step above.
     assert!(!client.has_status_membership(&InvoiceStatus::Confirmed, &invoice_id));
