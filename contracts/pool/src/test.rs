@@ -394,7 +394,17 @@ fn create_and_list_with_params(
     face_value: u128,
     discount_bps: u32,
 ) -> BytesN<32> {
-    let due_date = te.env.ledger().timestamp() + 86400;
+    create_and_list_with_params_and_term(te, funding_asset, face_value, discount_bps, 86400)
+}
+
+fn create_and_list_with_params_and_term(
+    te: &TestEnv,
+    funding_asset: &Address,
+    face_value: u128,
+    discount_bps: u32,
+    term: u64,
+) -> BytesN<32> {
+    let due_date = te.env.ledger().timestamp() + term;
     let invoice_id =
         te.invoice
             .create(&te.issuer, &te.buyer, &face_value, &due_date, funding_asset);
@@ -4287,6 +4297,120 @@ fn prop_repayment_increases_deposits_by_yield_and_clears_funded() {
             prop_assert_eq!(after.total_yield_distributed, yield_amount);
             Ok(())
         })
+        .unwrap();
+}
+
+// Issue #848: exercise the complete invoice -> escrow -> pool repayment path
+// over the valid repayment domain. These are intentionally integration-style
+// properties: the real contracts are deployed in every generated case, so a
+// successful property run proves that invoice arithmetic and pool refund
+// accounting agree at the contract boundary.
+#[test]
+fn prop_repay_at_maturity_accepts_valid_terms_and_preserves_accounting() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(
+                1_000_000u128..=10_000_000_000u128,
+                1u32..=5_000u32,
+                60u64..=86_400u64,
+            ),
+            |(face_value, discount_bps, term)| {
+                let te = setup();
+                te.pool.deposit(&te.lp, &100_000_000_000);
+                let invoice_id = create_and_list_with_params_and_term(
+                    &te,
+                    &te.usdc_id,
+                    face_value,
+                    discount_bps,
+                    term,
+                );
+                te.pool.fund_invoice(&invoice_id);
+
+                te.invoice.mark_shipped(&invoice_id);
+                te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+                te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+
+                let funded_amount = face_value * (10_000 - discount_bps as u128) / 10_000;
+                let discount = face_value - funded_amount;
+                let before = te.pool.get_stats();
+                let buyer_before = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+
+                te.env
+                    .ledger()
+                    .set_timestamp(te.env.ledger().timestamp() + term);
+                prop_assert!(te.invoice.repay(&invoice_id));
+
+                let after = te.pool.get_stats();
+                let buyer_after = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+                prop_assert_eq!(after.total_funded, 0);
+                prop_assert_eq!(after.active_invoice_count, 0);
+                prop_assert_eq!(after.total_deposits, before.total_deposits + discount);
+                prop_assert_eq!(after.total_yield_distributed, discount);
+                prop_assert_eq!(buyer_after, buyer_before - face_value as i128);
+                prop_assert_eq!(te.invoice.get_status(&invoice_id), 5);
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn prop_repay_early_accepts_valid_terms_and_bounds_refund() {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(
+            &(
+                1_000_000u128..=10_000_000_000u128,
+                1u32..=5_000u32,
+                60u64..=86_400u64,
+                0u32..=9_999u32,
+            ),
+            |(face_value, discount_bps, term, elapsed_bps)| {
+                let te = setup();
+                te.pool.deposit(&te.lp, &100_000_000_000);
+                let invoice_id = create_and_list_with_params_and_term(
+                    &te,
+                    &te.usdc_id,
+                    face_value,
+                    discount_bps,
+                    term,
+                );
+                te.pool.fund_invoice(&invoice_id);
+
+                te.invoice.mark_shipped(&invoice_id);
+                te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+                te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+
+                let funded_amount = face_value * (10_000 - discount_bps as u128) / 10_000;
+                let discount = face_value - funded_amount;
+                let elapsed = term * elapsed_bps as u64 / 10_000;
+                let earned_by_pool = discount * elapsed as u128 / term as u128;
+                let refund_to_buyer = discount - earned_by_pool;
+                prop_assert!(refund_to_buyer <= discount);
+                prop_assert!(refund_to_buyer <= face_value - funded_amount);
+
+                let before = te.pool.get_stats();
+                let buyer_before = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+                te.env
+                    .ledger()
+                    .set_timestamp(te.env.ledger().timestamp() + elapsed);
+                prop_assert!(te.invoice.repay_early(&invoice_id));
+
+                let after = te.pool.get_stats();
+                let buyer_after = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.buyer);
+                prop_assert_eq!(after.total_funded, 0);
+                prop_assert_eq!(after.active_invoice_count, 0);
+                prop_assert_eq!(after.total_deposits, before.total_deposits + earned_by_pool);
+                prop_assert_eq!(after.total_yield_distributed, earned_by_pool);
+                prop_assert_eq!(
+                    buyer_after,
+                    buyer_before - face_value as i128 + refund_to_buyer as i128
+                );
+                prop_assert_eq!(te.invoice.get_status(&invoice_id), 5);
+                Ok(())
+            },
+        )
         .unwrap();
 }
 
