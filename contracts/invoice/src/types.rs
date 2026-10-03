@@ -11,6 +11,7 @@ pub enum InvoiceStatus {
     Repaid,
     Defaulted,
     Expired,
+    Cancelled,
 }
 
 /// Represents a single invoice tracked by the invoice contract.
@@ -182,6 +183,7 @@ impl InvoiceStatus {
             InvoiceStatus::Repaid => "Repaid",
             InvoiceStatus::Defaulted => "Defaulted",
             InvoiceStatus::Expired => "Expired",
+            InvoiceStatus::Cancelled => "Cancelled",
         }
     }
 }

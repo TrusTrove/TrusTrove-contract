@@ -233,6 +233,13 @@ fn test_initialize() {
 }
 
 #[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_upgrade_requires_admin_auth() {
+    let (env, client, _, _, _, _) = setup_without_auths();
+    client.upgrade(&BytesN::from_array(&env, &[0; 32]));
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #1)")]
 fn test_initialize_twice_panics() {
     let env = Env::default();

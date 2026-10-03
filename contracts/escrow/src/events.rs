@@ -1,5 +1,10 @@
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
+pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());
+}
+
 pub fn funds_locked(env: &Env, invoice_id: &BytesN<32>, issuer: &Address, amount: u128) {
     env.events().publish(
         (

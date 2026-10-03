@@ -648,6 +648,51 @@ fn test_create_invoice_with_verified_parties() {
 }
 
 #[test]
+fn test_cancel_created_invoice() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    assert!(client.cancel(&invoice_id));
+
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Cancelled);
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")), Some(0));
+    assert_eq!(counts.get(String::from_str(&env, "Cancelled")), Some(1));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_cancel_requires_issuer_auth() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    env.set_auths(&[]);
+
+    client.cancel(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_cancel_listed_invoice_fails() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    client.cancel(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_upgrade_requires_admin_auth() {
+    let (env, client, _, _, _, _, _) = setup_with_admin();
+    env.set_auths(&[]);
+    client.upgrade(&BytesN::from_array(&env, &[0; 32]));
+}
+
+#[test]
 fn test_get_counts_tracks_created_to_listed() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;

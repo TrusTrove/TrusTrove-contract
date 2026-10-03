@@ -27,6 +27,18 @@ pub fn invoice_listed(env: &Env, invoice_id: &BytesN<32>, discount_bps: u32) {
     );
 }
 
+pub fn invoice_cancelled(env: &Env, invoice_id: &BytesN<32>) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_cancelled"), invoice_id.clone()),
+        (),
+    );
+}
+
+pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());
+}
+
 pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_funded"), invoice_id.clone()),
