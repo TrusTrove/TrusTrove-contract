@@ -1503,37 +1503,45 @@ impl InvoiceContract {
         true
     }
 
-    /// Repays a confirmed invoice, transferring funds to the pool.
+    /// Repays an invoice in partial installments or in full.
+    ///
+    /// Transfers `amount` from the buyer into escrow. If the cumulative
+    /// repayment is less than `face_value`, the invoice keeps its current
+    /// status: `repaid_amount` and `remaining_balance` are updated and
+    /// `partial_repayment_received` is emitted. Once the cumulative repayment
+    /// reaches `face_value`, escrow releases the funds to the pool, the pool's
+    /// repayment accounting is updated, the invoice transitions to `Repaid`,
+    /// and `invoice_repaid` is emitted.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice being repaid.
+    /// * `amount` - The installment to pay. Must be greater than zero and no
+    ///   greater than the invoice's `remaining_balance`.
     ///
     /// # Auth
     /// Requires authorization from the invoice's buyer.
     ///
     /// # Panics
-    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the invoice has no
-    ///   recorded funding pool or funding timestamp.
-    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::CrossContractCallFailed` if token transfer, escrow, or pool
-    ///   repayment accounting fails.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found, or if the
+    ///   invoice has no recorded escrow, funding pool, or funding timestamp.
+    /// * `InvoiceError::InvalidStatusTransition` if invoice status is not
+    ///   `Funded`, `Active`, or `Confirmed`.
+    /// * `InvoiceError::InvalidAmount` if `amount` is zero.
+    /// * `InvoiceError::RepaymentExceedsBalance` if `amount` exceeds the
+    ///   invoice's `remaining_balance`.
+    /// * `InvoiceError::CrossContractCallFailed` if token transfer, escrow, or
+    ///   pool repayment accounting fails.
+    /// * `InvoiceError::MathOverflow` if the running totals would overflow.
     ///
     /// # Returns
-    /// * `bool` - `true` when repayment is completed.
+    /// * `bool` - `true` when the installment was recorded and, if it cleared
+    ///   the balance, the invoice was settled.
     ///
     /// # Example
     /// ```ignore
-    /// client.repay(&invoice_id);
+    /// client.repay_partial(&invoice_id, &500_000_000);
     /// ```
-    /// Repays an invoice in partial installments or in full.
-    ///
-    /// Transfers `amount` from the buyer to escrow. If the cumulative repayment
-    /// is less than `face_value`, the invoice remains in its current status,
-    /// updating `repaid_amount` and `remaining_balance` and emitting `partial_repayment_received`.
-    /// Once cumulative repayment equals `face_value`, the escrow releases the funds
-    /// to the pool, the pool's repayment accounting is updated, the invoice transitions
-    /// to `Repaid`, and `invoice_repaid` is emitted.
     pub fn repay_partial(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
         require_not_paused(&env);
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -1656,6 +1664,30 @@ impl InvoiceContract {
         }
     }
 
+    /// Repays a confirmed invoice, transferring funds to the pool.
+    ///
+    /// Settles the invoice's outstanding balance in a single call by
+    /// delegating to [`Self::repay_partial`] with the invoice's full
+    /// `remaining_balance`. An invoice that already received partial
+    /// repayments therefore only pulls the remainder from the buyer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice being repaid.
+    ///
+    /// # Auth
+    /// Requires authorization from the invoice's buyer.
+    ///
+    /// # Panics
+    /// See [`Self::repay_partial`]; this function adds no checks of its own.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when repayment is completed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.repay(&invoice_id);
+    /// ```
     pub fn repay(env: Env, invoice_id: BytesN<32>) -> bool {
         require_not_paused(&env);
         let inv_key = DataKey::Invoice(invoice_id.clone());
