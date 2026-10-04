@@ -1,6 +1,6 @@
 # Limitations
 
-> **Updated:** 2026-09-26
+> **Updated:** 2026-10-03
 > **Applies to:** TrusTrove protocol on Stellar testnet
 
 This document captures known limitations, testnet-specific constraints,
@@ -67,7 +67,9 @@ relative costs based on code analysis.
 | `registry::register_issuer` | 0 | 0 | — | — | Very Low |
 | `registry::revoke` | 0 | 0 | — | — | Very Low |
 | `invoice::create` | 2 (`is_verified` ×2) | 0 | — | — | Low |
+| `invoice::batch_create` | 2 per entry (`is_verified` ×2) | 0 | — | — | Low per entry, **up to 50× `create`** |
 | `invoice::list_for_financing` | 0 | 0 | — | — | Low |
+| `invoice::batch_list_for_financing` | 0 | 0 | — | — | Low per entry, **up to 50× `list_for_financing`** |
 | `invoice::mark_funded` | 0 | 0 | — | — | Low |
 | `invoice::repay` | 1 (`receive_repayment`) | 1 (buyer → pool) | — | — | Medium |
 | `invoice::trigger_default` | 1 (`handle_default`) | 0 | — | — | Medium |
@@ -76,6 +78,7 @@ relative costs based on code analysis.
 | `pool::withdraw` (before refactor) | 0 | 1 (pool → LP) | ~450,500 | ~63,550 | Medium |
 | `pool::withdraw` (after `burn()`) | 0 | 1 (pool → LP) | 451,634 | 63,660 | Medium |
 | `pool::fund_invoice` | 6 (`get_status`, `get_funding_asset`, `get_face_value`, `get_discount_bps`, `lock`, `mark_funded`) | 1 (pool → escrow) | — | — | **High** |
+| `pool::batch_fund_invoice` | 6 per entry | 1 per entry | — | — | **High** per entry, **up to 50× `fund_invoice`** |
 | `pool::receive_repayment` | 0 | 0 | — | — | Low |
 | `pool::handle_default` | 1 (`escrow::handle_default`) | 1 (escrow → pool) | — | — | Medium |
 | `pool_factory::register_existing_pool` | 0 | 0 | 69,486 | 7,604 | Low |
@@ -83,6 +86,13 @@ relative costs based on code analysis.
 | `escrow::release_to_issuer` | 0 | 1 (escrow → issuer) | — | — | Medium |
 | `escrow::release_to_pool` | 0 | 1 (escrow → pool, partial allowed) | — | — | Medium |
 | `escrow::handle_default` | 0 | 1 (escrow → pool) | — | — | Medium |
+
+Every mutating entry point above also reads the shared pause flag
+(`trusttrove-pause`), adding one instance-storage read per call. That read is
+instance-local and costs the same in every contract; it is also what pushed a few
+long-running integration tests past the default *test-host* budget, which is why
+`pool_factory`'s test `setup()` lifts that budget — see
+[Batch Operations](#batch-operations).
 
 ### Measured Benchmarks: `deposit()` and `withdraw()` (SEP-41 mint/burn refactor)
 
@@ -116,6 +126,31 @@ The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta
   cost entirely: they read a single stored counter (`u32`) in O(1), so
   pagination and badge UIs should prefer them over `.len()` on the
   full-fetch views.
+
+### Batch Operations
+
+`invoice::batch_create`, `invoice::batch_list_for_financing`, and
+`pool::batch_fund_invoice` bound their input at `MAX_BATCH_SIZE` (50 entries)
+with `BatchSizeExceeded` (`InvoiceError::28` / `PoolError::26`). The cap exists
+so a caller cannot turn one transaction into an unbounded number of cross-contract
+calls; a full 50-entry batch is the practical ceiling and can exceed the
+per-ledger resource limit on a congested testnet. Callers that hit a budget
+error should split the work across several transactions.
+
+The three batch entry points deliberately differ in failure semantics, because
+their failure modes differ:
+
+| Entry point | On a bad entry | Why |
+|---|---|---|
+| `batch_create` | Reverts the whole batch | Creation consumes the shared `Counter`; a partial success would burn counter values and persist a prefix the caller cannot identify without re-reading every invoice |
+| `batch_list_for_financing` | Skips the entry, returns its ID | The interesting failures are per-invoice state an issuer listing a backlog cannot avoid (already listed, missing attestation, revoked verification) |
+| `batch_fund_invoice` | Stops the batch, returns funded IDs | A liquidity/utilization stop is a normal outcome when an LP fills the pool; partial funding would drain the pool in a way no single `fund_invoice` could |
+
+`batch_fund_invoice` still reverts on *eligibility* errors (not listed, already
+funded by this pool, unverified issuer/buyer, asset mismatch), because those are
+caller mistakes that should be fixed rather than silently skipped. Callers
+reconcile the returned funded IDs against their input to see which entries a
+capacity stop skipped.
 
 ### Storing the `History` Vector
 
@@ -214,12 +249,10 @@ are provided where available.
 
 ### Smart Contracts
 
-- Emergency pause mechanism for the remaining contracts (`registry`, `escrow`) — `pool` and `invoice` ship admin-gated `pause() / unpause()` via the shared `trusttrove-pause` crate
 - Multi-sig admin (3-of-5 Stellar signers)
 - LP-governed invoice funding (stake LP tokens to vote on invoices). Design
   proposal: [NEW\_DESIGN.md](NEW_DESIGN.md) (issue #718)
 - Dynamic utilization-based interest rate model
-- Batch invoice creation
 - Swap-free multi-asset pools (USDC + XLM)
 - On-chain governance for protocol parameters
 

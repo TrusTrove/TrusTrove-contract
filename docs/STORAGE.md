@@ -200,6 +200,7 @@ Expired   = 7   // listing expired before funding
 | `PoolContract` | `Address` | Authorised pool contract | `initialize()` |
 | `InvoiceContract` | `Address` | Invoice contract address | `initialize()` |
 | `UsdcAsset` | `Address` | USDC token contract address | `initialize()` |
+| `Paused` | `bool` | Emergency circuit-breaker flag, via `trusttrove_pause::PauseState::Paused` (issue #716). Absent means not paused. | `pause()` / `unpause()` |
 
 ### Persistent Storage
 
