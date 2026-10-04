@@ -11,6 +11,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+trusttrove-pause = { path = "../pause" }
 trusttrove-ttl = { path = "../ttl" }
 
 [dev-dependencies]
