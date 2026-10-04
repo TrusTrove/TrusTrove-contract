@@ -10,13 +10,15 @@ use soroban_sdk::{
         storage::Instance as _, storage::Persistent as _, Address as _, Events as _, Ledger,
         MockAuth, MockAuthInvoke,
     },
+    vec,
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, InvokeError, String, Symbol, TryFromVal,
+    Address, BytesN, Env, IntoVal, InvokeError, String, Symbol, TryFromVal, Vec,
 };
 
 use crate::{
     constants::{
-        MAX_PROTOCOL_FEE_BPS, SUGGESTED_DISCOUNT_CEILING_BPS, SUGGESTED_DISCOUNT_FLOOR_BPS,
+        MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SUGGESTED_DISCOUNT_CEILING_BPS,
+        SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
     DataKey, PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS,
     TTL_EXTEND_TO, TTL_THRESHOLD,
@@ -6420,4 +6422,165 @@ fn test_pool_transfer_ownership_blocked_while_paused() {
     te.pool.pause();
     assert!(te.pool.try_transfer_ownership(&new_admin).is_err());
     assert_eq!(te.pool.get_admin(), te.admin);
+}
+// ============== ISSUE #722: BATCH FUND INVOICE ==============
+
+#[test]
+fn test_batch_fund_invoice_funds_every_entry() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let ids = vec![
+        &te.env,
+        create_and_list(&te, &te.usdc_id),
+        create_and_list(&te, &te.usdc_id),
+        create_and_list(&te, &te.usdc_id),
+    ];
+
+    let funded = te.pool.batch_fund_invoice(&ids);
+    assert_eq!(funded.len(), 3);
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT * 3);
+    assert_eq!(stats.active_invoice_count, 3);
+
+    // Every invoice actually reached the funded state.
+    for id in ids.iter() {
+        assert_eq!(te.invoice.get_status(&id), 2); // Funded
+    }
+}
+
+/// The required stop-behavior: funding halts — rather than partially draining
+/// the pool — once funding the next entry would exceed `max_utilization_bps`.
+#[test]
+fn test_batch_fund_invoice_stops_when_utilization_cap_would_be_exceeded() {
+    let te = setup();
+    // Deposits = 3 × funded_amount, so each funded invoice adds ~3333 bps of
+    // utilization: two entries reach 6666 bps (allowed by the 7000 cap) and the
+    // third would reach 10000 bps, breaching it.
+    te.pool.deposit(&te.lp, &29_400_000_000);
+    te.pool.set_max_utilization(&te.admin, &7_000);
+
+    let ids = vec![
+        &te.env,
+        create_and_list(&te, &te.usdc_id),
+        create_and_list(&te, &te.usdc_id),
+        create_and_list(&te, &te.usdc_id),
+        create_and_list(&te, &te.usdc_id),
+    ];
+
+    let funded = te.pool.batch_fund_invoice(&ids);
+
+    // Two entries fit within the 6600 bps cap; the third would exceed it.
+    assert_eq!(funded.len(), 2);
+    let before_cap_entry = &ids.get(2).unwrap();
+    assert_eq!(funded.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(funded.get(1).unwrap(), ids.get(1).unwrap());
+
+    let stats = te.pool.get_stats();
+    // Stopped cleanly: the third invoice was left untouched, not partially
+    // funded, and the fourth was never attempted.
+    assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT * 2);
+    assert_eq!(stats.active_invoice_count, 2);
+    assert_eq!(te.invoice.get_status(before_cap_entry), 1); // still Listed
+    assert_eq!(te.invoice.get_status(&ids.get(3).unwrap()), 1); // Listed
+    assert_eq!(stats.utilization_rate_bps, 6_666);
+    assert!(stats.utilization_rate_bps <= 7_000);
+}
+
+/// A capacity stop is not a panic: the batch returns a partial funded-list.
+#[test]
+fn test_batch_fund_invoice_stops_on_insufficient_liquidity() {
+    let te = setup();
+    // Exactly enough for one invoice at 100% utilization.
+    te.pool.deposit(&te.lp, &DEFAULT_FUNDED_AMOUNT);
+
+    let ids = vec![
+        &te.env,
+        create_and_list(&te, &te.usdc_id),
+        create_and_list(&te, &te.usdc_id),
+    ];
+
+    let funded = te.pool.batch_fund_invoice(&ids);
+    assert_eq!(funded.len(), 1);
+    assert_eq!(funded.get(0).unwrap(), ids.get(0).unwrap());
+    assert_eq!(te.invoice.get_status(&ids.get(1).unwrap()), 1); // Listed
+    assert_eq!(te.pool.get_stats().active_invoice_count, 1);
+}
+
+/// Eligibility failures are NOT treated as a capacity stop: an ineligible entry
+/// still reverts the whole batch with the same typed error `fund_invoice` raises.
+#[test]
+#[should_panic(expected = "Error(Contract, #16)")]
+fn test_batch_fund_invoice_reverts_on_already_funded_entry() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let first = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&first);
+
+    let second = create_and_list(&te, &te.usdc_id);
+    let ids = vec![&te.env, second, first];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+/// An unlisted invoice reverts the batch too (`InvoiceNotListed` = #8).
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_batch_fund_invoice_reverts_on_unlisted_entry() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let listed = create_and_list(&te, &te.usdc_id);
+    // Created but never listed.
+    let due_date = te.env.ledger().timestamp() + 86400;
+    let unlisted = te.invoice.create(
+        &te.issuer,
+        &te.buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &te.usdc_id,
+    );
+
+    let ids = vec![&te.env, listed, unlisted];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+#[test]
+fn test_batch_fund_invoice_on_empty_batch_is_a_noop() {
+    let te = setup();
+    let ids = vec![&te.env];
+    let funded = te.pool.batch_fund_invoice(&ids);
+    assert!(funded.is_empty());
+    assert_eq!(te.pool.get_stats().total_funded, 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #26)")]
+fn test_batch_fund_invoice_rejects_oversized_batch() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let id = create_and_list(&te, &te.usdc_id);
+    let mut ids: Vec<BytesN<32>> = Vec::new(&te.env);
+    for _ in 0..=MAX_BATCH_SIZE {
+        ids.push_back(id.clone());
+    }
+    te.pool.batch_fund_invoice(&ids);
+}
+
+/// A full 50-entry batch is permitted; the budget is lifted only because each
+/// entry performs several cross-contract calls.
+#[test]
+fn test_batch_fund_invoice_allows_exactly_max_batch_size() {
+    let te = setup();
+    te.env.budget().reset_unlimited();
+    te.pool.deposit(&te.lp, &1_000_000_000_000);
+
+    let mut ids: Vec<BytesN<32>> = Vec::new(&te.env);
+    for _ in 0..MAX_BATCH_SIZE {
+        ids.push_back(create_and_list(&te, &te.usdc_id));
+    }
+
+    let funded = te.pool.batch_fund_invoice(&ids);
+    assert_eq!(funded.len(), MAX_BATCH_SIZE);
+    assert_eq!(te.pool.get_stats().active_invoice_count, MAX_BATCH_SIZE);
 }

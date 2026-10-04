@@ -1148,6 +1148,19 @@ impl PoolContract {
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
         require_not_paused(&env);
         Self::require_initialized(&env);
+        // `stop_on_capacity = false`: a single-invoice call always panics on a
+        // capacity shortfall, matching the long-standing behavior.
+        Self::fund_one(env, invoice_id, false)
+    }
+
+    /// Shared body of [`Self::fund_invoice`] and [`Self::batch_fund_invoice`].
+    ///
+    /// When `stop_on_capacity` is `true` (batch mode), a shortfall in available
+    /// liquidity or a utilization-cap breach returns `false` instead of
+    /// panicking so the caller can stop cleanly. All eligibility failures (not
+    /// listed, already funded, unverified issuer/buyer, asset mismatch) panic in
+    /// both modes — those are caller errors, not capacity.
+    fn fund_one(env: Env, invoice_id: BytesN<32>, stop_on_capacity: bool) -> bool {
         let invoice_contract = Self::invoice_contract(&env)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
 
@@ -1226,6 +1239,9 @@ impl PoolContract {
         let total_funded = totals.funded;
         let available = total_deposits - total_funded;
         if funded_amount > available {
+            if stop_on_capacity {
+                return false;
+            }
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
         }
 
@@ -1234,6 +1250,9 @@ impl PoolContract {
         let utilization_after =
             Self::utilization_bps_or_panic(&env, new_total_funded, total_deposits);
         if utilization_after > max_utilization_bps {
+            if stop_on_capacity {
+                return false;
+            }
             panic_with_error!(&env, PoolError::UtilizationCapExceeded);
         }
 
@@ -1276,6 +1295,72 @@ impl PoolContract {
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    /// Funds several listed invoices in one call, applying `fund_invoice`'s
+    /// checks to each entry and stopping when the pool runs out of capacity.
+    ///
+    /// Entries are processed in the given order. Each entry that passes every
+    /// eligibility check in [`Self::fund_invoice`] is funded exactly as
+    /// `fund_invoice` would, including the same cross-contract verification
+    /// (listed status, registry verification of issuer and buyer, funding-asset
+    /// match) and the same pool-side accounting and `escrow::lock` call.
+    ///
+    /// # Capacity handling
+    ///
+    /// When the next entry cannot be funded **because the pool lacks capacity**
+    /// — insufficient available liquidity, or a resulting utilization rate above
+    /// `max_utilization_bps` — funding **stops** and every remaining entry is
+    /// left untouched. This deliberately never partially drains the pool: an
+    /// entry that would breach the cap is not funded in part, and no entry after
+    /// it is funded either.
+    ///
+    /// Entries that fail an *eligibility* check (not listed, already funded by
+    /// this pool, unverified issuer/buyer, asset mismatch) instead revert the
+    /// whole call with the same typed error `fund_invoice` would raise. The
+    /// distinction matters: a capacity stop is a normal, expected outcome for
+    /// an LP filling the pool, whereas an ineligible entry is a caller mistake
+    /// that should be fixed rather than silently skipped.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_ids` - The invoices to fund, in priority order.
+    ///
+    /// # Auth
+    /// None — funding is permissionless, exactly like [`Self::fund_invoice`].
+    ///
+    /// # Panics
+    /// * `PoolError::BatchSizeExceeded` if `invoice_ids.len() > MAX_BATCH_SIZE`.
+    /// * `PoolError::NotInitialized` if the pool is not initialized.
+    /// * Any eligibility error [`Self::fund_invoice`] documents, for the first
+    ///   entry that is ineligible.
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The invoice IDs actually funded, in the order they
+    ///   were funded. Callers can diff this against the input to see which
+    ///   entries were skipped by a capacity stop.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let funded = client.batch_fund_invoice(&invoice_ids);
+    /// ```
+    pub fn batch_fund_invoice(env: Env, invoice_ids: Vec<BytesN<32>>) -> Vec<BytesN<32>> {
+        require_not_paused(&env);
+        Self::require_initialized(&env);
+        if invoice_ids.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, PoolError::BatchSizeExceeded);
+        }
+
+        let mut funded: Vec<BytesN<32>> = Vec::new(&env);
+        for invoice_id in invoice_ids.iter() {
+            if !Self::fund_one(env.clone(), invoice_id.clone(), true) {
+                // Capacity stop: leave this entry and every later one unfunded
+                // rather than partially draining the pool.
+                break;
+            }
+            funded.push_back(invoice_id.clone());
+        }
+        funded
     }
 
     /// Receives invoice repayment and updates pool liquidity metrics.

@@ -26,6 +26,16 @@ pub const DEFAULT_MIN_INITIAL_DEPOSIT: u128 = 10_000_000;
 /// mirroring the bounds-check pattern used by `list_for_financing`'s discount cap.
 pub const MAX_PROTOCOL_FEE_BPS: u32 = 2000;
 
+/// Maximum number of entries accepted by `batch_fund_invoice`.
+///
+/// Mirrors the 50-entry cap that `RegistryContract::batch_register_issuers` and
+/// `InvoiceContract::batch_create` use. The cap bounds the worst-case cost of a
+/// single batch: every entry performs the same cross-contract reads as
+/// `fund_invoice`, so an unbounded `Vec` would let a caller blow the
+/// per-transaction budget that `docs/LIMITATIONS.md` already flags as the
+/// protocol's most expensive operation.
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 /// Floor of the suggested-discount curve returned by
 /// `get_suggested_discount_bps`: the rate suggested while the pool is idle
 /// (0% utilization). 100 bps = 1%, i.e. an issuer is always quoted a
