@@ -5,14 +5,14 @@ use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
-    token,
+    token, vec,
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Vec,
 };
 
 use crate::{
-    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, MAX_FACE_VALUE,
-    MAX_PAGE_SIZE, TTL_EXTEND_TO, TTL_THRESHOLD,
+    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, MAX_BATCH_SIZE,
+    MAX_FACE_VALUE, MAX_PAGE_SIZE, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 // Default invoice parameters used across tests.
@@ -4450,4 +4450,314 @@ fn test_pause_and_unpause_emit_events() {
         Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
         admin
     );
+}
+// ============== ISSUE #720: BATCH INVOICE CREATION ==============
+
+/// Helper: one valid `batch_create` entry.
+fn batch_entry(
+    env: &Env,
+    buyer: &Address,
+    usdc: &Address,
+    face_value: u128,
+) -> (Address, u128, u64, Address) {
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    (buyer.clone(), face_value, due_date, usdc.clone())
+}
+
+#[test]
+fn test_batch_create_creates_every_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let entries = vec![
+        &env,
+        (buyer.clone(), DEFAULT_FACE_VALUE, due_date, usdc.clone()),
+        (
+            buyer.clone(),
+            DEFAULT_FACE_VALUE * 2,
+            due_date + 100,
+            usdc.clone(),
+        ),
+        (buyer.clone(), 500_000_000, due_date + 200, usdc.clone()),
+    ];
+
+    let ids = client.batch_create(&issuer, &entries);
+    assert_eq!(ids.len(), 3);
+
+    for (index, id) in ids.iter().enumerate() {
+        let invoice = client.get(&id);
+        assert_eq!(invoice.status, InvoiceStatus::Created);
+        assert_eq!(invoice.issuer, issuer);
+        assert_eq!(invoice.buyer, buyer);
+        assert_eq!(invoice.discount_bps, 0);
+        assert_eq!(invoice.funded_amount, 0);
+        assert_eq!(invoice.remaining_balance, invoice.face_value);
+        // Each entry got its own face value.
+        let expected = if index == 1 {
+            DEFAULT_FACE_VALUE * 2
+        } else if index == 2 {
+            500_000_000
+        } else {
+            DEFAULT_FACE_VALUE
+        };
+        assert_eq!(invoice.face_value, expected);
+    }
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 3);
+}
+
+#[test]
+fn test_batch_create_emits_batch_summary_event() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let entries = vec![&env, batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE)];
+
+    let ids = client.batch_create(&issuer, &entries);
+    assert_eq!(ids.len(), 1);
+
+    let events = env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "batch_invoices_created")
+    );
+    assert_eq!(<(u32, u32)>::try_from_val(&env, &data).unwrap(), (1, 0));
+}
+
+#[test]
+fn test_batch_create_on_empty_batch_is_a_noop() {
+    let (env, client, issuer, _, _, _) = setup();
+    let entries = vec![&env];
+    let ids = client.batch_create(&issuer, &entries);
+    assert!(ids.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_batch_create_rejects_oversized_batch() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let mut entries: Vec<(Address, u128, u64, Address)> = Vec::new(&env);
+    for _ in 0..=MAX_BATCH_SIZE {
+        entries.push_back(batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE));
+    }
+    client.batch_create(&issuer, &entries);
+}
+
+/// The 50-entry cap is reachable, but a full batch of `create` entries exceeds
+/// the default test-host budget because every entry performs two cross-contract
+/// `is_verified` calls. The budget is lifted for this test only -- it pins the
+/// cap, not the per-call cost.
+#[test]
+fn test_batch_create_allows_exactly_max_batch_size() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.budget().reset_unlimited();
+    let mut entries: Vec<(Address, u128, u64, Address)> = Vec::new(&env);
+    for _ in 0..MAX_BATCH_SIZE {
+        entries.push_back(batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE));
+    }
+    let ids = client.batch_create(&issuer, &entries);
+    assert_eq!(ids.len(), MAX_BATCH_SIZE);
+}
+
+/// The atomicity guarantee (#720): an unsupported asset on the second entry
+/// reverts the batch, so the first entry's invoice is not left behind.
+#[test]
+fn test_batch_create_with_one_invalid_entry_reverts_whole_batch() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let bad_asset = env.register_contract(None, MockToken);
+    let _ = MockTokenClient::new(&env, &bad_asset);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let entries = vec![
+        &env,
+        (buyer.clone(), DEFAULT_FACE_VALUE, due_date, usdc.clone()),
+        (
+            buyer.clone(),
+            DEFAULT_FACE_VALUE,
+            due_date,
+            bad_asset.clone(), // not a supported asset -> UnsupportedAsset
+        ),
+    ];
+
+    // The whole call reverts with the failing entry's typed error.
+    assert!(client.try_batch_create(&issuer, &entries).is_err());
+
+    // Nothing was persisted: no invoice exists from the first (valid) entry.
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 0);
+}
+
+/// Atomicity also holds for a face-value violation: the batch reverts and no
+/// earlier entry survives.
+#[test]
+fn test_batch_create_with_invalid_face_value_reverts_whole_batch() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let entries = vec![
+        &env,
+        (buyer.clone(), DEFAULT_FACE_VALUE, due_date, usdc.clone()),
+        (buyer.clone(), 0, due_date, usdc.clone()), // InvalidFaceValue
+    ];
+
+    assert!(client.try_batch_create(&issuer, &entries).is_err());
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+}
+
+// ============== ISSUE #721: BATCH LIST FOR FINANCING ==============
+
+#[test]
+fn test_batch_list_for_financing_lists_every_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
+    for _ in 0..3 {
+        let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        attest(&env, &client, &id);
+        entries.push_back((id, DEFAULT_DISCOUNT_BPS));
+    }
+
+    let failed = client.batch_list_for_financing(&entries);
+    assert!(failed.is_empty());
+
+    for (id, discount) in entries.iter() {
+        assert_eq!(client.get_status(&id), 1); // Listed
+        assert_eq!(client.get_discount_bps(&id), discount);
+    }
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 3);
+}
+
+/// Explicit failure behavior (#721): listing is per-entry tolerant, so failed
+/// entries come back in the returned list instead of reverting the batch.
+#[test]
+fn test_batch_list_for_financing_returns_failed_entries_without_reverting() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Attested and listable.
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+    // Created but never attested.
+    let unattested = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // Attested but discount above the 5000 bps cap.
+    let bad_discount = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &bad_discount);
+    // A completely unknown invoice id.
+    let unknown = BytesN::from_array(&env, &[7u8; 32]);
+
+    let entries = vec![
+        &env,
+        (good.clone(), DEFAULT_DISCOUNT_BPS),
+        (unattested.clone(), DEFAULT_DISCOUNT_BPS),
+        (bad_discount.clone(), 5_001),
+        (unknown.clone(), DEFAULT_DISCOUNT_BPS),
+    ];
+
+    // The call succeeds and reports exactly the three failures.
+    let failed = client.batch_list_for_financing(&entries);
+    assert_eq!(failed.len(), 3);
+    assert_eq!(failed.get(0).unwrap(), unattested);
+    assert_eq!(failed.get(1).unwrap(), bad_discount);
+    assert_eq!(failed.get(2).unwrap(), unknown);
+
+    // The good entry listed; the bad ones did not.
+    assert_eq!(client.get_status(&good), 1);
+    assert_eq!(client.get_discount_bps(&good), DEFAULT_DISCOUNT_BPS);
+    assert_eq!(client.get_status(&unattested), 0); // Created
+    assert_eq!(client.get_discount_bps(&unattested), 0);
+    assert_eq!(client.get_status(&bad_discount), 0); // Created
+}
+
+/// A discount above the cap fails only its own entry; a valid entry later in
+/// the same batch still lists.
+#[test]
+fn test_batch_list_for_financing_partial_success_lists_valid_entries() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let bad = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &bad);
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+
+    let entries = vec![
+        &env,
+        (bad.clone(), 5_001),
+        (good.clone(), DEFAULT_DISCOUNT_BPS),
+    ];
+    let failed = client.batch_list_for_financing(&entries);
+
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), bad);
+    assert_eq!(client.get_status(&good), 1);
+}
+
+/// Listing an invoice that is already `Listed` fails only that entry.
+#[test]
+fn test_batch_list_for_financing_reports_already_listed_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &id);
+    assert!(client.list_for_financing(&id, &DEFAULT_DISCOUNT_BPS));
+
+    let entries = vec![&env, (id.clone(), DEFAULT_DISCOUNT_BPS)];
+    let failed = client.batch_list_for_financing(&entries);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), id);
+}
+
+#[test]
+fn test_batch_list_for_financing_emits_batch_summary_event() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+    let unknown = BytesN::from_array(&env, &[3u8; 32]);
+
+    let entries = vec![
+        &env,
+        (good.clone(), DEFAULT_DISCOUNT_BPS),
+        (unknown.clone(), DEFAULT_DISCOUNT_BPS),
+    ];
+    let _ = client.batch_list_for_financing(&entries);
+
+    let events = env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "batch_invoices_listed")
+    );
+    assert_eq!(<(u32, u32)>::try_from_val(&env, &data).unwrap(), (1, 1));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_batch_list_for_financing_rejects_oversized_batch() {
+    let (env, client, _, _, _, _) = setup();
+    let id = BytesN::from_array(&env, &[1u8; 32]);
+    let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
+    for _ in 0..=MAX_BATCH_SIZE {
+        entries.push_back((id.clone(), DEFAULT_DISCOUNT_BPS));
+    }
+    client.batch_list_for_financing(&entries);
+}
+
+#[test]
+fn test_batch_list_for_financing_allows_exactly_max_batch_size() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.budget().reset_unlimited();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
+    for _ in 0..MAX_BATCH_SIZE {
+        let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        attest(&env, &client, &id);
+        entries.push_back((id, DEFAULT_DISCOUNT_BPS));
+    }
+    let failed = client.batch_list_for_financing(&entries);
+    assert!(failed.is_empty());
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), MAX_BATCH_SIZE);
 }

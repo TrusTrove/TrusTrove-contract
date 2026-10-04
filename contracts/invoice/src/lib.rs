@@ -51,6 +51,15 @@ pub const ATTESTATION_DOMAIN_SEPARATOR: [u8; 32] = *b"TrusTrove.InvoiceAttestati
 /// [`InvoiceError::InvalidPageSize`].
 pub const MAX_PAGE_SIZE: u32 = 50;
 
+/// Maximum number of entries accepted by `batch_create` and
+/// `batch_list_for_financing`.
+///
+/// Mirrors `RegistryContract::batch_register_issuers`'s 50-entry cap. Each
+/// `batch_create` entry performs registry verification cross-contract calls,
+/// so an unbounded `Vec` would let one transaction exceed the per-call budget.
+/// Requests over the cap panic with [`InvoiceError::BatchSizeExceeded`].
+pub const MAX_BATCH_SIZE: u32 = 50;
+
 #[contract]
 pub struct InvoiceContract;
 
@@ -640,60 +649,77 @@ impl InvoiceContract {
     ) -> BytesN<32> {
         require_not_paused(&env);
         issuer.require_auth();
+        Self::create_inner(&env, issuer, buyer, face_value, due_date, funding_asset)
+    }
 
+    /// Auth-free body of [`Self::create`], shared with [`Self::batch_create`].
+    ///
+    /// The caller owns `require_not_paused` and the issuer's `require_auth()`.
+    /// The split matters for the batch path: Soroban rejects a repeated
+    /// `require_auth()` for the same address inside one invocation frame with
+    /// `Error(Auth, ExistingValue)`, so a batch cannot re-enter the
+    /// auth-performing `create` once per entry.
+    fn create_inner(
+        env: &Env,
+        issuer: Address,
+        buyer: Address,
+        face_value: u128,
+        due_date: u64,
+        funding_asset: Address,
+    ) -> BytesN<32> {
         if issuer == buyer {
-            panic_with_error!(&env, InvoiceError::InvalidParticipants);
+            panic_with_error!(env, InvoiceError::InvalidParticipants);
         }
 
         let registry_id: Address = env
             .storage()
             .instance()
             .get(&DataKey::RegistryContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
 
-        require_verified(&env, &registry_id, &issuer, InvoiceError::IssuerNotVerified);
-        require_verified(&env, &registry_id, &buyer, InvoiceError::BuyerNotVerified);
+        require_verified(env, &registry_id, &issuer, InvoiceError::IssuerNotVerified);
+        require_verified(env, &registry_id, &buyer, InvoiceError::BuyerNotVerified);
 
         if !env
             .storage()
             .persistent()
             .has(&DataKey::SupportedAsset(funding_asset.clone()))
         {
-            panic_with_error!(&env, InvoiceError::UnsupportedAsset);
+            panic_with_error!(env, InvoiceError::UnsupportedAsset);
         }
 
         if face_value == 0 {
-            panic_with_error!(&env, InvoiceError::InvalidFaceValue);
+            panic_with_error!(env, InvoiceError::InvalidFaceValue);
         }
         if face_value > MAX_FACE_VALUE {
-            panic_with_error!(&env, InvoiceError::InvalidAmount);
+            panic_with_error!(env, InvoiceError::InvalidAmount);
         }
         let now = env.ledger().timestamp();
         if due_date <= now {
-            panic_with_error!(&env, InvoiceError::InvalidDueDate);
+            panic_with_error!(env, InvoiceError::InvalidDueDate);
         }
         let max_due_date = now
             .checked_add(MAX_INVOICE_LIFETIME_SECONDS)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::MathOverflow));
         if due_date > max_due_date {
-            panic_with_error!(&env, InvoiceError::InvalidDueDate);
+            panic_with_error!(env, InvoiceError::InvalidDueDate);
         }
 
         let counter: u64 = env
             .storage()
             .instance()
             .get(&DataKey::Counter)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
         let next_counter = counter
             .checked_add(1)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::CounterOverflow));
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::CounterOverflow));
         env.storage()
             .instance()
             .set(&DataKey::Counter, &next_counter);
 
-        let mut hash_input = Bytes::new(&env);
-        let issuer_xdr = issuer.clone().to_xdr(&env);
-        let buyer_xdr = buyer.clone().to_xdr(&env);
+        let mut hash_input = Bytes::new(env);
+        let issuer_xdr = issuer.clone().to_xdr(env);
+        let buyer_xdr = buyer.clone().to_xdr(env);
 
         // Safely append all XDR bytes without assuming a fixed length
         for b in issuer_xdr.iter() {
@@ -712,7 +738,7 @@ impl InvoiceContract {
             hash_input.push_back(b);
         }
         {
-            let asset_xdr = funding_asset.clone().to_xdr(&env);
+            let asset_xdr = funding_asset.clone().to_xdr(env);
             for b in asset_xdr.iter() {
                 hash_input.push_back(b);
             }
@@ -742,16 +768,16 @@ impl InvoiceContract {
         };
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
-        Self::save_invoice(&env, inv_key, &invoice);
+        Self::save_invoice(env, inv_key, &invoice);
 
-        self::extend_issuer_index(&env, &issuer, &invoice_id);
-        self::extend_buyer_index(&env, &buyer, &invoice_id);
-        self::extend_status_index(&env, InvoiceStatus::Created, &invoice_id);
-        increment_status_count(&env, InvoiceStatus::Created);
-        Self::extend_instance_ttl(&env);
+        self::extend_issuer_index(env, &issuer, &invoice_id);
+        self::extend_buyer_index(env, &buyer, &invoice_id);
+        self::extend_status_index(env, InvoiceStatus::Created, &invoice_id);
+        increment_status_count(env, InvoiceStatus::Created);
+        Self::extend_instance_ttl(env);
 
         events::invoice_created(
-            &env,
+            env,
             &invoice_id,
             &invoice.issuer,
             &invoice.buyer,
@@ -759,6 +785,90 @@ impl InvoiceContract {
             &funding_asset,
         );
         invoice_id
+    }
+
+    /// Creates several invoices in one call, applying `create`'s validation to
+    /// every entry.
+    ///
+    /// Each entry is `(buyer, face_value, due_date, funding_asset)`. Every
+    /// entry is validated and persisted with the exact same checks as
+    /// [`Self::create`] — verified issuer and buyer, distinct participants,
+    /// non-zero face value within [`MAX_FACE_VALUE`], a due date strictly in the
+    /// future and no more than [`MAX_INVOICE_LIFETIME_SECONDS`] ahead, and a
+    /// supported funding asset — by delegating to `create_inner` per entry, so
+    /// the two entry points cannot drift apart.
+    ///
+    /// # Partial-success behavior (atomic)
+    ///
+    /// `batch_create` is **all-or-nothing**: the first entry that fails
+    /// validation reverts the entire call, including invoices already created
+    /// by earlier entries in the same batch. This is deliberate and differs
+    /// from `RegistryContract::batch_register_issuers`, which pre-validates
+    /// only *metadata* and then skips *duplicates*. The reason is that invoice
+    /// creation consumes the shared `Counter`: a partial success would burn
+    /// counter values and persist a prefix of the batch, leaving the caller
+    /// unable to tell which invoices exist without re-reading every invoice it
+    /// submitted. A reverted batch leaves no invoices and no counter movement,
+    /// so the caller can fix the bad entry and resubmit the whole batch.
+    ///
+    /// Callers needing tolerant behavior should pre-validate with the views
+    /// (`is_supported_asset`, `get_buyer`, `get_status`) or call
+    /// [`Self::create`] per invoice. [`Self::batch_list_for_financing`] is the
+    /// tolerant counterpart for the listing step.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer creating every invoice in the batch.
+    /// * `entries` - `(buyer, face_value, due_date, funding_asset)` per invoice.
+    ///
+    /// # Auth
+    /// Requires authorization from `issuer` **once for the entire batch**, not
+    /// once per entry: Soroban rejects a repeated `require_auth()` for the same
+    /// address inside one invocation frame with `Error(Auth, ExistingValue)`,
+    /// so a single signature covers every invoice created by this call.
+    ///
+    /// # Panics
+    /// * `InvoiceError::BatchSizeExceeded` if `entries.len() > MAX_BATCH_SIZE`.
+    /// * Every panic documented for [`Self::create`], for whichever entry
+    ///   fails first.
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The generated invoice IDs, in entry order.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.batch_create(&issuer, &vec![&env, (buyer, 1_000, due, &asset)]);
+    /// ```
+    pub fn batch_create(
+        env: Env,
+        issuer: Address,
+        entries: Vec<(Address, u128, u64, Address)>,
+    ) -> Vec<BytesN<32>> {
+        require_not_paused(&env);
+        if entries.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, InvoiceError::BatchSizeExceeded);
+        }
+        // Auth once for the whole batch; see `create_inner`.
+        issuer.require_auth();
+
+        let mut created: Vec<BytesN<32>> = Vec::new(&env);
+        for (buyer, face_value, due_date, funding_asset) in entries.iter() {
+            // Delegating to `create_inner` keeps validation identical by
+            // construction.
+            let invoice_id = Self::create_inner(
+                &env,
+                issuer.clone(),
+                buyer.clone(),
+                face_value,
+                due_date,
+                funding_asset.clone(),
+            );
+            created.push_back(invoice_id);
+        }
+
+        events::batch_invoices_created(&env, created.len(), 0);
+        Self::extend_instance_ttl(&env);
+        created
     }
 
     /// Lists a created invoice for financing with a discount.
@@ -855,6 +965,158 @@ impl InvoiceContract {
         );
         events::invoice_listed(&env, &invoice_id, discount_bps);
         true
+    }
+
+    /// Lists several created invoices for financing in one call, applying
+    /// `list_for_financing`'s checks to each entry.
+    ///
+    /// Each entry is `(invoice_id, discount_bps)`. An entry is listed when it
+    /// has a submitted attestation, is in `Created` status, has both its issuer
+    /// and buyer still verified in the registry, and has
+    /// `discount_bps <= 5000` — the same checks [`Self::list_for_financing`]
+    /// applies.
+    ///
+    /// # Failure behavior (per-entry tolerant)
+    ///
+    /// Unlike [`Self::batch_create`], this entry point is **tolerant**: an entry
+    /// that fails any check is collected into the returned failed-list and the
+    /// batch continues with the next entry. The call is only rejected by errors
+    /// that make the batch itself meaningless: exceeding [`MAX_BATCH_SIZE`], a
+    /// missing registry reference, or a missing issuer authorization.
+    ///
+    /// Tolerant behavior is right here because the interesting failures are
+    /// per-invoice state an issuer listing a backlog cannot avoid (already
+    /// listed, revoked verification, missing attestation). Reverting the whole
+    /// batch would force the caller to bisect by trial and error, and would also
+    /// discard the successful listings that already emitted events.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `entries` - `(invoice_id, discount_bps)` per invoice.
+    ///
+    /// # Auth
+    /// Requires authorization from each listed invoice's own issuer, but only
+    /// **once per distinct issuer** for the whole batch. Soroban rejects a
+    /// repeated `require_auth()` for the same address inside one invocation
+    /// frame, so a batch cannot re-require per entry; an issuer listing several
+    /// of their own invoices signs once and covers them all.
+    ///
+    /// # Panics
+    /// * `InvoiceError::BatchSizeExceeded` if `entries.len() > MAX_BATCH_SIZE`.
+    /// * `InvoiceError::NotFound` if the contract is uninitialized or the
+    ///   registry reference is missing.
+    /// * An auth failure if a listed invoice's issuer has not authorized this
+    ///   call.
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The invoice IDs that failed validation, in entry
+    ///   order. An empty result means every entry was listed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let failed = client.batch_list_for_financing(
+    ///     &vec![&env, (invoice_id, 250)],
+    /// );
+    /// ```
+    pub fn batch_list_for_financing(env: Env, entries: Vec<(BytesN<32>, u32)>) -> Vec<BytesN<32>> {
+        require_not_paused(&env);
+        if entries.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, InvoiceError::BatchSizeExceeded);
+        }
+
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+
+        let mut failed: Vec<BytesN<32>> = Vec::new(&env);
+        let mut listed: u32 = 0;
+        let mut authorized: Vec<Address> = Vec::new(&env);
+        for (invoice_id, discount_bps) in entries.iter() {
+            match Self::list_entry(
+                &env,
+                &registry_id,
+                &invoice_id,
+                discount_bps,
+                &mut authorized,
+            ) {
+                true => listed += 1,
+                false => failed.push_back(invoice_id.clone()),
+            }
+        }
+
+        events::batch_invoices_listed(&env, listed, failed.len());
+        Self::extend_instance_ttl(&env);
+        failed
+    }
+
+    /// Per-entry body of [`Self::batch_list_for_financing`].
+    ///
+    /// Returns `true` when the invoice was listed and `false` when it failed a
+    /// validation check. Every failure is a *return*, never a panic, so one bad
+    /// entry cannot abort the batch.
+    ///
+    /// `authorized` accumulates the issuers whose signature was already
+    /// required in this frame, because a second `require_auth()` for the same
+    /// address is rejected by Soroban with `Error(Auth, ExistingValue)`.
+    fn list_entry(
+        env: &Env,
+        registry_id: &Address,
+        invoice_id: &BytesN<32>,
+        discount_bps: u32,
+        authorized: &mut Vec<Address>,
+    ) -> bool {
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let Some(mut invoice) = env.storage().persistent().get::<_, Invoice>(&inv_key) else {
+            return false;
+        };
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Attestation(invoice_id.clone()))
+        {
+            return false;
+        }
+        if !authorized.contains(&invoice.issuer) {
+            invoice.issuer.require_auth();
+            authorized.push_back(invoice.issuer.clone());
+        }
+        if invoice.status != InvoiceStatus::Created {
+            return false;
+        }
+        if !Self::is_verified_in(env, registry_id, &invoice.issuer)
+            || !Self::is_verified_in(env, registry_id, &invoice.buyer)
+        {
+            return false;
+        }
+        if discount_bps > 5000 {
+            return false;
+        }
+        invoice.status = InvoiceStatus::Listed;
+        invoice.discount_bps = discount_bps;
+        invoice.listed_at = Some(env.ledger().timestamp());
+        Self::save_invoice(env, inv_key, &invoice);
+
+        move_status_index(
+            env,
+            invoice_id,
+            InvoiceStatus::Created,
+            InvoiceStatus::Listed,
+        );
+        events::invoice_listed(env, invoice_id, discount_bps);
+        true
+    }
+
+    /// Non-panicking registry verification probe, used by the tolerant
+    /// per-entry listing path where a revoked verification must be reported as a
+    /// failed entry rather than revert the whole batch.
+    fn is_verified_in(env: &Env, registry_id: &Address, address: &Address) -> bool {
+        let mut args = Vec::new(env);
+        args.push_back(address.clone().into_val(env));
+        let verified: bool =
+            env.invoke_contract(registry_id, &Symbol::new(env, "is_verified"), args);
+        verified
     }
 
     /// Submits a signed risk attestation from a registered Underwrite agent
