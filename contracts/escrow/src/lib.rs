@@ -121,6 +121,21 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized))
     }
 
+    /// Replaces this contract's Wasm with an installed Wasm using the stored admin.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        Self::extend_instance_ttl(&env);
+        events::upgraded(&env, &new_wasm_hash);
+    }
+
     /// Returns the pool contract address this escrow contract was initialized with.
     ///
     /// # Arguments

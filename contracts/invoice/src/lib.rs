@@ -132,6 +132,21 @@ impl InvoiceContract {
         env.storage().instance().get(&DataKey::Admin)
     }
 
+    /// Replaces this contract's Wasm with an installed Wasm using the stored admin.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
+        admin.require_auth();
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        Self::extend_instance_ttl(&env);
+        events::upgraded(&env, &new_wasm_hash);
+    }
+
     /// Returns the stored registry contract address, or `None` if not initialized.
     ///
     /// # Arguments
@@ -1117,6 +1132,32 @@ impl InvoiceContract {
         let verified: bool =
             env.invoke_contract(registry_id, &Symbol::new(env, "is_verified"), args);
         verified
+    }
+
+    /// Cancels an invoice while it is still in `Created` status.
+    pub fn cancel(env: Env, invoice_id: BytesN<32>) -> bool {
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.issuer.require_auth();
+        if invoice.status != InvoiceStatus::Created {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+
+        invoice.status = InvoiceStatus::Cancelled;
+        Self::save_invoice(&env, inv_key, &invoice);
+        Self::extend_instance_ttl(&env);
+        move_status_index(
+            &env,
+            &invoice_id,
+            InvoiceStatus::Created,
+            InvoiceStatus::Cancelled,
+        );
+        events::invoice_cancelled(&env, &invoice_id);
+        true
     }
 
     /// Submits a signed risk attestation from a registered Underwrite agent
@@ -2457,6 +2498,7 @@ impl InvoiceContract {
             InvoiceStatus::Repaid,
             InvoiceStatus::Defaulted,
             InvoiceStatus::Expired,
+            InvoiceStatus::Cancelled,
         ];
         for status in statuses {
             let key = String::from_str(&env, status.as_str());

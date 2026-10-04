@@ -152,6 +152,7 @@ Confirmed = 4   // dual delivery confirmation
 Repaid    = 5   // buyer has repaid
 Defaulted = 6   // past due without repayment
 Expired   = 7   // listing expired before funding
+Cancelled = 8   // issuer cancelled before listing
 ```
 
 #### Index Entries
@@ -376,7 +377,10 @@ See [LIMITATIONS.md](./LIMITATIONS.md) for current testnet budget constraints.
 
 ## Upgrade Path
 
-The contracts do **not** currently implement the Stellar
-`__constructor`/`__upgrade` pattern. An upgrade requires deploying a new
-contract and wiring the frontend to the new address. See
-[DEPLOYMENT.md](../DEPLOYMENT.md) for the rollback procedure.
+The invoice and escrow contracts expose an admin-gated `upgrade(new_wasm_hash)`
+entry point. First install the new Wasm on the network, then call `upgrade`
+with its hash from the contract's stored admin address. The contract is updated
+in place, so its address and storage remain unchanged. Other contracts still
+require a redeploy if they do not expose this entry point. Protect the admin
+with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
+document for the redeployment rollback procedure.

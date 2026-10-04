@@ -430,7 +430,9 @@ The deployer wallet that calls `initialize()` on each contract becomes its `admi
 
 **Risk:** Loss or compromise of the admin key has a high blast radius. A single actor also introduces censorship risk for issuer onboarding.
 
-**Roadmap:** Migrate admin to a multi-sig (e.g., 3-of-5 Stellar signers) before any mainnet deployment.
+**Mitigation:** Configure the admin as a Stellar account with signer thresholds
+(for example, 3-of-5) before mainnet deployment. No contract change is needed;
+see [DEPLOYMENT.md](DEPLOYMENT.md#multi-sig-admin) for setup instructions.
 
 ### `fund_invoice` was previously admin-gated
 
