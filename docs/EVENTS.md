@@ -198,6 +198,36 @@ Emitted when contract ownership is transferred to a new admin.
 
 ---
 
+### `paused`
+
+Emitted when the admin engages the emergency circuit breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"paused"` |
+| `topic[1]` | `Address` | Admin who authorized the pause |
+| **Data** | `()` | None |
+
+**Emitted by:** `pause()` in `contracts/invoice/src/lib.rs`
+
+---
+
+### `unpaused`
+
+Emitted when the admin disengages the emergency circuit breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"unpaused"` |
+| `topic[1]` | `Address` | Admin who authorized the unpause |
+| **Data** | `()` | None |
+
+**Emitted by:** `unpause()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `pool_contract_updated`
 
 Emitted when the pool contract address is updated.
@@ -259,6 +289,42 @@ Emitted when the admin updates the agent registry contract address.
 | **Data** | `()` | None |
 
 **Emitted by:** `set_agent_registry_contract()` in `contracts/invoice/src/lib.rs:230`
+
+---
+
+### `batch_invoices_created`
+
+Emitted once per `batch_create()` call, after the per-invoice `invoice_created`
+events, summarizing the batch outcome.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"batch_invoices_created"` |
+| **Data** | `(u32, u32)` | `(created, failed)` counts |
+
+> `failed` is always `0` today: `batch_create()` is atomic and reverts the whole
+> batch on the first invalid entry, so a non-zero `failed` can never reach the
+> chain. The field exists so indexers can key off a stable batch-summary shape.
+
+**Emitted by:** `batch_create()` in `contracts/invoice/src/lib.rs`
+
+---
+
+### `batch_invoices_listed`
+
+Emitted once per `batch_list_for_financing()` call, summarizing the outcome as
+`(listed, failed)` counts. Unlike `batch_create()`, listing is per-entry
+tolerant, so `failed` can legitimately be non-zero — the same IDs are also
+returned by the call.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"batch_invoices_listed"` |
+| **Data** | `(u32, u32)` | `(listed, failed)` counts |
+
+**Emitted by:** `batch_list_for_financing()` in `contracts/invoice/src/lib.rs`
 
 ---
 
@@ -378,9 +444,9 @@ revoke signal.
 
 ---
 
-### `ownership_transferred` (dead code)
+### `ownership_transferred`
 
-Emitted when pool ownership is transferred. Currently unused (marked `#[allow(dead_code)]`).
+Emitted when pool ownership is transferred to a new admin.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -389,7 +455,40 @@ Emitted when pool ownership is transferred. Currently unused (marked `#[allow(de
 | `topic[1]` | `Address` | Old admin |
 | **Data** | `Address` | New admin |
 
-**Source:** `contracts/pool/src/events.rs:39`
+**Emitted by:** `transfer_ownership()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
+### `paused`
+
+Emitted when the admin engages the emergency circuit breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"paused"` |
+| `topic[1]` | `Address` | Admin who authorized the pause |
+| **Data** | `()` | None |
+
+**Emitted by:** `pause()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
+### `unpaused`
+
+Emitted when the admin disengages the emergency circuit breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"unpaused"` |
+| `topic[1]` | `Address` | Admin who authorized the unpause |
+| **Data** | `()` | None |
+
+**Emitted by:** `unpause()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
 
 ---
 
@@ -473,6 +572,37 @@ Emitted when escrow ownership is transferred. Currently unused (marked `#[allow(
 | **Data** | `Address` | New admin |
 
 **Source:** `contracts/escrow/src/events.rs:44`
+
+---
+
+### `paused`
+
+Emitted when the escrow's admin-gated emergency circuit breaker is engaged
+(issue #716). `admin` is indexed so indexers can track who flipped the breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"paused"` |
+| `topic[1]` | `Address` | Admin that authorized the pause |
+| **Data** | `()` | None |
+
+**Emitted by:** `pause()` in `contracts/escrow/src/lib.rs`
+
+---
+
+### `unpaused`
+
+Emitted when the escrow's admin-gated emergency circuit breaker is disengaged.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"unpaused"` |
+| `topic[1]` | `Address` | Admin that authorized the unpause |
+| **Data** | `()` | None |
+
+**Emitted by:** `unpause()` in `contracts/escrow/src/lib.rs`
 
 ---
 
@@ -630,6 +760,38 @@ Emitted when the registry admin role is transferred.
 
 ---
 
+### `paused`
+
+Emitted when the admin engages the emergency circuit breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"paused"` |
+| `topic[1]` | `Address` | Admin who authorized the pause |
+| **Data** | `()` | None |
+
+**Emitted by:** `pause()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `unpaused`
+
+Emitted when the admin disengages the emergency circuit breaker.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"unpaused"` |
+| `topic[1]` | `Address` | Admin who authorized the unpause |
+| **Data** | `()` | None |
+
+**Emitted by:** `unpause()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
 ## Pool Factory Contract
 
 **Contract:** `pool_factory_contract`
@@ -690,6 +852,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 | `invoice_funded` | `invoice_contract`, `pool_contract` |
 | `invoice_defaulted` | `invoice_contract`, `pool_contract` |
 | `ownership_transferred` | All four contracts |
+| `paused` / `unpaused` | All four contracts |
 
 ---
 
@@ -701,6 +864,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
 5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`
+7. **Batch events** — `batch_invoices_created` and `batch_invoices_listed` are summary events emitted after the per-invoice events of the same call. `pool::batch_fund_invoice` has no summary event; reconcile it from the individual `invoice_funded` events instead, which is also what tells you which entries a capacity stop skipped.
 
 ---
 

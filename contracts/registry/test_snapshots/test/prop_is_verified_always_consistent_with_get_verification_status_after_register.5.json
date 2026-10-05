@@ -36,24 +36,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "eHf_"
-                      },
-                      "val": {
-                        "string": "__iM7g"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "t_"
-                      },
-                      "val": {
-                        "string": "ygIc4TKpHL__3Opg_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -117,24 +100,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "eHf_"
-                            },
-                            "val": {
-                              "string": "__iM7g"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "t_"
-                            },
-                            "val": {
-                              "string": "ygIc4TKpHL__3Opg_"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -389,24 +355,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "eHf_"
-                      },
-                      "val": {
-                        "string": "__iM7g"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "t_"
-                      },
-                      "val": {
-                        "string": "ygIc4TKpHL__3Opg_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }

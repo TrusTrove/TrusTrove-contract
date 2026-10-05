@@ -1,6 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Vec};
+use trusttrove_pause::{require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -42,6 +43,7 @@ impl EscrowContract {
     /// client.initialize(&admin, &pool, &usdc);
     /// ```
     pub fn initialize(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
+        require_not_paused(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, EscrowError::AlreadyInitialized);
         }
@@ -119,6 +121,21 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized))
     }
 
+    /// Replaces this contract's Wasm with an installed Wasm using the stored admin.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        admin.require_auth();
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        Self::extend_instance_ttl(&env);
+        events::upgraded(&env, &new_wasm_hash);
+    }
+
     /// Returns the pool contract address this escrow contract was initialized with.
     ///
     /// # Arguments
@@ -168,6 +185,7 @@ impl EscrowContract {
     /// client.lock(&invoice_id, &amount, &issuer);
     /// ```
     pub fn lock(env: Env, invoice_id: BytesN<32>, amount: u128, issuer: Address) -> bool {
+        require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
         if amount == 0 || amount > i128::MAX as u128 {
@@ -223,6 +241,7 @@ impl EscrowContract {
     /// client.release_to_issuer(&invoice_id, &issuer);
     /// ```
     pub fn release_to_issuer(env: Env, invoice_id: BytesN<32>, issuer: Address) -> bool {
+        require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
         if issuer == env.current_contract_address() || issuer == pool {
@@ -290,6 +309,7 @@ impl EscrowContract {
     /// client.release_to_pool(&invoice_id, &repayment_amount);
     /// ```
     pub fn release_to_pool(env: Env, invoice_id: BytesN<32>, repayment_amount: u128) -> bool {
+        require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
         if repayment_amount == 0 || repayment_amount > i128::MAX as u128 {
@@ -364,6 +384,7 @@ impl EscrowContract {
     /// let result = client.handle_default(&invoice_id, &caller);
     /// ```
     pub fn handle_default(env: Env, invoice_id: BytesN<32>, caller: Address) -> bool {
+        require_not_paused(&env);
         let key = DataKey::Locked(invoice_id.clone());
         let Some(record) = env.storage().persistent().get::<_, EscrowRecord>(&key) else {
             return false;
@@ -412,20 +433,79 @@ impl EscrowContract {
         true
     }
 
-    /// Returns the amount currently locked in escrow for an invoice.
+    /// Engages the emergency circuit breaker.
+    ///
+    /// While paused every state-changing entry point (`lock`,
+    /// `release_to_issuer`, `release_to_pool`, `handle_default`) reverts with
+    /// `ContractPaused`, so no funds can move in or out of escrow while the
+    /// read-only views (`get_locked`, `get_locked_at`, `get_history`,
+    /// `get_usdc_asset`, `get_admin`, `get_pool_contract`) stay callable. Only
+    /// the stored admin may pause, and [`Self::unpause`] is intentionally never
+    /// guarded so paused escrow can always be resumed. Emits `paused`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `invoice_id` - The invoice to query.
     ///
     /// # Auth
-    /// None. This is a read-only view.
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `EscrowError::NotInitialized` if the contract has not been
+    ///   initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.pause();
+    /// ```
+    pub fn pause(env: Env) {
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        set_paused(&env, true);
+        events::paused(&env, &admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Disengages the emergency circuit breaker, restoring fund movement.
+    ///
+    /// Deliberately *not* guarded by `require_not_paused`: otherwise paused
+    /// escrow could never be resumed. Emits `unpaused`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `EscrowError::NotInitialized` if the contract has not been
+    ///   initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.unpause();
+    /// ```
+    pub fn unpause(env: Env) {
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        set_paused(&env, false);
+        events::unpaused(&env, &admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the amount of USDC currently locked against an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
     ///
     /// # Panics
     /// Does not panic.
     ///
     /// # Returns
-    /// * `u128` - The amount locked, or 0 if none exists.
+    /// * `u128` - The locked amount, or `0` if no record exists.
     ///
     /// # Example
     /// ```ignore
@@ -533,5 +613,12 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized));
         pool.require_auth();
         pool
+    }
+
+    fn require_admin(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized))
     }
 }

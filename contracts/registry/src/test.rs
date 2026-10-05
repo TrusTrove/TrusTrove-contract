@@ -14,7 +14,7 @@ use soroban_sdk::{
         storage::{Instance as _, Persistent as _},
         Address as _, Events as _, Ledger,
     },
-    vec, Address, Env, IntoVal, String, Symbol, TryIntoVal, Val, Vec,
+    vec, Address, Env, IntoVal, String, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
@@ -2369,4 +2369,171 @@ fn test_batch_register_buyers_exceeds_limit_leaves_state_clean() {
             VerificationStatus::Unregistered
         );
     }
+}
+// ============== ISSUE #715: EMERGENCY PAUSE / UNPAUSE ==============
+
+#[test]
+fn test_pause_blocks_state_changes_and_unpause_restores_them() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Live: registration works. New profiles start `Pending` until an admin
+    // verifies them, so `is_verified` is false and the status is `Pending`.
+    let issuer = Address::generate(&env);
+    assert!(client.register_issuer(&issuer, &map![&env]));
+    let flags_before_pause = client.get_profile(&issuer).packed_flags;
+
+    client.pause();
+
+    // State-changing entry points are rejected while paused...
+    let new_issuer = Address::generate(&env);
+    assert!(client
+        .try_register_issuer(&new_issuer, &map![&env])
+        .is_err());
+    assert!(client.try_update_metadata(&issuer, &map![&env]).is_err());
+    assert!(client.try_revoke(&issuer).is_err());
+    assert!(client.try_transfer_admin(&Address::generate(&env)).is_err());
+    assert!(client
+        .try_batch_register_issuers(&vec![&env, (Address::generate(&env), map![&env])])
+        .is_err());
+
+    // ...while read-only views keep working.
+    assert_eq!(client.get_admin(), admin);
+    assert!(!client.is_verified(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+    // A view that deserializes a full record stays live too, and the rejected
+    // writes above left the record untouched.
+    assert_eq!(client.get_profile(&issuer).packed_flags, flags_before_pause);
+
+    client.unpause();
+
+    // Unpaused: state changes flow again.
+    assert!(client.register_issuer(&new_issuer, &map![&env]));
+    assert!(client.update_metadata(&issuer, &map![&env]));
+}
+
+/// Pins the exact breaker error: `PauseError::ContractPaused` from the shared
+/// crate surfaces as `Error(Contract, #1)`. `RegistryError::AlreadyInitialized`
+/// is the only other #1 and is unreachable from `register_issuer`.
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_register_issuer_reverts_while_paused_with_contract_paused_error() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    client.pause();
+    client.register_issuer(&Address::generate(&env), &map![&env]);
+}
+
+/// Negative auth: only a non-admin signed `pause`, so the stored admin's
+/// `require_auth()` must reject it — a non-admin cannot engage the breaker.
+#[test]
+fn test_pause_requires_admin_authorization() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "pause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_pause().is_err());
+}
+
+/// Negative auth for disengaging: a non-admin cannot unpause either, so a
+/// paused registry cannot be resumed by anyone but the admin.
+#[test]
+fn test_unpause_requires_admin_authorization() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    client.pause();
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "unpause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_unpause().is_err());
+}
+
+#[test]
+fn test_pause_and_unpause_emit_events() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.pause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "paused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+
+    client.unpause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "unpaused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+}
+
+/// Admin ownership transfer is a state change, so the breaker gates it too:
+/// while paused it reverts and the admin is unchanged.
+#[test]
+fn test_transfer_ownership_blocked_while_paused() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let new_admin = Address::generate(&env);
+
+    client.pause();
+    assert!(client.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(client.get_admin(), admin);
+}
+
+/// The breaker is storage-local: pausing one registry must not affect a second,
+/// independently deployed instance.
+#[test]
+fn test_pause_is_scoped_to_one_instance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id_a = env.register_contract(None, RegistryContract);
+    let id_b = env.register_contract(None, RegistryContract);
+    let admin = Address::generate(&env);
+    let a = RegistryContractClient::new(&env, &id_a);
+    let b = RegistryContractClient::new(&env, &id_b);
+    a.initialize(&admin);
+    b.initialize(&admin);
+
+    a.pause();
+
+    let issuer = Address::generate(&env);
+    assert!(a.try_register_issuer(&issuer, &map![&env]).is_err());
+    assert!(b.register_issuer(&issuer, &map![&env]));
 }

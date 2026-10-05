@@ -1525,6 +1525,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "soroban-sdk",
+ "trusttrove-pause",
  "trusttrove-ttl",
 ]
 
@@ -1548,9 +1549,17 @@ dependencies = [
  "proptest",
  "soroban-sdk",
  "trusttrove-escrow",
+ "trusttrove-pause",
  "trusttrove-pool",
  "trusttrove-registry",
  "trusttrove-ttl",
+]
+
+[[package]]
+name = "trusttrove-pause"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
 ]
 
 [[package]]
@@ -1562,6 +1571,7 @@ dependencies = [
  "soroban-sdk",
  "trusttrove-escrow",
  "trusttrove-invoice",
+ "trusttrove-pause",
  "trusttrove-registry",
  "trusttrove-ttl",
 ]
@@ -1585,6 +1595,7 @@ version = "0.1.0"
 dependencies = [
  "proptest",
  "soroban-sdk",
+ "trusttrove-pause",
  "trusttrove-ttl",
 ]
 

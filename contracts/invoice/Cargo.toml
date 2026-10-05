@@ -12,12 +12,14 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 trusttrove-ttl = { path = "../ttl" }
+trusttrove-pause = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 trusttrove-registry = { path = "../registry" }
 trusttrove-escrow = { path = "../escrow" }
 trusttrove-pool = { path = "../pool" }
+trusttrove-test-utils = { workspace = true }
 proptest = "1"
 # Test-only: signs attestation payloads with a real secp256k1 key so
 # submit_attestation's signature-recovery path is exercised for real,
