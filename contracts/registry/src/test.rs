@@ -14,7 +14,7 @@ use soroban_sdk::{
         storage::{Instance as _, Persistent as _},
         Address as _, Events as _, Ledger,
     },
-    vec, Address, Env, IntoVal, String, Symbol, Vec,
+    vec, Address, Env, IntoVal, String, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
@@ -2141,4 +2141,399 @@ fn prop_metadata_empty_key_or_value_always_rejected() {
             Ok(())
         })
         .unwrap();
+}
+
+// ============== ISSUE #851: BATCH REGISTRATION CONSERVATION PROPTESTS ==============
+
+type BatchEntryPlan = (
+    usize,
+    std::vec::Vec<usize>,
+    std::collections::BTreeSet<usize>,
+    std::vec::Vec<std::vec::Vec<(std::string::String, std::string::String)>>,
+);
+
+/// Plan for a batch registration proptest: a pool of `unique_count` addresses,
+/// a vector of indices into that pool forming the batch (with possible
+/// duplicates), a subset of pool indices to pre-register, and a valid
+/// metadata map for every batch entry.
+fn batch_entry_plan() -> impl Strategy<Value = BatchEntryPlan> {
+    (1usize..=50).prop_flat_map(|unique_count| {
+        prop::collection::vec(0..unique_count, 1..=50).prop_flat_map(move |entry_indices| {
+            let entry_count = entry_indices.len();
+            (
+                Just(unique_count),
+                Just(entry_indices),
+                prop::collection::btree_set(0..unique_count, 0..=unique_count),
+                prop::collection::vec(valid_metadata_entries(), entry_count..=entry_count),
+            )
+        })
+    })
+}
+
+/// Asserts that the most recent `batch_registered` event carries exactly
+/// `expected_registered` and `expected_skipped` in its data payload.
+fn assert_batch_event_counts(env: &Env, expected_registered: u32, expected_skipped: u32) {
+    let all_events = env.events().all();
+    let mut found = false;
+    for i in (0..all_events.len()).rev() {
+        let event = all_events.get(i).expect("event index in range");
+        let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if topics.len() != 1 {
+            continue;
+        }
+        let topic_symbol: Symbol = match topics.get(0).unwrap().try_into_val(env) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if topic_symbol == Symbol::new(env, "batch_registered") {
+            let (registered, skipped): (u32, u32) = event
+                .2
+                .clone()
+                .try_into_val(env)
+                .expect("batch event data should be (u32, u32)");
+            assert_eq!(registered, expected_registered);
+            assert_eq!(skipped, expected_skipped);
+            found = true;
+            break;
+        }
+    }
+    assert!(found, "batch_registered event not found");
+}
+
+/// Runs the batch-registration conservation proptest for either issuers
+/// (`is_buyer = false`) or buyers (`is_buyer = true`).
+fn run_batch_register_prop_test(is_buyer: bool) {
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(20));
+    runner
+        .run(
+            &batch_entry_plan(),
+            |(unique_count, entry_indices, preregistered, metadata_per_entry)| {
+                let (env, client) = setup();
+                let admin = Address::generate(&env);
+                client.initialize(&admin);
+
+                // Build the deterministic address pool.
+                let addresses: std::vec::Vec<Address> =
+                    (0..unique_count).map(|_| Address::generate(&env)).collect();
+
+                // Pre-register the chosen addresses and snapshot their profiles
+                // so we can prove skipped entries are unchanged.
+                let mut preregistered_profiles = std::vec::Vec::new();
+                let preregister_metadata = build_metadata(&env, &metadata_per_entry[0]);
+                for idx in &preregistered {
+                    let addr = addresses[*idx].clone();
+                    if is_buyer {
+                        client.register_buyer(&addr, &preregister_metadata);
+                    } else {
+                        client.register_issuer(&addr, &preregister_metadata);
+                    }
+                    preregistered_profiles.push((addr, client.get_profile(&addresses[*idx])));
+                }
+
+                // Build the batch entries from the generated plan.
+                let mut entries = Vec::new(&env);
+                for (i, idx) in entry_indices.iter().enumerate() {
+                    let addr = addresses[*idx].clone();
+                    let metadata = build_metadata(&env, &metadata_per_entry[i]);
+                    entries.push_back((addr, metadata));
+                }
+
+                // Invoke the batch function under test.
+                let skipped = if is_buyer {
+                    client.batch_register_buyers(&entries)
+                } else {
+                    client.batch_register_issuers(&entries)
+                };
+
+                // Recompute the expected outcome from the plan.
+                let mut seen = std::collections::HashSet::new();
+                let mut expected_registered: u32 = 0;
+                let mut expected_skipped = Vec::new(&env);
+                for idx in &entry_indices {
+                    if preregistered.contains(idx) || seen.contains(idx) {
+                        expected_skipped.push_back(addresses[*idx].clone());
+                    } else {
+                        seen.insert(*idx);
+                        expected_registered += 1;
+                    }
+                }
+
+                // Conservation: every entry is either registered or skipped.
+                prop_assert_eq!(
+                    expected_registered + expected_skipped.len(),
+                    entry_indices.len() as u32
+                );
+                prop_assert_eq!(skipped, expected_skipped.clone());
+
+                // Newly registered addresses are Pending with the right role;
+                // pre-registered skipped addresses are untouched.
+                for (i, idx) in entry_indices.iter().enumerate() {
+                    let addr = addresses[*idx].clone();
+                    let already_registered =
+                        preregistered.contains(idx) || entry_indices[..i].contains(idx);
+                    if already_registered {
+                        if let Some((_, before)) =
+                            preregistered_profiles.iter().find(|(a, _)| a == &addr)
+                        {
+                            let after = client.get_profile(&addr);
+                            prop_assert_eq!(before.packed_flags, after.packed_flags);
+                            prop_assert_eq!(before.registered_at, after.registered_at);
+                            prop_assert_eq!(before.metadata.clone(), after.metadata.clone());
+                        }
+                    } else {
+                        let profile = client.get_profile(&addr);
+                        prop_assert_eq!(
+                            profile.role(),
+                            if is_buyer { Role::Buyer } else { Role::Issuer }
+                        );
+                        prop_assert_eq!(
+                            client.get_verification_status(&addr),
+                            VerificationStatus::Pending
+                        );
+                        if is_buyer {
+                            let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
+                            prop_assert_eq!(profile.metadata, expected_metadata);
+                        } else {
+                            prop_assert_eq!(profile.metadata.len(), 0);
+                        }
+                    }
+                }
+
+                // The emitted batch event carries the same counts.
+                assert_batch_event_counts(&env, expected_registered, expected_skipped.len());
+
+                Ok(())
+            },
+        )
+        .unwrap();
+}
+
+#[test]
+fn prop_batch_register_issuers_conserves_entries() {
+    run_batch_register_prop_test(false);
+}
+
+#[test]
+fn prop_batch_register_buyers_conserves_entries() {
+    run_batch_register_prop_test(true);
+}
+
+#[test]
+fn test_batch_register_issuers_exceeds_limit_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err(), "batch over 50 entries should panic");
+
+    for (address, _) in entries.iter() {
+        assert_eq!(
+            client.get_verification_status(&address),
+            VerificationStatus::Unregistered
+        );
+    }
+}
+
+#[test]
+fn test_batch_register_buyers_exceeds_limit_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let mut entries = Vec::new(&env);
+    for _ in 0..51 {
+        let address = Address::generate(&env);
+        entries.push_back((address, map![&env]));
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_buyers(&entries);
+    }));
+    assert!(result.is_err(), "batch over 50 entries should panic");
+
+    for (address, _) in entries.iter() {
+        assert_eq!(
+            client.get_verification_status(&address),
+            VerificationStatus::Unregistered
+        );
+    }
+}
+// ============== ISSUE #715: EMERGENCY PAUSE / UNPAUSE ==============
+
+#[test]
+fn test_pause_blocks_state_changes_and_unpause_restores_them() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Live: registration works. New profiles start `Pending` until an admin
+    // verifies them, so `is_verified` is false and the status is `Pending`.
+    let issuer = Address::generate(&env);
+    assert!(client.register_issuer(&issuer, &map![&env]));
+    let flags_before_pause = client.get_profile(&issuer).packed_flags;
+
+    client.pause();
+
+    // State-changing entry points are rejected while paused...
+    let new_issuer = Address::generate(&env);
+    assert!(client
+        .try_register_issuer(&new_issuer, &map![&env])
+        .is_err());
+    assert!(client.try_update_metadata(&issuer, &map![&env]).is_err());
+    assert!(client.try_revoke(&issuer).is_err());
+    assert!(client.try_transfer_admin(&Address::generate(&env)).is_err());
+    assert!(client
+        .try_batch_register_issuers(&vec![&env, (Address::generate(&env), map![&env])])
+        .is_err());
+
+    // ...while read-only views keep working.
+    assert_eq!(client.get_admin(), admin);
+    assert!(!client.is_verified(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+    // A view that deserializes a full record stays live too, and the rejected
+    // writes above left the record untouched.
+    assert_eq!(client.get_profile(&issuer).packed_flags, flags_before_pause);
+
+    client.unpause();
+
+    // Unpaused: state changes flow again.
+    assert!(client.register_issuer(&new_issuer, &map![&env]));
+    assert!(client.update_metadata(&issuer, &map![&env]));
+}
+
+/// Pins the exact breaker error: `PauseError::ContractPaused` from the shared
+/// crate surfaces as `Error(Contract, #1)`. `RegistryError::AlreadyInitialized`
+/// is the only other #1 and is unreachable from `register_issuer`.
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_register_issuer_reverts_while_paused_with_contract_paused_error() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    client.pause();
+    client.register_issuer(&Address::generate(&env), &map![&env]);
+}
+
+/// Negative auth: only a non-admin signed `pause`, so the stored admin's
+/// `require_auth()` must reject it — a non-admin cannot engage the breaker.
+#[test]
+fn test_pause_requires_admin_authorization() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "pause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_pause().is_err());
+}
+
+/// Negative auth for disengaging: a non-admin cannot unpause either, so a
+/// paused registry cannot be resumed by anyone but the admin.
+#[test]
+fn test_unpause_requires_admin_authorization() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    client.pause();
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "unpause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_unpause().is_err());
+}
+
+#[test]
+fn test_pause_and_unpause_emit_events() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.pause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "paused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+
+    client.unpause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "unpaused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+}
+
+/// Admin ownership transfer is a state change, so the breaker gates it too:
+/// while paused it reverts and the admin is unchanged.
+#[test]
+fn test_transfer_ownership_blocked_while_paused() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let new_admin = Address::generate(&env);
+
+    client.pause();
+    assert!(client.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(client.get_admin(), admin);
+}
+
+/// The breaker is storage-local: pausing one registry must not affect a second,
+/// independently deployed instance.
+#[test]
+fn test_pause_is_scoped_to_one_instance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id_a = env.register_contract(None, RegistryContract);
+    let id_b = env.register_contract(None, RegistryContract);
+    let admin = Address::generate(&env);
+    let a = RegistryContractClient::new(&env, &id_a);
+    let b = RegistryContractClient::new(&env, &id_b);
+    a.initialize(&admin);
+    b.initialize(&admin);
+
+    a.pause();
+
+    let issuer = Address::generate(&env);
+    assert!(a.try_register_issuer(&issuer, &map![&env]).is_err());
+    assert!(b.register_issuer(&issuer, &map![&env]));
 }

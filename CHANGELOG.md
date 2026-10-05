@@ -9,6 +9,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `registry`: `get_profile_count(role)` view, returning how many profiles are
+  registered for `Role::Issuer` / `Role::Buyer` in O(1) from a single stored
+  counter (#841)
+- `registry`: `list_profiles(role, start, limit)` view, returning a page of
+  registered addresses for a role in registration order, so indexers and admin
+  dashboards no longer have to replay `issuer_registered` / `buyer_registered`
+  events from genesis. `limit` is capped at 50 (mirroring the batch cap) and a
+  larger page panics with the new `RegistryError::PageSizeExceeded` (#8) (#841)
+- `registry`: per-role enumeration index, written by every registration path
+  (`register_issuer`, `register_buyer`, `batch_register_issuers`,
+  `batch_register_buyers`) as `DataKey::ProfileIndex(Role, u32)` plus
+  `DataKey::ProfileCount(Role)`, TTL-extended like a profile entry. Skipped
+  (already-registered) batch entries are never indexed twice (#841)
 - `pool`: SEP-41 `approve`, `allowance` and `transfer_from`, so third
   parties can move a share holder's allowance under the spender's own
   auth (#756)

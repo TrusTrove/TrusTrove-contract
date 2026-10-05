@@ -435,9 +435,9 @@ if _should_run "escrow_usdc"; then
     -- initialize \
     --admin "$DEPLOYER_ADDRESS" \
     --pool_contract "$POOL_USDC_ID" \
-    --invoice_contract "$INVOICE_ID" \
     --usdc_asset "$USDC_ISSUER"
 fi
+
 
 if _should_run "pool_usdc"; then
   invoke_init "pool_usdc" "$POOL_USDC_ID" \
@@ -473,7 +473,6 @@ if _should_run "escrow_xlm"; then
     -- initialize \
     --admin "$DEPLOYER_ADDRESS" \
     --pool_contract "$POOL_XLM_ID" \
-    --invoice_contract "$INVOICE_ID" \
     --usdc_asset "$XLM_ASSET"
 fi
 
@@ -498,6 +497,45 @@ if [ -z "$ONLY_CONTRACT" ]; then
   invoke_init "invoice_set_pool" "$INVOICE_ID" \
     -- set_pool_contract \
     --pool_contract "$POOL_USDC_ID"
+fi
+
+# Without the escrow wiring below, repay / repay_partial / repay_early panic
+# with InvoiceError::NotFound when reading DataKey::EscrowContract.
+echo ""
+echo "=== Wiring USDC escrow_contract into invoice_contract ==="
+invoke_init "invoice_set_escrow" "$INVOICE_ID" \
+  -- set_escrow_contract \
+  --escrow_contract "$ESCROW_USDC_ID"
+
+# Without allow-listing, create rejects every invoice with UnsupportedAsset.
+# add_supported_asset is itself idempotent on-chain (a no-op for an asset
+# that is already allow-listed).
+echo ""
+echo "=== Allow-listing USDC as a supported funding asset ==="
+invoke_init "invoice_add_asset_usdc" "$INVOICE_ID" \
+  -- add_supported_asset \
+  --asset "$USDC_ISSUER"
+
+echo ""
+echo "=== Allow-listing XLM as a supported funding asset (EXPERIMENTAL) ==="
+invoke_init "invoice_add_asset_xlm" "$INVOICE_ID" \
+  -- add_supported_asset \
+  --asset "$XLM_ASSET"
+
+# Agent-registry wiring is optional: it is only performed when
+# AGENT_REGISTRY_CONTRACT is set in .env / .env.example.  Without it,
+# submit_attestation panics with InvoiceError::NotFound and
+# list_for_financing can never unlock.
+if [ -n "${AGENT_REGISTRY_CONTRACT:-}" ]; then
+  echo ""
+  echo "=== Wiring agent_registry_contract into invoice_contract ==="
+  invoke_init "invoice_set_agent_registry" "$INVOICE_ID" \
+    -- set_agent_registry_contract \
+    --agent_registry_contract "$AGENT_REGISTRY_CONTRACT"
+else
+  echo ""
+  echo "=== AGENT_REGISTRY_CONTRACT is not set — skipping agent-registry wiring ==="
+  echo "    submit_attestation will fail until it is wired (see DEPLOYMENT.md)."
 fi
 
 # ---------------------------------------------------------------------------

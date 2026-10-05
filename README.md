@@ -74,10 +74,25 @@ Tracks verified SME issuers and buyers.
 initialize(admin)
 register_issuer(address, metadata) → bool
 register_buyer(address, metadata) → bool
+batch_register_issuers(entries) → Vec<Address>   ← admin only, max 50, returns skipped
+batch_register_buyers(entries) → Vec<Address>    ← admin only, max 50, returns skipped
 is_verified(address) → bool
 get_profile(address) → Profile
+get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
+list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
 ```
+
+**The registry is enumerable without replaying events.** Every registration
+path — single and batch, issuer and buyer — appends the new address to a
+per-role index (`ProfileIndex(role, n)`) and bumps a per-role counter
+(`ProfileCount(role)`), both TTL-extended like a profile entry. So an indexer
+or admin dashboard can call `get_profile_count(role)` to size its last page and
+then page through `list_profiles(role, start, limit)` with `limit ≤ 50`
+(`PageSizeExceeded` above the cap). Skipped/already-registered batch entries
+are never indexed twice, pages are contiguous and non-overlapping, and revoked
+profiles remain enumerated (revocation flips verification, it does not
+deregister the profile).
 
 **Revocation is prospective, not retroactive.** `is_verified()` is re-checked
 at every point where new business gets committed — `invoice.create()`,
@@ -105,8 +120,10 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 
 ```
 create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
+batch_create(issuer, entries) → Vec<invoice_id>   ← atomic, max 50 entries
 submit_attestation(invoice_id, payload, signature) → bool
 list_for_financing(invoice_id, discount_bps) → bool
+batch_list_for_financing(entries) → Vec<invoice_id>  ← tolerant, max 50 entries
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
 confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
@@ -116,8 +133,11 @@ repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
-get_by_status(status) → Vec<Invoice>
-get_by_issuer(address) → Vec<Invoice>
+get_by_status(status, page, page_size) → Vec<Invoice>
+get_by_issuer(address, page, page_size) → Vec<Invoice>
+get_by_buyer(address, page, page_size) → Vec<Invoice>
+get_invoice_count_by_issuer(address) → u32
+get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
 set_agent_registry_contract(agent_registry_contract) → bool
@@ -130,6 +150,16 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - Requires invoice to be in `Created` status.
 - Requires an active risk attestation from an authorized Underwrite agent.
 
+#### `batch_create(issuer, entries) → Vec<invoice_id>`
+- `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
+- **Atomic**: one invalid entry reverts the entire batch, including invoices already created by earlier entries. Callers fix the bad entry and resubmit the whole batch.
+- `issuer` authorizes **once** for the whole batch, not once per entry.
+- Panics with `BatchSizeExceeded` (`#28`) above 50 entries.
+
+#### `batch_list_for_financing(entries) → Vec<invoice_id>`
+- `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
+- **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
+- Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
 
 ### escrow_contract
 
@@ -140,17 +170,23 @@ lock(invoice_id, amount) → bool
 release_to_issuer(invoice_id, issuer) → bool
 release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
+pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 ```
 
+When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
+`release_to_pool`, and `handle_default` all revert with `ContractPaused`.
+Read-only views (`get_locked`) stay callable.
+
 ### pool_contract
 
-USDC liquidity pool with share-based LP accounting. Share price grows as invoices repay.
+USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
 ```
 deposit(lp, usdc_amount) → shares
 withdraw(lp, shares) → usdc_amount
 fund_invoice(invoice_id) → bool         ← re-verifies issuer & buyer against registry_contract
+batch_fund_invoice(invoice_ids) → Vec<invoice_id>  ← permissionless, max 50 entries
 receive_repayment(invoice_id, amount) → bool  ← invoice_contract only
 receive_repayment_with_refund(invoice_id, amount, refund, buyer) → bool ← invoice_contract only
 handle_default(invoice_id) → bool
@@ -159,7 +195,8 @@ get_protocol_fee_bps() → u32
 get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
-transfer(from, to, amount) → ()             ← SEP-41 share transfer
+transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
+transfer_shares(from, to, amount) → ()      ← non-standard legacy alias of transfer
 approve(from, spender, amount, expiration_ledger) → ()   ← SEP-41 grant
 allowance(from, spender) → i128                          ← 0 when spent/expired
 transfer_from(spender, from, to, amount) → ()            ← spender auth, spends grant
@@ -403,12 +440,14 @@ TrusTrove is in active development on Stellar testnet. Several centralization tr
 The deployer wallet that calls `initialize()` on each contract becomes its `admin`. That single key currently controls:
 
 - Registering and revoking verified issuers/buyers (`registry_contract`)
-- Emergency pausing (not yet implemented — see roadmap below)
+- Emergency pausing of all four contracts (the escrow circuit breaker landed in issue #716)
 - Triggering `handle_default` as a fallback recovery path (`escrow_contract`)
 
 **Risk:** Loss or compromise of the admin key has a high blast radius. A single actor also introduces censorship risk for issuer onboarding.
 
-**Roadmap:** Migrate admin to a multi-sig (e.g., 3-of-5 Stellar signers) before any mainnet deployment.
+**Mitigation:** Configure the admin as a Stellar account with signer thresholds
+(for example, 3-of-5) before mainnet deployment. No contract change is needed;
+see [DEPLOYMENT.md](DEPLOYMENT.md#multi-sig-admin) for setup instructions.
 
 ### `fund_invoice` was previously admin-gated
 
@@ -436,11 +475,13 @@ If you want to contribute to governance design, open an issue tagged `complexity
 
 `invoice::trigger_default` is permissionless and requires no authorization (`admin.require_auth()` was removed). Anyone can trigger default processing once `now >= due_date`. This removes the single point of failure of an admin-gated default mechanism and ensures timely loss recognition and escrow fund recovery for liquidity pools without relying on admin intervention.
 
-### No emergency pause mechanism
+### Emergency pause mechanism (complete rollout)
 
-There is currently no circuit breaker. If a critical bug is found post-deployment the only recourse is to stop directing traffic to the affected contracts via the frontend.
+All four contracts — `pool`, `invoice`, `registry`, and `escrow` — expose admin-gated `pause() / unpause()` entry points backed by the shared [`trusttrove-pause`](contracts/pause) crate (issues #713, #714, #715, #716). While paused, every state-changing call reverts with `ContractPaused` while read-only views remain live.
 
-**Roadmap:** Add an `admin_pause() / admin_unpause()` function pair to each contract, guarded behind multi-sig, that blocks state-changing calls while reads remain live.
+The escrow covers `initialize`, `lock`, `release_to_issuer`, `release_to_pool`, and `handle_default`, so a compromised escrow admin or a stuck release path can be frozen without touching funds already locked — `get_locked` stays readable throughout.
+
+**Roadmap:** Back the admin key with a multi-sig.
 
 ---
 
@@ -512,6 +553,21 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 23 | `VerificationRequired` | Listing requires a valid underwriting attestation |
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
+| 26 | `InvalidConfiguration` | Configuration value is invalid |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
+| 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
+
+#### Pool Contract (`PoolError`)
+
+| Code | Variant | Description |
+|:---:|---|---|
+| 5 | `InsufficientLiquidity` | Pool does not have enough available liquidity to fund the invoice |
+| 8 | `InvoiceNotListed` | Invoice is not in `Listed` status |
+| 11 | `AssetMismatch` | Invoice funding asset does not match the pool's asset |
+| 12 | `UtilizationCapExceeded` | Funding would breach the pool's utilization cap |
+| 26 | `BatchSizeExceeded` | `batch_fund_invoice` was given more than `MAX_BATCH_SIZE` (50) entries |
+
+See [`contracts/pool/src/errors.rs`](contracts/pool/src/errors.rs) for the full list.
 
 ---
 

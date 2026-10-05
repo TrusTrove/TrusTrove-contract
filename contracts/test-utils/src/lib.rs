@@ -1,9 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, contracttype,
-    testutils::Address as _,
-    Address, BytesN, Env, Map, String, Symbol,
+    contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env, Map,
+    String, Symbol,
 };
 
 pub const TEST_AGENT_SEED: [u8; 32] = [7u8; 32];
@@ -39,7 +38,9 @@ impl MockToken {
         let to_key = TKey(to.clone());
         let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
         let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
-        env.storage().persistent().set(&from_key, &(from_bal - amount));
+        env.storage()
+            .persistent()
+            .set(&from_key, &(from_bal - amount));
         env.storage().persistent().set(&to_key, &(to_bal + amount));
     }
 

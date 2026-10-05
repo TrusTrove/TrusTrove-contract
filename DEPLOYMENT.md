@@ -98,30 +98,87 @@ because each contract references others:
    └─ needs: registry_contract
 
 3. escrow_contract (USDC)
-   └─ needs: pool_contract, invoice_contract, USDC asset
+   └─ needs: pool_contract, USDC asset
 
 4. pool_contract (USDC)
    └─ needs: invoice_contract, escrow_contract, USDC asset
 
 5. escrow_contract (XLM) [EXPERIMENTAL]
-   └─ needs: pool_contract, invoice_contract, XLM asset
+   └─ needs: pool_contract, XLM asset
 
 6. pool_contract (XLM) [EXPERIMENTAL]
    └─ needs: invoice_contract, escrow_contract, XLM asset
 
 7. Wire pool into invoice
    └─ invoice.set_pool_contract(pool_usdc)
+
+8. Wire escrow into invoice
+   └─ invoice.set_escrow_contract(escrow_usdc)
+   Without this, repay / repay_partial / repay_early panic with
+   `InvoiceError::NotFound` when reading `DataKey::EscrowContract`.
+
+9. Allow-list funding assets
+   └─ invoice.add_supported_asset(usdc)
+   └─ invoice.add_supported_asset(xlm)
+   Without this, `create` rejects every invoice with `UnsupportedAsset`.
+
+10. Wire agent registry (optional — skipped when `AGENT_REGISTRY_CONTRACT`
+    is unset)
+    └─ invoice.set_agent_registry_contract(agent_registry)
+    Without this, `submit_attestation` panics and `list_for_financing`
+    can never unlock.
 ```
 
 The registry must be deployed first because all other contracts
 call `is_verified()` on it during initialization.
 
+## Multi-sig Admin
+
+Each protocol contract with an `admin` parameter accepts a Stellar account
+address as its admin. A classic Stellar account can require multiple signers
+for authorization by configuring its signer weights and thresholds; Soroban
+then checks the account's configured threshold when the admin authorizes a
+contract call. Configure this before
+deploying contracts and pass the multisig account's `G...` address as `admin`
+to each `initialize()` call. Keep the individual signer secret keys separate.
+The bundled deployment scripts currently set admin to the deployer's address;
+for a multisig deployment, initialize each contract with the multisig address
+and submit those initialization transactions with the multisig threshold met.
+
+### Testnet Example: 3-of-5
+
+Create and fund five testnet signer accounts, then use Stellar Laboratory's
+Testnet transaction builder to submit `Set Options` operations from the admin
+account with these settings:
+
+| Signer | Weight |
+|--------|--------|
+| Signer 1 | 1 |
+| Signer 2 | 1 |
+| Signer 3 | 1 |
+| Signer 4 | 1 |
+| Signer 5 | 1 |
+
+Set the low, medium, and high thresholds to `3`. Each `Set Options` transaction
+must be authorized by the account's current threshold. Set the account's master
+signer weight to `0` so its own key does not count as one of the five signers.
+The initial signer/threshold update must still be authorized using the
+account's current settings. After setup,
+record the admin account's `G...` address and use it as the admin for each
+contract initialization. When invoking manually or adapting deployment
+automation, pass this address as `--admin` instead of the deployer address and
+submit the initialization transaction with the configured threshold. Subsequent
+admin-only invocations, including contract upgrades, must likewise carry
+authorization satisfying the 3-of-5 threshold.
+
 ## Agent Registry Wiring
 
 `AGENT_REGISTRY_CONTRACT` in `.env.example` refers to the agent-registry
-contract from the separate `underwrite-contract` repo. Wiring it in is a
-manual, optional step and is **not** performed by `deploy.sh` or
-`deploy.ps1`:
+contract from the separate `underwrite-contract` repo. `deploy.sh` and
+`deploy.ps1` wire it automatically **when** `AGENT_REGISTRY_CONTRACT` is
+set in `.env`; otherwise the step is skipped with a clear warning.
+
+To wire it manually (or re-wire it after rotating the agent registry):
 
 1. Deploy the agent-registry contract from the `underwrite-contract` repo.
 2. Set `AGENT_REGISTRY_CONTRACT` in your `.env` to its address.
@@ -132,7 +189,8 @@ manual, optional step and is **not** performed by `deploy.sh` or
      --id "$INVOICE_CONTRACT_ID" \
      --source "$DEPLOYER_ACCOUNT" \
      --network "$STELLAR_NETWORK" \
-     -- set_agent_registry_contract --contract "$AGENT_REGISTRY_CONTRACT"
+     -- set_agent_registry_contract \
+        --agent_registry_contract "$AGENT_REGISTRY_CONTRACT"
    ```
 
 This step is only required if agent-attested invoice submission is used;
@@ -142,7 +200,7 @@ skip it otherwise.
 
 Mainnet deployment is not yet supported. Before mainnet:
 
-- [ ] Admin key migrated to multi-sig
+- [ ] Admin configured as a multi-sig account (see [Multi-sig Admin](#multi-sig-admin))
 - [ ] Emergency pause mechanism implemented
 - [ ] Security audit completed
 - [ ] Issuer release wiring (Issue #56) resolved
@@ -165,7 +223,10 @@ powershell ./scripts/verify.ps1
 ```
 
 This checks each contract responds to a read-only query
-(`get_admin`, `get_counts`, `get_stats`, `get_locked`).
+(`get_admin`, `get_counts`, `get_stats`, `get_locked`) and that the
+invoice contract's post-deploy wiring is in place
+(`get_escrow_contract`, `get_agent_registry_contract`,
+`is_supported_asset`).
 
 You can also verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet).
 
