@@ -78,17 +78,11 @@ if [[ -z "$registry" || -z "$invoice" || -z "$escrow_usdc" || -z "$pool_usdc" ]]
 fi
 
 # Prepare the new table content
-NEW_TABLE="| Contract | Address |
-|----------|---------|
-"
-NEW_TABLE+="| registry_contract | \`$registry\` |
-"
-NEW_TABLE+="| invoice_contract | \`$invoice\` |
-"
-NEW_TABLE+="| escrow_contract | \`$escrow_usdc\` |
-"
-NEW_TABLE+="| pool_contract | \`$pool_usdc\` |
-"
+NEW_TABLE="| Contract | Address |\n|----------|---------|\n"
+NEW_TABLE+="| registry_contract | \`$registry\` |\n"
+NEW_TABLE+="| invoice_contract | \`$invoice\` |\n"
+NEW_TABLE+="| escrow_contract | \`$escrow_usdc\` |\n"
+NEW_TABLE+="| pool_contract | \`$pool_usdc\` |\n"
 
 # Use awk to replace the section between markers in README.md
 awk -v new_content="$NEW_TABLE" '

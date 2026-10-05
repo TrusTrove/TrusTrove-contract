@@ -73,7 +73,6 @@ FRESH=false
 RESUME=false
 DRY_RUN=false
 ONLY_CONTRACT=""
-ONLY_CONTRACT=""
 
 # Parse arguments, handling --only which consumes the next argument
 _args=("$@")
