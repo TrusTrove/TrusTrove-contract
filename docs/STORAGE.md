@@ -180,6 +180,7 @@ Confirmed = 4   // dual delivery confirmation
 Repaid    = 5   // buyer has repaid
 Defaulted = 6   // past due without repayment
 Expired   = 7   // listing expired before funding
+Cancelled = 8   // issuer cancelled before listing
 ```
 
 #### Index Entries
@@ -200,8 +201,12 @@ Expired   = 7   // listing expired before funding
   maintain a count key and an ordered list of entries.
 - Index entries are appended — no compaction on status transitions (entries
   are added to the new status but not removed from the old).
-- `get_by_status()` reads all entries for a status and only returns those
-  whose current `invoice.status` matches (to handle stale index entries).
+- `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
+  (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
+  `page_size` index entries, so cost is bounded regardless of index size.
+- `get_by_status()` still filters each page to entries whose current
+  `invoice.status` matches (to handle stale index entries), so a page may
+  contain fewer than `page_size` results.
 
 ### Storage Key Count
 
@@ -224,6 +229,7 @@ Expired   = 7   // listing expired before funding
 | `PoolContract` | `Address` | Authorised pool contract | `initialize()` |
 | `InvoiceContract` | `Address` | Invoice contract address | `initialize()` |
 | `UsdcAsset` | `Address` | USDC token contract address | `initialize()` |
+| `Paused` | `bool` | Emergency circuit-breaker flag, via `trusttrove_pause::PauseState::Paused` (issue #716). Absent means not paused. | `pause()` / `unpause()` |
 
 ### Persistent Storage
 
@@ -399,7 +405,10 @@ See [LIMITATIONS.md](./LIMITATIONS.md) for current testnet budget constraints.
 
 ## Upgrade Path
 
-The contracts do **not** currently implement the Stellar
-`__constructor`/`__upgrade` pattern. An upgrade requires deploying a new
-contract and wiring the frontend to the new address. See
-[DEPLOYMENT.md](../DEPLOYMENT.md) for the rollback procedure.
+The invoice and escrow contracts expose an admin-gated `upgrade(new_wasm_hash)`
+entry point. First install the new Wasm on the network, then call `upgrade`
+with its hash from the contract's stored admin address. The contract is updated
+in place, so its address and storage remain unchanged. Other contracts still
+require a redeploy if they do not expose this entry point. Protect the admin
+with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
+document for the redeployment rollback procedure.

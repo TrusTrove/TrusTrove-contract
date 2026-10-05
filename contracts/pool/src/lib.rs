@@ -4,6 +4,7 @@ use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, Address, BytesN, Env, IntoVal, String, Symbol,
     Vec,
 };
+use trusttrove_pause::{require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -117,6 +118,7 @@ impl PoolContract {
         share_symbol: String,
         share_decimals: u32,
     ) {
+        require_not_paused(&env);
         if Self::admin(&env).is_some() {
             panic_with_error!(&env, PoolError::AlreadyInitialized);
         }
@@ -187,6 +189,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::MaxUtilizationBps, &DEFAULT_MAX_UTILIZATION_BPS);
+        env.storage().instance().set(&DataKey::FeeBps, &0u32); // Default to 0% fee
         env.storage()
             .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
@@ -339,7 +342,8 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// * Panics if the contract has not been initialized (missing `Admin`).
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `Admin`).
     ///
     /// # Returns
     /// * `Address` - The admin address.
@@ -349,7 +353,141 @@ impl PoolContract {
     /// let admin = client.get_admin();
     /// ```
     pub fn get_admin(env: Env) -> Address {
-        Self::admin(&env).expect("pool is not initialized: admin missing")
+        Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
+    }
+
+    /// Transfers pool admin ownership to `new_admin`.
+    ///
+    /// Uses the dual-authorization pattern shared with `RegistryContract` and
+    /// `InvoiceContract`: both the current admin and the incoming `new_admin`
+    /// must sign. This stops ownership from being handed to an address that has
+    /// not consented (e.g. a mistyped address) and stops a compromised current
+    /// admin from unilaterally installing a key it controls. Emits
+    /// `ownership_transferred`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `new_admin` - The address that will become the pool admin.
+    ///
+    /// # Auth
+    /// Requires authorization from both the current admin and `new_admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    /// * `ContractPaused` (via `trusttrove_pause::require_not_paused`) if the
+    ///   pool is paused.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.transfer_ownership(&new_admin);
+    /// ```
+    pub fn transfer_ownership(env: Env, new_admin: Address) {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        events::ownership_transferred(&env, &admin, &new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Engages the emergency circuit breaker.
+    ///
+    /// While paused every state-changing entry point reverts with
+    /// `ContractPaused`, while read-only views (`get_stats`, `balance`,
+    /// `get_lp_position`, ...) stay callable. Only the stored admin may pause,
+    /// and [`Self::unpause`] is intentionally never guarded so a paused pool can
+    /// always be resumed. Emits `paused`.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.pause();
+    /// ```
+    pub fn pause(env: Env) {
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        set_paused(&env, true);
+        events::paused(&env, &admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Disengages the emergency circuit breaker, restoring state-changing calls.
+    ///
+    /// Deliberately *not* guarded by `require_not_paused`: otherwise a paused
+    /// pool could never be resumed. Emits `unpaused`.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.unpause();
+    /// ```
+    pub fn unpause(env: Env) {
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        set_paused(&env, false);
+        events::unpaused(&env, &admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the protocol fee in basis points.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `FeeBps`).
+    ///
+    /// # Returns
+    /// * `u32` - The protocol fee in basis points.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let fee_bps = client.get_fee_bps();
+    /// ```
+    pub fn get_fee_bps(env: Env) -> u32 {
+        Self::fee_bps(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
+    }
+
+    /// Returns the treasury address for protocol fee distribution.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `TreasuryAddress`).
+    ///
+    /// # Returns
+    /// * `Address` - The treasury address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let treasury = client.get_treasury_address();
+    /// ```
+    pub fn get_treasury_address(env: Env) -> Address {
+        Self::treasury_address(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
     }
 
     /// Returns the invoice contract address configured for the pool.
@@ -361,7 +499,8 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// * Panics if the contract has not been initialized (missing `InvoiceContract`).
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `InvoiceContract`).
     ///
     /// # Returns
     /// * `Address` - The invoice contract address.
@@ -371,7 +510,8 @@ impl PoolContract {
     /// let invoice = client.get_invoice_contract();
     /// ```
     pub fn get_invoice_contract(env: Env) -> Address {
-        Self::invoice_contract(&env).expect("pool is not initialized: invoice contract missing")
+        Self::invoice_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
     }
 
     /// Returns the escrow contract address configured for the pool.
@@ -383,7 +523,8 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// * Panics if the contract has not been initialized (missing `EscrowContract`).
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `EscrowContract`).
     ///
     /// # Returns
     /// * `Address` - The escrow contract address.
@@ -393,7 +534,8 @@ impl PoolContract {
     /// let escrow = client.get_escrow_contract();
     /// ```
     pub fn get_escrow_contract(env: Env) -> Address {
-        Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing")
+        Self::escrow_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
     }
 
     /// Deposits USDC from an LP and issues pool shares.
@@ -421,6 +563,7 @@ impl PoolContract {
     /// let shares = client.deposit(&lp, 10_000_000);
     /// ```
     pub fn deposit(env: Env, lp: Address, usdc_amount: u128) -> u128 {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         lp.require_auth();
         if usdc_amount == 0 {
@@ -514,10 +657,12 @@ impl PoolContract {
     ///   would overflow `u128` while computing the redemption amount.
     ///
     /// # Notes
-    /// On full withdrawal (remaining shares reach zero), `LPInitialDeposit`
-    /// and `LPDepositCount` are removed from storage. This ensures a
-    /// subsequent re-deposit starts with a fresh initial-deposit basis
-    /// and an accurate deposit count.
+    /// Principal is tracked as one aggregate amount per LP, not as per-deposit
+    /// lots. A withdrawal allocates that principal pro rata across the LP's
+    /// shares, so its yield attribution can differ from FIFO or HIFO lot
+    /// accounting after deposits at different share prices. On full withdrawal
+    /// (remaining shares reach zero), `LPInitialDeposit` and `LPDepositCount`
+    /// are removed so a subsequent deposit starts a fresh accounting cycle.
     ///
     /// # Returns
     /// * `u128` - The amount of USDC returned.
@@ -527,6 +672,7 @@ impl PoolContract {
     /// let returned = client.withdraw(&lp, 500);
     /// ```
     pub fn withdraw(env: Env, lp: Address, shares: u128) -> u128 {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         lp.require_auth();
         if shares == 0 {
@@ -648,6 +794,7 @@ impl PoolContract {
     /// shares_token.transfer(&lp, &recipient, &5_000_000_000);
     /// ```
     pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         from.require_auth();
         if amount <= 0 {
@@ -710,6 +857,7 @@ impl PoolContract {
     /// Note: This function accepts i128 to allow for negative amounts in internal accounting,
     /// but negative amounts are rejected as invalid for standard transfers.
     pub fn transfer_shares(env: Env, from: Address, to: Address, amount: i128) {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         from.require_auth();
         if amount <= 0 {
@@ -760,6 +908,7 @@ impl PoolContract {
         amount: i128,
         expiration_ledger: u32,
     ) {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         from.require_auth();
         if amount < 0 {
@@ -850,6 +999,7 @@ impl PoolContract {
     /// // allowance(lp, staking) is now 0
     /// ```
     pub fn transfer_from(env: Env, spender: Address, from: Address, to: Address, amount: i128) {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         spender.require_auth();
         if amount <= 0 {
@@ -973,8 +1123,10 @@ impl PoolContract {
     /// `InvoiceContract::list_for_financing` for the rationale.
     ///
     /// # Panics
+    /// * `AlreadyFunded` if a `FundedInvoice` entry already exists for this
+    ///   invoice id. This check runs first, so a replay of an already-recorded
+    ///   funding always surfaces `AlreadyFunded` rather than a status error.
     /// * `InvoiceNotListed` if the invoice is not in listed status.
-    /// * `AlreadyFunded` if a `FundedInvoice` entry already exists for this invoice id.
     /// * `IssuerNotVerified` if the invoice issuer's registry verification has
     ///   since been revoked.
     /// * `BuyerNotVerified` if the invoice buyer's registry verification has
@@ -994,9 +1146,34 @@ impl PoolContract {
     /// client.fund_invoice(&invoice_id);
     /// ```
     pub fn fund_invoice(env: Env, invoice_id: BytesN<32>) -> bool {
+        require_not_paused(&env);
         Self::require_initialized(&env);
+        // `stop_on_capacity = false`: a single-invoice call always panics on a
+        // capacity shortfall, matching the long-standing behavior.
+        Self::fund_one(env, invoice_id, false)
+    }
+
+    /// Shared body of [`Self::fund_invoice`] and [`Self::batch_fund_invoice`].
+    ///
+    /// When `stop_on_capacity` is `true` (batch mode), a shortfall in available
+    /// liquidity or a utilization-cap breach returns `false` instead of
+    /// panicking so the caller can stop cleanly. All eligibility failures (not
+    /// listed, already funded, unverified issuer/buyer, asset mismatch) panic in
+    /// both modes — those are caller errors, not capacity.
+    fn fund_one(env: Env, invoice_id: BytesN<32>, stop_on_capacity: bool) -> bool {
         let invoice_contract = Self::invoice_contract(&env)
-            .expect("pool is not initialized: invoice contract missing");
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+
+        // The pool's own idempotency guard runs before any cross-contract read
+        // (and before the invoice-status gate below) so a replay of an
+        // already-recorded funding always surfaces the precise `AlreadyFunded`
+        // error instead of a generic `InvoiceNotListed`. The funding entry is
+        // the authoritative record that this invoice was already funded here.
+        // Refs: issue #444.
+        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+        if env.storage().persistent().has(&funded_key) {
+            panic_with_error!(&env, PoolError::AlreadyFunded);
+        }
 
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
@@ -1007,11 +1184,6 @@ impl PoolContract {
         );
         if invoice_status != 1 {
             panic_with_error!(&env, PoolError::InvoiceNotListed);
-        }
-
-        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
-        if env.storage().persistent().has(&funded_key) {
-            panic_with_error!(&env, PoolError::AlreadyFunded);
         }
 
         let registry_id = Self::registry_contract(&env);
@@ -1067,6 +1239,9 @@ impl PoolContract {
         let total_funded = totals.funded;
         let available = total_deposits - total_funded;
         if funded_amount > available {
+            if stop_on_capacity {
+                return false;
+            }
             panic_with_error!(&env, PoolError::InsufficientLiquidity);
         }
 
@@ -1075,6 +1250,9 @@ impl PoolContract {
         let utilization_after =
             Self::utilization_bps_or_panic(&env, new_total_funded, total_deposits);
         if utilization_after > max_utilization_bps {
+            if stop_on_capacity {
+                return false;
+            }
             panic_with_error!(&env, PoolError::UtilizationCapExceeded);
         }
 
@@ -1096,8 +1274,8 @@ impl PoolContract {
             .extend_ttl(&funded_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         // --- Interactions: cross-contract calls after pool state is committed.
-        let escrow_contract =
-            Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing");
+        let escrow_contract = Self::escrow_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
 
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
@@ -1117,6 +1295,72 @@ impl PoolContract {
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    /// Funds several listed invoices in one call, applying `fund_invoice`'s
+    /// checks to each entry and stopping when the pool runs out of capacity.
+    ///
+    /// Entries are processed in the given order. Each entry that passes every
+    /// eligibility check in [`Self::fund_invoice`] is funded exactly as
+    /// `fund_invoice` would, including the same cross-contract verification
+    /// (listed status, registry verification of issuer and buyer, funding-asset
+    /// match) and the same pool-side accounting and `escrow::lock` call.
+    ///
+    /// # Capacity handling
+    ///
+    /// When the next entry cannot be funded **because the pool lacks capacity**
+    /// — insufficient available liquidity, or a resulting utilization rate above
+    /// `max_utilization_bps` — funding **stops** and every remaining entry is
+    /// left untouched. This deliberately never partially drains the pool: an
+    /// entry that would breach the cap is not funded in part, and no entry after
+    /// it is funded either.
+    ///
+    /// Entries that fail an *eligibility* check (not listed, already funded by
+    /// this pool, unverified issuer/buyer, asset mismatch) instead revert the
+    /// whole call with the same typed error `fund_invoice` would raise. The
+    /// distinction matters: a capacity stop is a normal, expected outcome for
+    /// an LP filling the pool, whereas an ineligible entry is a caller mistake
+    /// that should be fixed rather than silently skipped.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_ids` - The invoices to fund, in priority order.
+    ///
+    /// # Auth
+    /// None — funding is permissionless, exactly like [`Self::fund_invoice`].
+    ///
+    /// # Panics
+    /// * `PoolError::BatchSizeExceeded` if `invoice_ids.len() > MAX_BATCH_SIZE`.
+    /// * `PoolError::NotInitialized` if the pool is not initialized.
+    /// * Any eligibility error [`Self::fund_invoice`] documents, for the first
+    ///   entry that is ineligible.
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - The invoice IDs actually funded, in the order they
+    ///   were funded. Callers can diff this against the input to see which
+    ///   entries were skipped by a capacity stop.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let funded = client.batch_fund_invoice(&invoice_ids);
+    /// ```
+    pub fn batch_fund_invoice(env: Env, invoice_ids: Vec<BytesN<32>>) -> Vec<BytesN<32>> {
+        require_not_paused(&env);
+        Self::require_initialized(&env);
+        if invoice_ids.len() > MAX_BATCH_SIZE {
+            panic_with_error!(&env, PoolError::BatchSizeExceeded);
+        }
+
+        let mut funded: Vec<BytesN<32>> = Vec::new(&env);
+        for invoice_id in invoice_ids.iter() {
+            if !Self::fund_one(env.clone(), invoice_id.clone(), true) {
+                // Capacity stop: leave this entry and every later one unfunded
+                // rather than partially draining the pool.
+                break;
+            }
+            funded.push_back(invoice_id.clone());
+        }
+        funded
     }
 
     /// Receives invoice repayment and updates pool liquidity metrics.
@@ -1146,8 +1390,9 @@ impl PoolContract {
     /// client.receive_repayment(&invoice_id, 1_050);
     /// ```
     pub fn receive_repayment(env: Env, invoice_id: BytesN<32>, amount: u128) -> bool {
+        require_not_paused(&env);
         let invoice_contract = Self::invoice_contract(&env)
-            .expect("pool is not initialized: invoice contract missing");
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         invoice_contract.require_auth();
 
         // Shared settlement path; `refund` is 0 so the whole surplus
@@ -1206,8 +1451,9 @@ impl PoolContract {
         refund: u128,
         buyer: Address,
     ) -> bool {
+        require_not_paused(&env);
         let invoice_contract = Self::invoice_contract(&env)
-            .expect("pool is not initialized: invoice contract missing");
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         invoice_contract.require_auth();
 
         // Shared settlement path: `settle_repayment` owns the funded-entry
@@ -1237,9 +1483,11 @@ impl PoolContract {
     /// 2. Calls `invoice.mark_defaulted()` to persist the `Defaulted` status
     ///    on the invoice record, update the status index, and emit the
     ///    `invoice_defaulted` event.
-    /// 3. Updates the pool's local accounting (TotalFunded, TotalDeposits,
-    ///    TotalLossRealised, ActiveInvoiceCount) and removes the funded
-    ///    invoice entry.
+    /// 3. Updates the pool's local accounting and removes the funded invoice
+    ///    entry. Only `TotalFunded`, `TotalLossRealised`, and
+    ///    `ActiveInvoiceCount` change: `TotalDeposits` is intentionally left
+    ///    untouched because escrow returns the principal to the pool, so LP
+    ///    capital is preserved (issue #439).
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1269,18 +1517,23 @@ impl PoolContract {
     /// client.handle_default(&invoice_id);
     /// ```
     pub fn handle_default(env: Env, invoice_id: BytesN<32>) -> bool {
+        require_not_paused(&env);
         let invoice_contract = Self::invoice_contract(&env)
-            .expect("pool is not initialized: invoice contract missing");
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         invoice_contract.require_auth();
 
         let funded_key = DataKey::FundedInvoice(invoice_id.clone());
         if !env.storage().persistent().has(&funded_key) {
             panic_with_error!(&env, PoolError::InvoiceNotFound);
         }
-        let funded_amount: u128 = env.storage().persistent().get(&funded_key).unwrap();
+        let funded_amount: u128 = env
+            .storage()
+            .persistent()
+            .get(&funded_key)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::InvoiceNotFound));
 
-        let escrow_contract =
-            Self::escrow_contract(&env).expect("pool is not initialized: escrow contract missing");
+        let escrow_contract = Self::escrow_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         let pool_address = env.current_contract_address();
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
@@ -1291,23 +1544,25 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::EscrowDefaultNotReleased);
         }
 
+        // Escrow returns the full locked principal to the pool on default (see
+        // `EscrowContract::handle_default`), so LP capital is not lost here:
+        // only `TotalFunded` — capital currently out on funded invoices — is
+        // decremented. `TotalDeposits` is intentionally left unchanged so
+        // `available_liquidity = TotalDeposits - TotalFunded` rises by exactly
+        // the recovered amount and LP share value is preserved. Previously this
+        // also subtracted `funded_amount` from `TotalDeposits`, which
+        // double-counted the loss and artificially deflated share value. Refs:
+        // issue #439.
         let totals = Self::totals(&env);
         let total_funded = totals.funded;
-        let total_deposits = totals.deposits;
         let total_loss_realised = totals.loss_realised;
 
         let new_total_funded = total_funded
             .checked_sub(funded_amount)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-        let new_total_deposits = total_deposits
-            .checked_sub(funded_amount)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &new_total_funded);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalDeposits, &new_total_deposits);
         env.storage().instance().set(
             &DataKey::TotalLossRealised,
             &(total_loss_realised + funded_amount),
@@ -1539,6 +1794,52 @@ impl PoolContract {
         Self::utilization_bps_or_panic(&env, totals.funded, totals.deposits)
     }
 
+    /// Suggests a `discount_bps` for an issuer to consider when calling
+    /// `invoice::list_for_financing`, interpolated linearly from the pool's
+    /// current utilization.
+    ///
+    /// The curve runs from [`SUGGESTED_DISCOUNT_FLOOR_BPS`] at 0% utilization
+    /// (an idle pool prices in almost no risk discount) up to
+    /// [`SUGGESTED_DISCOUNT_CEILING_BPS`] at 100% utilization (a fully
+    /// deployed pool should only fund invoices that pay close to the invoice
+    /// contract's hard 5000 bps discount cap). At utilization `u` the
+    /// suggestion is `floor + (ceiling - floor) * u / 10_000`.
+    ///
+    /// This is advisory only: it is a pure read of the pool's current
+    /// `TotalFunded / TotalDeposits` ratio and does not change how
+    /// `fund_invoice` prices an invoice — the issuer still chooses
+    /// `discount_bps` at listing time and the pool keeps funding whatever it
+    /// was told. It exists so frontends and issuers can query an on-chain
+    /// utilization signal instead of hardcoding rates (issue #719).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `PoolError::Overflow` if `TotalFunded * 10_000` overflows `u128`
+    ///   while the utilization rate is computed (unreachable for realistic
+    ///   supply values).
+    ///
+    /// # Returns
+    /// * `u32` - The suggested discount in basis points, within
+    ///   `[SUGGESTED_DISCOUNT_FLOOR_BPS, SUGGESTED_DISCOUNT_CEILING_BPS]`.
+    ///   An empty (or uninitialized) pool reports 0% utilization and therefore
+    ///   returns the floor.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let suggested_bps = client.get_suggested_discount_bps();
+    /// ```
+    pub fn get_suggested_discount_bps(env: Env) -> u32 {
+        let utilization_bps = Self::get_utilization_rate(env.clone());
+        SUGGESTED_DISCOUNT_FLOOR_BPS
+            + (SUGGESTED_DISCOUNT_CEILING_BPS - SUGGESTED_DISCOUNT_FLOOR_BPS) * utilization_bps
+                / 10_000
+    }
+
     /// Updates the pool's maximum utilization cap.
     ///
     /// The cap bounds the utilization (in basis points) that `fund_invoice`
@@ -1571,6 +1872,7 @@ impl PoolContract {
     /// client.set_max_utilization(&admin, &9000);
     /// ```
     pub fn set_max_utilization(env: Env, admin: Address, new_cap_bps: u32) -> bool {
+        require_not_paused(&env);
         admin.require_auth();
         if new_cap_bps > 10000 {
             panic_with_error!(&env, PoolError::InvalidAmount);
@@ -1606,6 +1908,7 @@ impl PoolContract {
     /// # Returns
     /// * `bool` - `true` when the fee is updated.
     pub fn set_protocol_fee(env: Env, fee_bps: u32, treasury: Address) -> bool {
+        require_not_paused(&env);
         let admin =
             Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         admin.require_auth();
@@ -1655,7 +1958,10 @@ impl PoolContract {
         env.storage()
             .instance()
             .get(&DataKey::TreasuryAddress)
-            .unwrap_or_else(|| Self::admin(&env).expect("pool is not initialized: admin missing"))
+            .unwrap_or_else(|| {
+                Self::admin(&env)
+                    .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
+            })
     }
 
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
@@ -1712,7 +2018,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .get(&DataKey::FundingAsset)
-            .expect("pool is not initialized: funding asset missing")
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::NotInitialized))
     }
 
     fn min_initial_deposit(env: &Env) -> u128 {
@@ -1726,7 +2032,15 @@ impl PoolContract {
         env.storage()
             .instance()
             .get(&DataKey::RegistryContract)
-            .expect("pool is not initialized: registry contract missing")
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::NotInitialized))
+    }
+
+    fn fee_bps(env: &Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::FeeBps)
+    }
+
+    fn treasury_address(env: &Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::TreasuryAddress)
     }
 
     fn totals(env: &Env) -> PoolTotals {
@@ -1807,22 +2121,29 @@ impl PoolContract {
         }
 
         let yield_amount = amount - funded_amount - refund;
-        let totals = Self::totals(env);
-        let total_deposits = totals.deposits;
-        let total_funded = totals.funded;
-        let total_yield = totals.yield_distributed;
 
+        // Calculate protocol fee split. `ProtocolFeeBps` is the live slot
+        // written by `set_protocol_fee`; the legacy `DataKey::FeeBps` slot is
+        // always zero and is no longer consulted here.
         let fee_bps = env
             .storage()
             .instance()
             .get(&DataKey::ProtocolFeeBps)
             .unwrap_or(0u32);
         let protocol_cut = if fee_bps > 0 {
-            yield_amount * (fee_bps as u128) / 10_000
+            yield_amount
+                .checked_mul(fee_bps as u128)
+                .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow))
+                / 10_000
         } else {
             0
         };
         let lp_yield = yield_amount - protocol_cut;
+
+        let totals = Self::totals(env);
+        let total_deposits = totals.deposits;
+        let total_funded = totals.funded;
+        let total_yield = totals.yield_distributed;
 
         if protocol_cut > 0 {
             if let Some(treasury) = env
@@ -1843,6 +2164,8 @@ impl PoolContract {
         let new_total_funded = total_funded
             .checked_sub(funded_amount)
             .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+
+        // Add LP yield (not full yield) to TotalDeposits and TotalYieldDistributed
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + lp_yield));
@@ -1863,7 +2186,8 @@ impl PoolContract {
 
         env.storage().persistent().remove(&funded_key);
 
-        events::repayment_received(env, invoice_id, amount, yield_amount);
+        // Update event to include protocol cut information
+        events::repayment_received(env, invoice_id, amount, lp_yield, protocol_cut);
         Self::extend_instance_ttl(env);
     }
 

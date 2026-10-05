@@ -2385,6 +2385,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "FeeBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "FundingAsset"
                             }
                           ]
@@ -4301,68 +4313,6 @@
         }
       },
       "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "000000000000000000000000000000000000000000000000000000000000000a",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000008"
-              },
-              {
-                "symbol": "get_funding_terms"
-              }
-            ],
-            "data": {
-              "bytes": "55e1249079d8b7d4ed5bdaf46f740a2e626d2bea6a824d555b95ed73c34b337d"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000008",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "get_funding_terms"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 1
-                },
-                {
-                  "u128": {
-                    "hi": 0,
-                    "lo": 10000000000
-                  }
-                },
-                {
-                  "u32": 200
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": true
     },
     {
       "event": {

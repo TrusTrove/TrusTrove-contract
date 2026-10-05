@@ -29,4 +29,12 @@ pub enum InvoiceError {
     CrossContractCallFailed = 24,
     RepaymentExceedsBalance = 25,
     InvalidConfiguration = 26,
+    /// A paginated `get_by_*` query was given a `page_size` larger than
+    /// [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), which would defeat the
+    /// per-call gas bound pagination exists to provide.
+    InvalidPageSize = 27,
+    /// A batch entry point was given more entries than
+    /// [`MAX_BATCH_SIZE`](crate::MAX_BATCH_SIZE), which would defeat the
+    /// per-call cost bound batching exists to provide.
+    BatchSizeExceeded = 28,
 }

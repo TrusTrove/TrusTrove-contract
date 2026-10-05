@@ -7,6 +7,7 @@ members = [
     "contracts/pool",
     "contracts/pool_factory",
     "contracts/ttl",
+    "contracts/pause",
     "tests/integration",
 ]
 
@@ -25,6 +26,7 @@ trusttrove-invoice = { path = "contracts/invoice" }
 trusttrove-escrow = { path = "contracts/escrow" }
 trusttrove-pool = { path = "contracts/pool" }
 trusttrove-pool-factory = { path = "contracts/pool_factory" }
+trusttrove-pause = { path = "contracts/pause" }
 
 [profile.release]
 opt-level = "z"

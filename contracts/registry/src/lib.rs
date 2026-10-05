@@ -1,6 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{contract, contractimpl, map, panic_with_error, Address, Env, Map, String, Vec};
+use trusttrove_pause::{require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -54,6 +55,7 @@ impl RegistryContract {
     /// client.initialize(&admin);
     /// ```
     pub fn initialize(env: Env, admin: Address) {
+        require_not_paused(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, RegistryError::AlreadyInitialized);
         }
@@ -97,6 +99,7 @@ impl RegistryContract {
     /// let result = client.register_issuer(&issuer, &metadata);
     /// ```
     pub fn register_issuer(env: Env, address: Address, metadata: Map<String, String>) -> bool {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         Self::validate_metadata(&env, &metadata);
         address.require_auth();
@@ -130,6 +133,7 @@ impl RegistryContract {
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
     ) -> Vec<Address> {
+        require_not_paused(&env);
         if entries.len() > 50 {
             panic_with_error!(&env, RegistryError::BatchSizeExceeded);
         }
@@ -206,6 +210,7 @@ impl RegistryContract {
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
     ) -> Vec<Address> {
+        require_not_paused(&env);
         if entries.len() > 50 {
             panic_with_error!(&env, RegistryError::BatchSizeExceeded);
         }
@@ -278,6 +283,7 @@ impl RegistryContract {
     /// let result = client.register_buyer(&buyer, &metadata);
     /// ```
     pub fn register_buyer(env: Env, address: Address, metadata: Map<String, String>) -> bool {
+        require_not_paused(&env);
         Self::require_initialized(&env);
         Self::validate_metadata(&env, &metadata);
         address.require_auth();
@@ -331,6 +337,7 @@ impl RegistryContract {
     /// let ok = client.update_profile(&issuer, &new_metadata);
     /// ```
     pub fn update_profile(env: Env, address: Address, metadata: Map<String, String>) -> bool {
+        require_not_paused(&env);
         Self::validate_metadata(&env, &metadata);
         address.require_auth();
         let key = DataKey::Profile(address.clone());
@@ -371,6 +378,7 @@ impl RegistryContract {
     /// let result = client.update_metadata(&issuer, &new_metadata);
     /// ```
     pub fn update_metadata(env: Env, address: Address, metadata: Map<String, String>) -> bool {
+        require_not_paused(&env);
         Self::validate_metadata(&env, &metadata);
         address.require_auth();
         let key = DataKey::Profile(address.clone());
@@ -626,6 +634,7 @@ impl RegistryContract {
     /// let result = client.revoke(&issuer);
     /// ```
     pub fn revoke(env: Env, address: Address) -> bool {
+        require_not_paused(&env);
         let admin = Self::require_admin(&env);
         admin.require_auth();
         let key = DataKey::Profile(address.clone());
@@ -677,6 +686,7 @@ impl RegistryContract {
     /// let ok = client.reinstate(&issuer);
     /// ```
     pub fn reinstate(env: Env, address: Address) -> bool {
+        require_not_paused(&env);
         let admin = Self::require_admin(&env);
         admin.require_auth();
         let key = DataKey::Profile(address.clone());
@@ -697,6 +707,7 @@ impl RegistryContract {
     }
 
     pub fn verify_profile(env: Env, address: Address, verify: bool) -> bool {
+        require_not_paused(&env);
         let admin = Self::require_admin(&env);
         admin.require_auth();
         let key = DataKey::Profile(address.clone());
@@ -734,6 +745,7 @@ impl RegistryContract {
     /// # Panics
     /// * `RegistryError::NotInitialized` if the contract has not been initialized.
     pub fn transfer_ownership(env: Env, new_admin: Address) {
+        require_not_paused(&env);
         let admin = Self::require_admin(&env);
         admin.require_auth();
         new_admin.require_auth();
@@ -773,10 +785,70 @@ impl RegistryContract {
     /// client.transfer_admin(&new_admin);
     /// ```
     pub fn transfer_admin(env: Env, new_admin: Address) {
+        require_not_paused(&env);
         let admin = Self::require_admin(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         events::admin_transferred(&env, &admin, &new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Engages the emergency circuit breaker.
+    ///
+    /// While paused every state-changing entry point (registration, profile
+    /// updates, revocation/reinstatement, verification, batch operations and
+    /// admin transfers) reverts with `ContractPaused`, while read-only views
+    /// (`get_profile`, `is_verified`, `get_verification_status`, `get_admin`)
+    /// stay callable. Only the stored admin may pause, and [`Self::unpause`] is
+    /// intentionally never guarded so a paused registry can always be
+    /// resumed. Emits `paused`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.pause();
+    /// ```
+    pub fn pause(env: Env) {
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        set_paused(&env, true);
+        events::paused(&env, &admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Disengages the emergency circuit breaker, restoring state-changing calls.
+    ///
+    /// Deliberately *not* guarded by `require_not_paused`: otherwise a paused
+    /// registry could never be resumed. Emits `unpaused`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.unpause();
+    /// ```
+    pub fn unpause(env: Env) {
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        set_paused(&env, false);
+        events::unpaused(&env, &admin);
         Self::extend_instance_ttl(&env);
     }
 

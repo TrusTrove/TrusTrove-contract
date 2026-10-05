@@ -51,10 +51,16 @@ pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     );
 }
 
-pub fn repayment_received(env: &Env, invoice_id: &BytesN<32>, amount: u128, yield_amount: u128) {
+pub fn repayment_received(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    amount: u128,
+    lp_yield: u128,
+    protocol_cut: u128,
+) {
     env.events().publish(
         (Symbol::new(env, "repayment_received"), invoice_id.clone()),
-        (amount, yield_amount),
+        (amount, lp_yield, protocol_cut),
     );
 }
 
@@ -72,12 +78,25 @@ pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
     );
 }
 
-#[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ownership_transferred"), old_admin.clone()),
         new_admin.clone(),
     );
+}
+
+/// Emitted by `pause` when the emergency circuit breaker is engaged. `admin` is
+/// the address that authorized the pause, indexed so indexers can track who
+/// flipped the breaker.
+pub fn paused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "paused"), admin.clone()), ());
+}
+
+/// Emitted by `unpause` when the emergency circuit breaker is disengaged.
+pub fn unpaused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "unpaused"), admin.clone()), ());
 }
 
 pub fn protocol_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32, treasury: &Address) {

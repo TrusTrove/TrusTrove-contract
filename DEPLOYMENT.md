@@ -113,6 +113,45 @@ because each contract references others:
 The registry must be deployed first because all other contracts
 call `is_verified()` on it during initialization.
 
+## Multi-sig Admin
+
+Each protocol contract with an `admin` parameter accepts a Stellar account
+address as its admin. A classic Stellar account can require multiple signers
+for authorization by configuring its signer weights and thresholds; Soroban
+then checks the account's configured threshold when the admin authorizes a
+contract call. Configure this before
+deploying contracts and pass the multisig account's `G...` address as `admin`
+to each `initialize()` call. Keep the individual signer secret keys separate.
+The bundled deployment scripts currently set admin to the deployer's address;
+for a multisig deployment, initialize each contract with the multisig address
+and submit those initialization transactions with the multisig threshold met.
+
+### Testnet Example: 3-of-5
+
+Create and fund five testnet signer accounts, then use Stellar Laboratory's
+Testnet transaction builder to submit `Set Options` operations from the admin
+account with these settings:
+
+| Signer | Weight |
+|--------|--------|
+| Signer 1 | 1 |
+| Signer 2 | 1 |
+| Signer 3 | 1 |
+| Signer 4 | 1 |
+| Signer 5 | 1 |
+
+Set the low, medium, and high thresholds to `3`. Each `Set Options` transaction
+must be authorized by the account's current threshold. Set the account's master
+signer weight to `0` so its own key does not count as one of the five signers.
+The initial signer/threshold update must still be authorized using the
+account's current settings. After setup,
+record the admin account's `G...` address and use it as the admin for each
+contract initialization. When invoking manually or adapting deployment
+automation, pass this address as `--admin` instead of the deployer address and
+submit the initialization transaction with the configured threshold. Subsequent
+admin-only invocations, including contract upgrades, must likewise carry
+authorization satisfying the 3-of-5 threshold.
+
 ## Agent Registry Wiring
 
 `AGENT_REGISTRY_CONTRACT` in `.env.example` refers to the agent-registry
@@ -142,7 +181,7 @@ skip it otherwise.
 
 Mainnet deployment is not yet supported. Before mainnet:
 
-- [ ] Admin key migrated to multi-sig
+- [ ] Admin configured as a multi-sig account (see [Multi-sig Admin](#multi-sig-admin))
 - [ ] Emergency pause mechanism implemented
 - [ ] Security audit completed
 - [ ] Issuer release wiring (Issue #56) resolved

@@ -14,7 +14,7 @@ use soroban_sdk::{
         storage::{Instance as _, Persistent as _},
         Address as _, Events as _, Ledger,
     },
-    vec, Address, Env, IntoVal, String, Symbol, TryIntoVal, Val, Vec,
+    vec, Address, Env, IntoVal, String, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
@@ -2370,669 +2370,170 @@ fn test_batch_register_buyers_exceeds_limit_leaves_state_clean() {
         );
     }
 }
-
-// ============== ISSUE #841: PER-ROLE COUNTERS + PAGINATED ENUMERATION ==============
-
-/// Collects every address indexed for `role` by walking `list_profiles` in
-/// pages of `MAX_LIST_LIMIT`, exactly as an indexer or dashboard would.
-fn collect_all_profiles(client: &RegistryContractClient, role: &Role) -> std::vec::Vec<Address> {
-    let page_size = crate::MAX_LIST_LIMIT;
-    let mut all = std::vec::Vec::new();
-    let mut start = 0u32;
-    loop {
-        let page = client.list_profiles(role, &start, &page_size);
-        all.extend(page.iter());
-        if page.len() < page_size {
-            break;
-        }
-        start += page_size;
-    }
-    all
-}
-
-/// Registers `count` issuers through a single admin batch and returns the
-/// addresses in registration order.
-fn batch_register_issuers_n(
-    env: &Env,
-    client: &RegistryContractClient,
-    count: u32,
-) -> std::vec::Vec<Address> {
-    let mut entries = Vec::new(env);
-    let mut addresses = std::vec::Vec::new();
-    for _ in 0..count {
-        let address = Address::generate(env);
-        entries.push_back((address.clone(), map![env]));
-        addresses.push(address);
-    }
-    client.batch_register_issuers(&entries);
-    addresses
-}
-
-/// Registers `count` buyers through a single admin batch and returns the
-/// addresses in registration order.
-fn batch_register_buyers_n(
-    env: &Env,
-    client: &RegistryContractClient,
-    count: u32,
-) -> std::vec::Vec<Address> {
-    let mut entries = Vec::new(env);
-    let mut addresses = std::vec::Vec::new();
-    for _ in 0..count {
-        let address = Address::generate(env);
-        entries.push_back((address.clone(), map![env]));
-        addresses.push(address);
-    }
-    client.batch_register_buyers(&entries);
-    addresses
-}
+// ============== ISSUE #715: EMERGENCY PAUSE / UNPAUSE ==============
 
 #[test]
-fn test_profile_count_is_zero_for_fresh_registry() {
+fn test_pause_blocks_state_changes_and_unpause_restores_them() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
 
-    assert_eq!(client.get_profile_count(&Role::Issuer), 0);
-    assert_eq!(client.get_profile_count(&Role::Buyer), 0);
-    assert_eq!(client.list_profiles(&Role::Issuer, &0, &10).len(), 0);
-    assert_eq!(client.list_profiles(&Role::Buyer, &0, &10).len(), 0);
-}
+    // Live: registration works. New profiles start `Pending` until an admin
+    // verifies them, so `is_verified` is false and the status is `Pending`.
+    let issuer = Address::generate(&env);
+    assert!(client.register_issuer(&issuer, &map![&env]));
+    let flags_before_pause = client.get_profile(&issuer).packed_flags;
 
-#[test]
-fn test_profile_count_and_list_track_single_registrations() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
+    client.pause();
 
-    let issuer1 = Address::generate(&env);
-    let issuer2 = Address::generate(&env);
-    let issuer3 = Address::generate(&env);
-    let buyer1 = Address::generate(&env);
-    let buyer2 = Address::generate(&env);
+    // State-changing entry points are rejected while paused...
+    let new_issuer = Address::generate(&env);
+    assert!(client
+        .try_register_issuer(&new_issuer, &map![&env])
+        .is_err());
+    assert!(client.try_update_metadata(&issuer, &map![&env]).is_err());
+    assert!(client.try_revoke(&issuer).is_err());
+    assert!(client.try_transfer_admin(&Address::generate(&env)).is_err());
+    assert!(client
+        .try_batch_register_issuers(&vec![&env, (Address::generate(&env), map![&env])])
+        .is_err());
 
-    client.register_issuer(&issuer1, &map![&env]);
-    client.register_buyer(&buyer1, &map![&env]);
-    client.register_issuer(&issuer2, &map![&env]);
-    client.register_buyer(&buyer2, &map![&env]);
-    client.register_issuer(&issuer3, &map![&env]);
-
-    assert_eq!(client.get_profile_count(&Role::Issuer), 3);
-    assert_eq!(client.get_profile_count(&Role::Buyer), 2);
-
-    // The index preserves registration order per role, and the two roles are
-    // enumerated independently.
+    // ...while read-only views keep working.
+    assert_eq!(client.get_admin(), admin);
+    assert!(!client.is_verified(&issuer));
     assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer1.clone(), issuer2.clone(), issuer3.clone()]
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
     );
+    // A view that deserializes a full record stays live too, and the rejected
+    // writes above left the record untouched.
+    assert_eq!(client.get_profile(&issuer).packed_flags, flags_before_pause);
+
+    client.unpause();
+
+    // Unpaused: state changes flow again.
+    assert!(client.register_issuer(&new_issuer, &map![&env]));
+    assert!(client.update_metadata(&issuer, &map![&env]));
+}
+
+/// Pins the exact breaker error: `PauseError::ContractPaused` from the shared
+/// crate surfaces as `Error(Contract, #1)`. `RegistryError::AlreadyInitialized`
+/// is the only other #1 and is unreachable from `register_issuer`.
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_register_issuer_reverts_while_paused_with_contract_paused_error() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    client.pause();
+    client.register_issuer(&Address::generate(&env), &map![&env]);
+}
+
+/// Negative auth: only a non-admin signed `pause`, so the stored admin's
+/// `require_auth()` must reject it — a non-admin cannot engage the breaker.
+#[test]
+fn test_pause_requires_admin_authorization() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "pause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_pause().is_err());
+}
+
+/// Negative auth for disengaging: a non-admin cannot unpause either, so a
+/// paused registry cannot be resumed by anyone but the admin.
+#[test]
+fn test_unpause_requires_admin_authorization() {
+    let (env, client) = setup();
+    client.initialize(&Address::generate(&env));
+    client.pause();
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "unpause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_unpause().is_err());
+}
+
+#[test]
+fn test_pause_and_unpause_emit_events() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    client.pause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(topics.len(), 2);
     assert_eq!(
-        client.list_profiles(&Role::Buyer, &0, &10),
-        vec![&env, buyer1.clone(), buyer2.clone()]
-    );
-    assert_eq!(collect_all_profiles(&client, &Role::Issuer).len(), 3);
-    assert_eq!(collect_all_profiles(&client, &Role::Buyer).len(), 2);
-}
-
-#[test]
-fn test_list_profiles_only_returns_profiles_with_the_matching_role() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer1 = Address::generate(&env);
-    let issuer2 = Address::generate(&env);
-    let buyer1 = Address::generate(&env);
-
-    client.register_issuer(&issuer1, &map![&env]);
-    client.register_buyer(&buyer1, &map![&env]);
-    client.register_issuer(&issuer2, &map![&env]);
-
-    for address in collect_all_profiles(&client, &Role::Issuer) {
-        assert_eq!(client.get_profile(&address).role(), Role::Issuer);
-    }
-    for address in collect_all_profiles(&client, &Role::Buyer) {
-        assert_eq!(client.get_profile(&address).role(), Role::Buyer);
-    }
-}
-
-#[test]
-fn test_list_profiles_pages_are_contiguous_and_non_overlapping() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let expected = batch_register_issuers_n(&env, &client, 5);
-    assert_eq!(client.get_profile_count(&Role::Issuer), 5);
-
-    let page0 = client.list_profiles(&Role::Issuer, &0, &2);
-    let page1 = client.list_profiles(&Role::Issuer, &2, &2);
-    let page2 = client.list_profiles(&Role::Issuer, &4, &2);
-    assert_eq!(page0, vec![&env, expected[0].clone(), expected[1].clone()]);
-    assert_eq!(page1, vec![&env, expected[2].clone(), expected[3].clone()]);
-    assert_eq!(page2, vec![&env, expected[4].clone()]);
-
-    let mut walked = std::vec::Vec::new();
-    walked.extend(page0.iter());
-    walked.extend(page1.iter());
-    walked.extend(page2.iter());
-    assert_eq!(walked, expected);
-
-    // Paging with a different page size yields the same sequence.
-    let mut single_step_pages = std::vec::Vec::new();
-    for start in 0..5u32 {
-        single_step_pages.extend(client.list_profiles(&Role::Issuer, &start, &1).iter());
-    }
-    assert_eq!(single_step_pages, expected);
-}
-
-#[test]
-fn test_list_profiles_clamps_start_and_zero_limit() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-    let expected = batch_register_issuers_n(&env, &client, 3);
-    assert_eq!(client.get_profile_count(&Role::Issuer), 3);
-
-    // A page that starts inside the index but runs past the end is short, not
-    // an error.
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &1, &50),
-        vec![&env, expected[1].clone(), expected[2].clone()]
-    );
-    // Starting exactly at, or beyond, the count yields an empty page.
-    assert_eq!(client.list_profiles(&Role::Issuer, &3, &10).len(), 0);
-    assert_eq!(client.list_profiles(&Role::Issuer, &9, &10).len(), 0);
-    // u32::MAX saturates instead of overflowing.
-    assert_eq!(client.list_profiles(&Role::Issuer, &u32::MAX, &50).len(), 0);
-    // A zero-sized page returns nothing without touching the index.
-    assert_eq!(client.list_profiles(&Role::Issuer, &0, &0).len(), 0);
-    assert_eq!(client.get_profile_count(&Role::Issuer), 3);
-}
-
-#[test]
-fn test_list_profiles_limit_at_cap_is_accepted() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    // 50 issuers in one batch (the batch cap) plus 5 more in a second batch.
-    let mut expected = batch_register_issuers_n(&env, &client, 50);
-    expected.extend(batch_register_issuers_n(&env, &client, 5));
-    assert_eq!(client.get_profile_count(&Role::Issuer), 55);
-
-    let first_page = client.list_profiles(&Role::Issuer, &0, &crate::MAX_LIST_LIMIT);
-    assert_eq!(first_page.len(), 50);
-    for address in first_page.iter() {
-        assert_eq!(client.get_profile(&address).role(), Role::Issuer);
-    }
-
-    let second_page = client.list_profiles(
-        &Role::Issuer,
-        &crate::MAX_LIST_LIMIT,
-        &crate::MAX_LIST_LIMIT,
-    );
-    assert_eq!(second_page.len(), 5);
-    assert_eq!(collect_all_profiles(&client, &Role::Issuer), expected);
-}
-
-#[test]
-#[should_panic(expected = "Error(Contract, #8)")]
-fn test_list_profiles_limit_above_cap_panics() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-    batch_register_issuers_n(&env, &client, 1);
-    client.list_profiles(&Role::Issuer, &0, &(crate::MAX_LIST_LIMIT + 1));
-}
-
-#[test]
-fn test_list_profiles_limit_above_cap_panics_for_every_page_size() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-    batch_register_issuers_n(&env, &client, 1);
-
-    for limit in [crate::MAX_LIST_LIMIT + 1, 100u32, 1_000, u32::MAX] {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            client.list_profiles(&Role::Issuer, &0, &limit)
-        }));
-        assert!(
-            result.is_err(),
-            "limit {limit} is above the cap and must panic with PageSizeExceeded"
-        );
-    }
-    // The rejected reads left the index untouched.
-    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
-    assert_eq!(client.list_profiles(&Role::Issuer, &0, &1).len(), 1);
-}
-
-#[test]
-fn test_batch_register_issuers_indexes_only_new_entries() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    // Registered up-front through the single-address path.
-    let issuer1 = Address::generate(&env);
-    client.register_issuer(&issuer1, &map![&env]);
-    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
-
-    let issuer2 = Address::generate(&env);
-    let issuer3 = Address::generate(&env);
-    // issuer1 is a duplicate, issuer3 appears twice: one registration plus one
-    // skip, and neither may be indexed twice.
-    let entries = vec![
-        &env,
-        (issuer1.clone(), map![&env]),
-        (issuer2.clone(), map![&env]),
-        (issuer3.clone(), map![&env]),
-        (issuer3.clone(), map![&env]),
-    ];
-
-    let skipped = client.batch_register_issuers(&entries);
-    assert_eq!(skipped.len(), 2);
-    assert!(skipped.contains(&issuer1));
-    assert!(skipped.contains(&issuer3));
-
-    // One pre-existing + two new (issuer3 counted once) => 3 indexed.
-    assert_eq!(client.get_profile_count(&Role::Issuer), 3);
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer1, issuer2, issuer3]
-    );
-}
-
-#[test]
-fn test_batch_register_buyers_indexes_only_new_entries() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let buyer1 = Address::generate(&env);
-    client.register_buyer(&buyer1, &map![&env]);
-    assert_eq!(client.get_profile_count(&Role::Buyer), 1);
-
-    let buyer2 = Address::generate(&env);
-    let buyer3 = Address::generate(&env);
-    let entries = vec![
-        &env,
-        (buyer1.clone(), map![&env]),
-        (buyer2.clone(), map![&env]),
-        (buyer3.clone(), map![&env]),
-        (buyer3.clone(), map![&env]),
-    ];
-
-    let skipped = client.batch_register_buyers(&entries);
-    assert_eq!(skipped.len(), 2);
-    assert!(skipped.contains(&buyer1));
-    assert!(skipped.contains(&buyer3));
-
-    assert_eq!(client.get_profile_count(&Role::Buyer), 3);
-    assert_eq!(
-        client.list_profiles(&Role::Buyer, &0, &10),
-        vec![&env, buyer1, buyer2, buyer3]
-    );
-}
-
-#[test]
-fn test_batch_register_leaves_the_other_role_index_untouched() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer1 = Address::generate(&env);
-    let issuer2 = Address::generate(&env);
-    let buyer1 = Address::generate(&env);
-
-    client.batch_register_issuers(&vec![
-        &env,
-        (issuer1.clone(), map![&env]),
-        (issuer2.clone(), map![&env]),
-    ]);
-    client.batch_register_buyers(&vec![&env, (buyer1.clone(), map![&env])]);
-
-    assert_eq!(client.get_profile_count(&Role::Issuer), 2);
-    assert_eq!(client.get_profile_count(&Role::Buyer), 1);
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer1, issuer2]
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "paused")
     );
     assert_eq!(
-        client.list_profiles(&Role::Buyer, &0, &10),
-        vec![&env, buyer1]
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+
+    client.unpause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "unpaused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
     );
 }
 
+/// Admin ownership transfer is a state change, so the breaker gates it too:
+/// while paused it reverts and the admin is unchanged.
 #[test]
-fn test_repeated_single_registration_does_not_index_twice() {
+fn test_transfer_ownership_blocked_while_paused() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
+    let new_admin = Address::generate(&env);
+
+    client.pause();
+    assert!(client.try_transfer_ownership(&new_admin).is_err());
+    assert_eq!(client.get_admin(), admin);
+}
+
+/// The breaker is storage-local: pausing one registry must not affect a second,
+/// independently deployed instance.
+#[test]
+fn test_pause_is_scoped_to_one_instance() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let id_a = env.register_contract(None, RegistryContract);
+    let id_b = env.register_contract(None, RegistryContract);
+    let admin = Address::generate(&env);
+    let a = RegistryContractClient::new(&env, &id_a);
+    let b = RegistryContractClient::new(&env, &id_b);
+    a.initialize(&admin);
+    b.initialize(&admin);
+
+    a.pause();
 
     let issuer = Address::generate(&env);
-    client.register_issuer(&issuer, &map![&env]);
-    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
-
-    // A duplicate single registration panics, so the index must be unchanged.
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.register_issuer(&issuer, &map![&env]);
-    }));
-    assert!(result.is_err(), "duplicate registration should panic");
-    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer.clone()]
-    );
-
-    // The cross-role attempt panics too, and must not touch either index.
-    let cross = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        client.register_buyer(&issuer, &map![&env]);
-    }));
-    assert!(cross.is_err(), "cross-role registration should panic");
-    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
-    assert_eq!(client.get_profile_count(&Role::Buyer), 0);
-    assert_eq!(client.list_profiles(&Role::Buyer, &0, &10).len(), 0);
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer]
-    );
-}
-
-#[test]
-fn test_revoked_profiles_remain_enumerated() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer1 = Address::generate(&env);
-    let issuer2 = Address::generate(&env);
-    client.register_issuer(&issuer1, &map![&env]);
-    client.register_issuer(&issuer2, &map![&env]);
-    client.verify_profile(&issuer1, &true);
-    client.revoke(&issuer1);
-
-    // Revocation only flips verification — the profile is not deregistered, so
-    // the enumeration still reports it and the count is unchanged.
-    assert_eq!(client.get_profile_count(&Role::Issuer), 2);
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer1, issuer2]
-    );
-}
-
-#[test]
-fn test_profile_index_and_count_keys_extend_ttl_on_write() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer = Address::generate(&env);
-    client.register_issuer(&issuer, &map![&env]);
-
-    let contract_id = client.address.clone();
-    let index_key = DataKey::ProfileIndex(Role::Issuer, 0);
-    let count_key = DataKey::ProfileCount(Role::Issuer);
-    let buyer_count_key = DataKey::ProfileCount(Role::Buyer);
-
-    let index_ttl: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&index_key)
-    });
-    let count_ttl: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&count_key)
-    });
-    assert!(
-        index_ttl >= 1_999_000,
-        "index entry TTL should be extended close to EXTEND_TO, got {index_ttl}"
-    );
-    assert!(
-        count_ttl >= 1_999_000,
-        "count TTL should be extended close to EXTEND_TO, got {count_ttl}"
-    );
-
-    // The counter key for a role with no registrations is never written.
-    let unwritten: bool = env.as_contract(&contract_id, || {
-        env.storage().persistent().has(&buyer_count_key)
-    });
-    assert!(!unwritten);
-}
-
-#[test]
-fn test_list_profiles_and_count_extend_ttl_on_read() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer = Address::generate(&env);
-    client.register_issuer(&issuer, &map![&env]);
-
-    let contract_id = client.address.clone();
-    let index_key = DataKey::ProfileIndex(Role::Issuer, 0);
-    let count_key = DataKey::ProfileCount(Role::Issuer);
-
-    // Drain both entries below the threshold.
-    let ttl_before_drain: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&index_key)
-    });
-    assert!(ttl_before_drain > 50);
-    env.ledger()
-        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
-
-    let index_before: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&index_key)
-    });
-    let count_before: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&count_key)
-    });
-    assert!(index_before < TTL_THRESHOLD);
-    assert!(count_before < TTL_THRESHOLD);
-
-    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer]
-    );
-
-    let index_after: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&index_key)
-    });
-    let count_after: u32 = env.as_contract(&contract_id, || {
-        env.storage().persistent().get_ttl(&count_key)
-    });
-    assert!(
-        index_after > index_before && index_after >= 1_999_000,
-        "list_profiles should extend the index TTL: before={index_before}, after={index_after}"
-    );
-    assert!(
-        count_after > count_before && count_after >= 1_999_000,
-        "get_profile_count should extend the count TTL: before={count_before}, after={count_after}"
-    );
-}
-
-#[test]
-fn test_list_profiles_skips_index_slots_that_expired() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer1 = Address::generate(&env);
-    let issuer2 = Address::generate(&env);
-    let issuer3 = Address::generate(&env);
-    client.batch_register_issuers(&vec![
-        &env,
-        (issuer1.clone(), map![&env]),
-        (issuer2.clone(), map![&env]),
-        (issuer3.clone(), map![&env]),
-    ]);
-
-    // Simulate an index entry that aged out while the profile survived: the
-    // page must return the surviving addresses rather than fail.
-    let contract_id = client.address.clone();
-    env.as_contract(&contract_id, || {
-        env.storage()
-            .persistent()
-            .remove(&DataKey::ProfileIndex(Role::Issuer, 1));
-    });
-
-    assert_eq!(
-        client.list_profiles(&Role::Issuer, &0, &10),
-        vec![&env, issuer1, issuer3]
-    );
-}
-
-/// A registration step: which pool address to register, in which role, and
-/// through which entry point.
-type IndexStep = (usize, bool, bool);
-
-fn index_step_plan() -> impl Strategy<Value = std::vec::Vec<IndexStep>> {
-    prop::collection::vec((0usize..6, any::<bool>(), any::<bool>()), 1..=14)
-}
-
-/// Applies `steps` and asserts that, for both roles, the counter and the
-/// concatenated `list_profiles` pages describe exactly the addresses that were
-/// registered for that role, in registration order and without duplicates.
-fn run_profile_index_prop_test(
-    steps: std::vec::Vec<IndexStep>,
-) -> Result<(), proptest::test_runner::TestCaseError> {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let pool: std::vec::Vec<Address> = (0..6).map(|_| Address::generate(&env)).collect();
-
-    // First-registration order per role, and the role each address ended up
-    // with (an address can only ever hold one profile).
-    let mut expected: std::collections::HashMap<bool, std::vec::Vec<Address>> =
-        std::collections::HashMap::new();
-    let mut assigned: std::collections::HashMap<usize, bool> = std::collections::HashMap::new();
-
-    for (idx, is_buyer, via_batch) in steps {
-        let address = pool[idx].clone();
-        // `true` once this pool address holds a profile, whatever the role.
-        let already_registered = assigned.contains_key(&idx);
-        if via_batch {
-            let entries = vec![&env, (address.clone(), map![&env])];
-            let skipped = if is_buyer {
-                client.batch_register_buyers(&entries)
-            } else {
-                client.batch_register_issuers(&entries)
-            };
-            if already_registered {
-                // Already registered under some role: the batch must skip it.
-                prop_assert_eq!(skipped.len(), 1);
-                prop_assert!(skipped.contains(&address));
-            } else {
-                prop_assert_eq!(skipped.len(), 0);
-                assigned.insert(idx, is_buyer);
-                expected.entry(is_buyer).or_default().push(address);
-            }
-        } else if already_registered {
-            // Already registered: the single-address path must panic rather
-            // than index the address a second time.
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                if is_buyer {
-                    client.register_buyer(&address, &map![&env]);
-                } else {
-                    client.register_issuer(&address, &map![&env]);
-                }
-            }));
-            prop_assert!(result.is_err(), "duplicate registration should panic");
-        } else {
-            if is_buyer {
-                client.register_buyer(&address, &map![&env]);
-            } else {
-                client.register_issuer(&address, &map![&env]);
-            }
-            assigned.insert(idx, is_buyer);
-            expected.entry(is_buyer).or_default().push(address);
-        }
-    }
-
-    for (is_buyer, role) in [(true, Role::Buyer), (false, Role::Issuer)] {
-        let want = expected.get(&is_buyer).cloned().unwrap_or_default();
-
-        // The counter matches the number of registered profiles for the role.
-        prop_assert_eq!(client.get_profile_count(&role), want.len() as u32);
-
-        // Walking the index in pages reconstructs the registration order
-        // exactly, with no duplicates and no cross-role leakage.
-        let walked = collect_all_profiles(&client, &role);
-        prop_assert_eq!(walked.clone(), want.clone());
-        let mut unique = walked.clone();
-        unique.sort();
-        unique.dedup();
-        prop_assert_eq!(unique.len(), walked.len(), "index contains duplicates");
-
-        // Any page size the caller picks yields the same sequence.
-        for page_size in [1u32, 2, 3, 7] {
-            let mut paged = std::vec::Vec::new();
-            let mut start = 0u32;
-            while start < want.len() as u32 {
-                paged.extend(client.list_profiles(&role, &start, &page_size).iter());
-                start += page_size;
-            }
-            prop_assert_eq!(paged, want.clone());
-        }
-
-        // Every enumerated address really holds a profile with this role.
-        for address in walked {
-            prop_assert_eq!(client.get_profile(&address).role(), role.clone());
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn prop_profile_count_and_index_match_registrations() {
-    let mut runner = TestRunner::new(ProptestConfig::with_cases(20));
-    runner
-        .run(&index_step_plan(), |steps| {
-            run_profile_index_prop_test(steps)
-        })
-        .unwrap();
-}
-
-#[test]
-fn test_profile_index_survives_pagination_across_a_mixed_registry() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    // 30 issuers over three batches, interleaved with 20 buyers: 10 through a
-    // batch and 10 registered singly.
-    let issuers = batch_register_issuers_n(&env, &client, 20);
-    let batch_buyers = batch_register_buyers_n(&env, &client, 10);
-    // Re-send two of the issuers: both must be skipped, neither re-indexed.
-    let repeat = vec![
-        &env,
-        (issuers[0].clone(), map![&env]),
-        (issuers[1].clone(), map![&env]),
-    ];
-    let skipped = client.batch_register_issuers(&repeat);
-    assert_eq!(skipped.len(), 2);
-
-    let more_issuers = batch_register_issuers_n(&env, &client, 10);
-
-    let mut single_buyers = std::vec::Vec::new();
-    for _ in 0..10 {
-        let buyer = Address::generate(&env);
-        client.register_buyer(&buyer, &map![&env]);
-        single_buyers.push(buyer);
-    }
-
-    assert_eq!(client.get_profile_count(&Role::Issuer), 30);
-    assert_eq!(client.get_profile_count(&Role::Buyer), 20);
-
-    // Issuer order: first batch, then the second (the repeat batch was all
-    // skips, so it appended nothing).
-    let mut expected_issuers = issuers;
-    expected_issuers.extend(more_issuers);
-    assert_eq!(
-        collect_all_profiles(&client, &Role::Issuer),
-        expected_issuers
-    );
-
-    // Buyer order: the batch ran first, then the single registrations.
-    let mut expected_buyers = batch_buyers;
-    expected_buyers.extend(single_buyers);
-    assert_eq!(collect_all_profiles(&client, &Role::Buyer), expected_buyers);
+    assert!(a.try_register_issuer(&issuer, &map![&env]).is_err());
+    assert!(b.register_issuer(&issuer, &map![&env]));
 }
