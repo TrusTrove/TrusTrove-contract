@@ -29,7 +29,7 @@ use trusttrove_invoice::{
     InvoiceContract as RealInvoice, InvoiceContractClient as RealInvoiceClient,
 };
 use trusttrove_test_utils::{
-    setup_full_protocol, test_agent_id, test_agent_pubkey, test_agent_signing_key, TEST_AGENT_SEED,
+    setup_full_protocol, test_agent_id, test_agent_pubkey, test_agent_signing_key,
 };
 
 // Default invoice parameters matching create_and_list() defaults
@@ -5364,8 +5364,9 @@ fn test_set_protocol_fee_event_reports_treasury_change_with_unchanged_fee() {
 #[test]
 fn test_shared_fixture_setup_full_protocol() {
     let proto = setup_full_protocol();
-    assert_eq!(proto.pool.get_max_utilization(&proto.admin), 10000);
-    assert_eq!(proto.invoice.get_total_funded(), 0);
+    assert_eq!(proto.pool.get_admin(), proto.admin);
+    assert_eq!(proto.pool.get_stats().total_funded, 0);
+    assert_eq!(proto.invoice.get_admin(), Some(proto.admin));
 }
 
 //  ISSUE #842: MULTI-LP SHARE-SUPPLY CONSERVATION //

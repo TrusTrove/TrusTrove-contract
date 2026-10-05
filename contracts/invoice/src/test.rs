@@ -267,7 +267,7 @@ impl MockAgentRegistry {
 #[contracttype]
 pub struct AgentKey(Symbol);
 
-use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key, TEST_AGENT_SEED};
+use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 
 /// Deploys a fresh mock agent-registry, registers one active agent with a
 /// real secp256k1 keypair, points `client` at it, and submits a validly
