@@ -8,7 +8,7 @@ set -euo pipefail
 # <!-- END_DEPLOYED_ADDRESSES -->
 
 show_help() {
-  cat << 'EOF'
+  cat << 'HELP'
 Usage:
   scripts/maintainer/update-readme-addresses.sh [REGISTRY] [INVOICE] [ESCROW_USDC] [POOL_USDC]
 
@@ -19,15 +19,15 @@ Description:
 Modes:
   1. Default (preferred): Reads addresses from deployments.json in the repository root.
   2. Fallback: If deployments.json is absent, reads addresses from:
-     - Positional arguments:  (registry),  (invoice),  (escrow_usdc),  (pool_usdc)
+     - Positional arguments: $1 (registry), $2 (invoice), $3 (escrow_usdc), $4 (pool_usdc)
      - OR environment variables: REGISTRY_ADDRESS, INVOICE_ADDRESS, ESCROW_USDC_ADDRESS, POOL_USDC_ADDRESS
 
 Options:
   -h, --help    Show this help message and exit
-EOF
+HELP
 }
 
-if [[ "" == "--help" || "" == "-h" ]]; then
+if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   show_help
   exit 0
 fi
