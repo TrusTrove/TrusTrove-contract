@@ -1,4 +1,5 @@
 #![no_std]
+#![cfg(not(target_arch = "wasm32"))]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, testutils::Address as _, Address, BytesN, Env, Map,

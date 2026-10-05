@@ -10,6 +10,9 @@ repository.workspace = true
 crate-type = ["rlib"]
 
 [dependencies]
+soroban-sdk = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 trusttrove-registry = { workspace = true }
 trusttrove-invoice = { workspace = true }
