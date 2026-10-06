@@ -4842,7 +4842,7 @@ fn test_move_status_index_compacts_storage() {
     assert_eq!(created_after.len(), 2);
     assert_eq!(created_after.get(0).unwrap().id, id1);
     assert_eq!(created_after.get(1).unwrap().id, id3);
-    
+
     let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed.get(0).unwrap().id, id2);
