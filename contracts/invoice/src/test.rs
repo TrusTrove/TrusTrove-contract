@@ -4815,3 +4815,35 @@ fn test_batch_list_for_financing_allows_exactly_max_batch_size() {
     assert!(failed.is_empty());
     assert_eq!(client.get_invoice_count_by_issuer(&issuer), MAX_BATCH_SIZE);
 }
+
+#[test]
+fn test_move_status_index_compacts_storage() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Create 3 invoices
+    let id1 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let id2 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let id3 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Initial check
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
+    assert_eq!(created.len(), 3);
+    assert_eq!(created.get(0).unwrap().id, id1);
+    assert_eq!(created.get(1).unwrap().id, id2);
+    assert_eq!(created.get(2).unwrap().id, id3);
+
+    // Transition middle invoice out of Created
+    attest(&env, &client, &id2);
+    client.list_for_financing(&id2, &DEFAULT_DISCOUNT_BPS);
+
+    // Verify compaction: id3 should have swapped into id2's slot, and count should be 2.
+    let created_after = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
+    assert_eq!(created_after.len(), 2);
+    assert_eq!(created_after.get(0).unwrap().id, id1);
+    assert_eq!(created_after.get(1).unwrap().id, id3);
+    
+    let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.get(0).unwrap().id, id2);
+}

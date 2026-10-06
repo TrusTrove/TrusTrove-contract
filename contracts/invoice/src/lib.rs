@@ -2943,7 +2943,70 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
     }
     increment_status_count(env, to);
     clear_status_membership(env, from, invoice_id);
+    remove_from_status_index(env, from, invoice_id);
     extend_status_index(env, to, invoice_id);
+}
+
+/// Removes an invoice from the `StatusIndexEntry` array for `status` using a
+/// swap-and-pop strategy: the entry holding `invoice_id` is overwritten with
+/// the last entry in the array, and the now-trailing key is deleted from
+/// storage. `StatusIndexCount` is decremented accordingly.
+///
+/// This prevents the storage leak previously caused by `move_status_index`
+/// only clearing the membership marker and `StatusCount` without touching
+/// the underlying index array (issue #435).
+///
+/// If `invoice_id` is not found in the index (e.g. legacy data written
+/// before compaction was added), the function is a silent no-op so that
+/// existing transitions don't panic.
+fn remove_from_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
+    let status_u32 = status as u32;
+    let count_key = DataKey::StatusIndexCount(status_u32);
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+    // Find the position of the invoice in the index.
+    let mut pos: Option<u32> = None;
+    for i in 0..count {
+        let entry_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StatusIndexEntry(status_u32, i))
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        if entry_id == *invoice_id {
+            pos = Some(i);
+            break;
+        }
+    }
+
+    let i = match pos {
+        Some(i) => i,
+        // Invoice not found in the index — nothing to compact.
+        None => return,
+    };
+
+    let last = count - 1;
+    if i != last {
+        // Swap the found entry with the last entry.
+        let last_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::StatusIndexEntry(status_u32, last))
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let swap_key = DataKey::StatusIndexEntry(status_u32, i);
+        env.storage().persistent().set(&swap_key, &last_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&swap_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    // Remove the trailing entry and update the count.
+    env.storage()
+        .persistent()
+        .remove(&DataKey::StatusIndexEntry(status_u32, last));
+    env.storage().persistent().set(&count_key, &last);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 /// Storage key for a status-membership marker.
