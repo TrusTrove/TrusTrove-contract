@@ -11,6 +11,7 @@ pub enum InvoiceStatus {
     Repaid,
     Defaulted,
     Expired,
+    Cancelled,
 }
 
 /// Represents a single invoice tracked by the invoice contract.
@@ -111,6 +112,13 @@ pub enum DataKey {
     AgentRegistryContract,
     // Attestation recorded against a given invoice, keyed by invoice id.
     Attestation(BytesN<32>),
+    // O(1) status-membership marker: `(status, short invoice id)` -> `true`
+    // while the invoice is a member of that status index. Written when an
+    // invoice enters a status and removed when it transitions out, replacing
+    // the full `StatusIndexEntry` scans previously used for duplicate and
+    // idempotency checks (issues #831 / #835). Appended after every existing
+    // variant so already-deployed key discriminants stay stable.
+    StatusMembership(InvoiceStatus, u64),
 }
 
 /// A risk attestation recorded against an invoice by a registered
@@ -182,6 +190,7 @@ impl InvoiceStatus {
             InvoiceStatus::Repaid => "Repaid",
             InvoiceStatus::Defaulted => "Defaulted",
             InvoiceStatus::Expired => "Expired",
+            InvoiceStatus::Cancelled => "Cancelled",
         }
     }
 }

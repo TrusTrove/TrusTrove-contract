@@ -12,6 +12,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 trusttrove-ttl = { path = "../ttl" }
+trusttrove-pause = { workspace = true }
 
 # Cross-contract deps (`trusttrove-invoice`, `trusttrove-escrow`) are
 # intentionally `dev-dependencies`: the pool only references the invoice and
@@ -29,6 +30,7 @@ trusttrove-escrow = { workspace = true }
 # drives is_verified through production code instead of the MockRegistry
 # stand-in used elsewhere in this file. Refs: issue #631.
 trusttrove-registry = { workspace = true }
+trusttrove-test-utils = { workspace = true }
 # Test-only: signs attestation payloads with a real secp256k1 key so the
 # invoice contract's submit_attestation gate can be satisfied in pool tests.
 k256 = { version = "=0.13.4", default-features = false, features = ["ecdsa", "std"] }
