@@ -635,6 +635,39 @@ impl PoolContract {
         Self::shares_for_deposit(&env, usdc_amount)
     }
 
+    /// Previews the USDC redemption amount for `shares` without requiring
+    /// authorization or changing contract state.
+    ///
+    /// The calculation and liquidity check match `withdraw`; this method does
+    /// not check an LP balance because it accepts no LP address.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `shares` - The number of pool shares to redeem.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    /// * `InvalidAmount` if `shares` is zero or the pool has no shares.
+    /// * `MinimumDeposit` if the redemption rounds down to zero.
+    /// * `InsufficientLiquidity` if available USDC is below the redemption
+    ///   amount.
+    /// * `Overflow` if `shares * total_deposits` overflows `u128`.
+    ///
+    /// # Returns
+    /// * `u128` - The USDC amount that `withdraw` would transfer for these
+    ///   shares, assuming the caller owns them.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let usdc = client.preview_withdraw(500);
+    /// ```
+    pub fn preview_withdraw(env: Env, shares: u128) -> u128 {
+        Self::require_initialized(&env);
+        Self::preview_withdraw_amount(&env, shares)
+    }
     /// Withdraws shares from the pool and transfers USDC to the LP.
     ///
     /// # Arguments
@@ -689,22 +722,8 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::InsufficientShares);
         }
 
-        let totals = Self::totals(&env);
-        let total_shares = totals.shares;
-        let total_deposits = totals.deposits;
-        let total_funded = totals.funded;
-        let available = total_deposits - total_funded;
-
-        let scaled = shares
-            .checked_mul(total_deposits)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-        let usdc_to_return = scaled / total_shares;
-        if usdc_to_return == 0 {
-            panic_with_error!(&env, PoolError::MinimumDeposit);
-        }
-        if usdc_to_return > available {
-            panic_with_error!(&env, PoolError::InsufficientLiquidity);
-        }
+        let total_deposits = Self::totals(&env).deposits;
+        let usdc_to_return = Self::preview_withdraw_amount(&env, shares);
 
         let usdc_id = Self::funding_asset(&env);
         let usdc = token::Client::new(&env, &usdc_id);
@@ -2096,6 +2115,29 @@ impl PoolContract {
         shares_to_issue
     }
 
+    fn preview_withdraw_amount(env: &Env, shares: u128) -> u128 {
+        if shares == 0 {
+            panic_with_error!(env, PoolError::InvalidAmount);
+        }
+
+        let totals = Self::totals(env);
+        if totals.shares == 0 {
+            panic_with_error!(env, PoolError::InvalidAmount);
+        }
+
+        let available = totals.deposits - totals.funded;
+        let scaled = shares
+            .checked_mul(totals.deposits)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+        let usdc_to_return = scaled / totals.shares;
+        if usdc_to_return == 0 {
+            panic_with_error!(env, PoolError::MinimumDeposit);
+        }
+        if usdc_to_return > available {
+            panic_with_error!(env, PoolError::InsufficientLiquidity);
+        }
+        usdc_to_return
+    }
     fn registry_contract(env: &Env) -> Address {
         env.storage()
             .instance()
