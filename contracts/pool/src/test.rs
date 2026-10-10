@@ -818,6 +818,7 @@ fn test_preview_withdraw_matches_withdraw_without_yield() {
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
 
+    // The generated Soroban client takes scalar arguments by reference, even though the contract entry point uses u128 by value.
     // Preview is a public read and succeeds with auth disabled.
     te.env.set_auths(&[]);
     let preview = te.pool.preview_withdraw(&5_000_000_000);
