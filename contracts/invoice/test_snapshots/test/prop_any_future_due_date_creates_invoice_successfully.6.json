@@ -69,7 +69,7 @@
                   }
                 },
                 {
-                  "u64": 8904481
+                  "u64": 1250642
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -323,7 +323,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                  "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                 }
               }
             },
@@ -342,7 +342,7 @@
                   "symbol": "Invoice"
                 },
                 {
-                  "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                  "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                 }
               ]
             },
@@ -362,7 +362,7 @@
                       "symbol": "Invoice"
                     },
                     {
-                      "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                      "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                     }
                   ]
                 },
@@ -406,7 +406,7 @@
                         "symbol": "due_date"
                       },
                       "val": {
-                        "u64": 8904481
+                        "u64": 1250642
                       }
                     },
                     {
@@ -456,7 +456,7 @@
                         "symbol": "id"
                       },
                       "val": {
-                        "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                        "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                       }
                     },
                     {
@@ -480,6 +480,28 @@
                         "symbol": "listed_at"
                       },
                       "val": "void"
+                    },
+                    {
+                      "key": {
+                        "symbol": "remaining_balance"
+                      },
+                      "val": {
+                        "u128": {
+                          "hi": 0,
+                          "lo": 1000000000
+                        }
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "repaid_amount"
+                      },
+                      "val": {
+                        "u128": {
+                          "hi": 0,
+                          "lo": 0
+                        }
+                      }
                     },
                     {
                       "key": {
@@ -601,7 +623,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                  "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                 }
               }
             },
@@ -742,7 +764,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                  "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                 }
               }
             },
@@ -1272,7 +1294,7 @@
                   }
                 },
                 {
-                  "u64": 8904481
+                  "u64": 1250642
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
@@ -1394,7 +1416,7 @@
                 "symbol": "invoice_created"
               },
               {
-                "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
               },
               {
                 "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
@@ -1433,7 +1455,7 @@
               }
             ],
             "data": {
-              "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+              "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
             }
           }
         }
@@ -1459,7 +1481,7 @@
               }
             ],
             "data": {
-              "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+              "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
             }
           }
         }
@@ -1520,7 +1542,7 @@
                     "symbol": "due_date"
                   },
                   "val": {
-                    "u64": 8904481
+                    "u64": 1250642
                   }
                 },
                 {
@@ -1570,7 +1592,7 @@
                     "symbol": "id"
                   },
                   "val": {
-                    "bytes": "b8ae61acc97ace1e5421212f2968343fbe39f217b719c32cb7df41f1d4415a56"
+                    "bytes": "4001e437f1ec96e5553556f0472d8df7d983d18f0e6d89d4edd183030eb57aed"
                   }
                 },
                 {
@@ -1594,6 +1616,28 @@
                     "symbol": "listed_at"
                   },
                   "val": "void"
+                },
+                {
+                  "key": {
+                    "symbol": "remaining_balance"
+                  },
+                  "val": {
+                    "u128": {
+                      "hi": 0,
+                      "lo": 1000000000
+                    }
+                  }
+                },
+                {
+                  "key": {
+                    "symbol": "repaid_amount"
+                  },
+                  "val": {
+                    "u128": {
+                      "hi": 0,
+                      "lo": 0
+                    }
+                  }
                 },
                 {
                   "key": {

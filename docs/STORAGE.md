@@ -68,6 +68,21 @@ All contracts follow a consistent TTL extension pattern:
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
 
+#### Profile Enumeration Index
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `ProfileIndex(Role, u32)` | `Address` | The `index`-th registered address for `Role::Issuer` / `Role::Buyer`, in registration order |
+| `ProfileCount(Role)` | `u32` | Number of populated `ProfileIndex` slots for that role |
+
+Both keys are written by **every** registration path (`register_issuer`,
+`register_buyer`, `batch_register_issuers`, `batch_register_buyers`) and are
+TTL-extended with the same threshold/target as a profile entry
+(`persistent().extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO)`), on write and on read.
+Entries skipped as already-registered are never indexed twice, so
+`ProfileCount(role)` always equals the number of addresses reachable through
+`list_profiles(role, …)`.
+
 #### Profile Structure
 
 ```
@@ -75,6 +90,7 @@ Profile {
     address:      Address,          // Stellar address (also the key)
     packed_flags: u32,              // Bit 0: role (0=Issuer, 1=Buyer)
                                     // Bit 1: verified status
+                                    // Bit 2: revoked status
     registered_at: u64,             // Unix timestamp of registration
     metadata:     Map<String, String>, // Arbitrary key-value metadata
 }
@@ -82,7 +98,17 @@ Profile {
 
 #### Indexing Notes
 
-- Profiles are looked up by `is_verified(address)` — no secondary index exists.
+- Profiles are looked up by `is_verified(address)`; the per-role
+  `ProfileIndex` / `ProfileCount` keys back the enumeration views
+  `get_profile_count(role)` and `list_profiles(role, start, limit)`.
+- `list_profiles` returns pages of at most 50 addresses (the same cap as the
+  batch registration entry points) and panics with `PageSizeExceeded` (`#8`)
+  above it, so a single call can never walk the whole index. Pages are
+  contiguous and non-overlapping: page `n` is
+  `list_profiles(role, n * limit, limit)`.
+- The index is append-only. The registry has no deregistration path —
+  `revoke` only flips the profile's verification flags — so a slot is never
+  rewritten or freed, and revoked profiles stay enumerated.
 - `get_profile(address)` returns the full `Profile` struct or panics with
   `NotFound` if absent.
 - `get_verification_status(address)` returns a three-valued enum
@@ -90,7 +116,9 @@ Profile {
 
 ### Storage Key Count
 
-**Approximately 1 key per registered address.**
+**Approximately 2 keys per registered address** — one `Profile` record and one
+`ProfileIndex(role, n)` slot — **plus 2 constant `ProfileCount(role)` keys**
+(one per role) that exist once the first profile of that role is registered.
 
 ---
 
@@ -152,6 +180,7 @@ Confirmed = 4   // dual delivery confirmation
 Repaid    = 5   // buyer has repaid
 Defaulted = 6   // past due without repayment
 Expired   = 7   // listing expired before funding
+Cancelled = 8   // issuer cancelled before listing
 ```
 
 #### Index Entries
@@ -172,8 +201,12 @@ Expired   = 7   // listing expired before funding
   maintain a count key and an ordered list of entries.
 - Index entries are appended — no compaction on status transitions (entries
   are added to the new status but not removed from the old).
-- `get_by_status()` reads all entries for a status and only returns those
-  whose current `invoice.status` matches (to handle stale index entries).
+- `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
+  (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
+  `page_size` index entries, so cost is bounded regardless of index size.
+- `get_by_status()` still filters each page to entries whose current
+  `invoice.status` matches (to handle stale index entries), so a page may
+  contain fewer than `page_size` results.
 
 ### Storage Key Count
 
@@ -196,6 +229,7 @@ Expired   = 7   // listing expired before funding
 | `PoolContract` | `Address` | Authorised pool contract | `initialize()` |
 | `InvoiceContract` | `Address` | Invoice contract address | `initialize()` |
 | `UsdcAsset` | `Address` | USDC token contract address | `initialize()` |
+| `Paused` | `bool` | Emergency circuit-breaker flag, via `trusttrove_pause::PauseState::Paused` (issue #716). Absent means not paused. | `pause()` / `unpause()` |
 
 ### Persistent Storage
 
@@ -277,6 +311,26 @@ EscrowEvent {
 | `LPYieldEarned(Address)` | `u128` | Cumulative yield earned (updated on withdraw) |
 | `LPInitialDeposit(Address)` | `u128` | Total principal deposited by LP (tracked for yield calculation) |
 
+#### SEP-41 Share Transfers
+
+LP shares move between addresses through two public entry points that share
+one balance-movement path (`move_shares`) and emit the same standard
+`transfer(from, to, amount)` event:
+
+- `transfer(from, to, amount)` — the standard SEP-41 entry point. Generic
+  `soroban_sdk::token::Client` consumers call this directly against the pool
+  address.
+- `transfer_from(spender, from, to, amount)` — moves shares against an
+  `approve` grant, debiting the allowance.
+- `transfer_shares(from, to, amount)` — **non-standard** legacy alias of
+  `transfer`, kept for integrators that predate the SEP-41 surface. New code
+  must use `transfer`.
+
+Transfers only move balances: `TotalShares`, `TotalDeposits`, `TotalFunded`,
+yield accounting, and share price are untouched. Self-transfers are no-ops.
+The recipient's `LPShares` entry is created on first credit, exactly as a
+deposit would create it.
+
 #### SEP-41 Allowance Keys
 
 | DataKey | Type | Description |
@@ -351,7 +405,10 @@ See [LIMITATIONS.md](./LIMITATIONS.md) for current testnet budget constraints.
 
 ## Upgrade Path
 
-The contracts do **not** currently implement the Stellar
-`__constructor`/`__upgrade` pattern. An upgrade requires deploying a new
-contract and wiring the frontend to the new address. See
-[DEPLOYMENT.md](../DEPLOYMENT.md) for the rollback procedure.
+The invoice and escrow contracts expose an admin-gated `upgrade(new_wasm_hash)`
+entry point. First install the new Wasm on the network, then call `upgrade`
+with its hash from the contract's stored admin address. The contract is updated
+in place, so its address and storage remain unchanged. Other contracts still
+require a redeploy if they do not expose this entry point. Protect the admin
+with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
+document for the redeployment rollback procedure.

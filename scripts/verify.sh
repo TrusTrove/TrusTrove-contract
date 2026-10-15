@@ -38,6 +38,7 @@ check_env_var "POOL_USDC_CONTRACT_ID"
 check_env_var "POOL_XLM_CONTRACT_ID"
 check_env_var "ESCROW_USDC_CONTRACT_ID"
 check_env_var "ESCROW_XLM_CONTRACT_ID"
+check_env_var "USDC_ISSUER"
 
 if [ $FAILED -ne 0 ]; then
   echo "Configuration check failed. Run ./scripts/deploy.sh first to populate contract IDs." >&2
@@ -90,6 +91,18 @@ verify_check "escrow_usdc_contract (get_locked)" "${CMD_ESCROW_USDC[@]}"
 # 6. XLM Escrow Contract - get_locked (confirm existence with dummy ID)
 CMD_ESCROW_XLM=("$STELLAR" contract invoke --id "$ESCROW_XLM_CONTRACT_ID" --source "$DEPLOYER_ACCOUNT" --network testnet -- get_locked --invoice_id 0000000000000000000000000000000000000000000000000000000000000000)
 verify_check "escrow_xlm_contract (get_locked)" "${CMD_ESCROW_XLM[@]}"
+
+# 7. Invoice Contract - get_escrow_contract (wired by deploy.sh; null if unset)
+CMD_INVOICE_ESCROW=("$STELLAR" contract invoke --id "$INVOICE_CONTRACT_ID" --source "$DEPLOYER_ACCOUNT" --network testnet -- get_escrow_contract)
+verify_check "invoice_contract (get_escrow_contract)" "${CMD_INVOICE_ESCROW[@]}"
+
+# 8. Invoice Contract - get_agent_registry_contract (null until wired)
+CMD_INVOICE_AGENT=("$STELLAR" contract invoke --id "$INVOICE_CONTRACT_ID" --source "$DEPLOYER_ACCOUNT" --network testnet -- get_agent_registry_contract)
+verify_check "invoice_contract (get_agent_registry_contract)" "${CMD_INVOICE_AGENT[@]}"
+
+# 9. Invoice Contract - is_supported_asset (USDC must be allow-listed by deploy.sh)
+CMD_INVOICE_ASSET=("$STELLAR" contract invoke --id "$INVOICE_CONTRACT_ID" --source "$DEPLOYER_ACCOUNT" --network testnet -- is_supported_asset --asset "$USDC_ISSUER")
+verify_check "invoice_contract (is_supported_asset USDC)" "${CMD_INVOICE_ASSET[@]}"
 
 if [ $FAILED -ne 0 ]; then
   echo "Verification failed."

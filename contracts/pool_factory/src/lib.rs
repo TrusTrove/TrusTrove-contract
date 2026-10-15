@@ -56,6 +56,7 @@ impl PoolFactoryContract {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::AssetCount, &0u32);
+        events::contract_initialized(&env, &admin);
     }
 
     /// Deploys a new pool instance for an asset and records it as that asset's
@@ -175,6 +176,8 @@ impl PoolFactoryContract {
     /// # Panics
     /// * `NotInitialized` if the factory has not been initialized.
     /// * `AssetAlreadyRegistered` if the asset is already registered.
+    /// * `InvalidPool` if `pool_address` does not expose a pool initialized
+    ///   for `asset`.
     ///
     /// # Returns
     /// * `()` - No value is returned.
@@ -187,7 +190,18 @@ impl PoolFactoryContract {
         let admin = Self::admin(&env);
         admin.require_auth();
         Self::assert_unregistered(&env, &asset);
+
+        let pool_funding_asset = env.try_invoke_contract::<Address, soroban_sdk::Error>(
+            &pool_address,
+            &Symbol::new(&env, "get_funding_asset"),
+            Vec::new(&env),
+        );
+        if !matches!(pool_funding_asset, Ok(Ok(ref funding_asset)) if funding_asset == &asset) {
+            panic_with_error!(&env, PoolFactoryError::InvalidPool);
+        }
+
         Self::record_pool(&env, &asset, &pool_address);
+        events::existing_pool_registered(&env, &asset, &pool_address);
     }
 
     /// Returns the pool instance the factory manages for an asset.
@@ -223,8 +237,9 @@ impl PoolFactoryContract {
     /// Returns aggregated statistics across all registered pool instances.
     ///
     /// Iterates through all registered assets, queries each pool instance's
-    /// `get_stats`, and returns a vector pairing each asset's pool address
-    /// with its current `PoolStats`.
+    /// `get_stats`, and returns a vector pairing each responsive pool address
+    /// with its current `PoolStats`. Pools whose call fails are skipped so one
+    /// unavailable or invalid pool cannot block stats for all other assets.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -243,12 +258,14 @@ impl PoolFactoryContract {
         let mut aggregate = Vec::new(&env);
         for asset in assets {
             if let Some(pool_address) = Self::get_pool_for_asset(env.clone(), asset) {
-                let stats: PoolStats = env.invoke_contract(
+                let result = env.try_invoke_contract::<PoolStats, soroban_sdk::Error>(
                     &pool_address,
                     &Symbol::new(&env, "get_stats"),
                     Vec::new(&env),
                 );
-                aggregate.push_back((pool_address, stats));
+                if let Ok(Ok(stats)) = result {
+                    aggregate.push_back((pool_address, stats));
+                }
             }
         }
         aggregate
