@@ -357,6 +357,24 @@ impl PoolContract {
         Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
     }
 
+    /// Replaces this contract's Wasm with an installed Wasm using the stored admin.
+    ///
+    /// The contract address and storage are preserved. Emits an `upgraded`
+    /// event carrying the new Wasm hash.
+    ///
+    /// # Panics
+    /// * `PoolError::NotInitialized` if no admin is stored.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        Self::extend_instance_ttl(&env);
+        events::upgraded(&env, &new_wasm_hash);
+    }
+
     /// Transfers pool admin ownership to `new_admin`.
     ///
     /// Uses the dual-authorization pattern shared with `RegistryContract` and

@@ -1,4 +1,9 @@
-use soroban_sdk::{Address, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env, Symbol};
+
+pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());
+}
 
 pub fn contract_initialized(env: &Env, admin: &Address) {
     env.events().publish(

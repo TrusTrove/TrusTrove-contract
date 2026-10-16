@@ -6869,3 +6869,11 @@ fn test_get_funded_amount_returns_none_after_default() {
 
     assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
 }
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_upgrade_requires_admin_auth() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.upgrade(&BytesN::from_array(&te.env, &[0; 32]));
+}

@@ -14,7 +14,7 @@ use soroban_sdk::{
         storage::{Instance as _, Persistent as _},
         Address as _, Events as _, Ledger,
     },
-    vec, Address, Env, IntoVal, String, Symbol, TryFromVal, TryIntoVal, Val, Vec,
+    vec, Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, TryIntoVal, Val, Vec,
 };
 
 fn setup() -> (Env, RegistryContractClient<'static>) {
@@ -2802,4 +2802,21 @@ fn test_verifier_survives_admin_transfer() {
     // The role is independent of who the admin is.
     assert_eq!(client.get_verifier(), Some(verifier.clone()));
     assert!(client.verify_profile(&verifier, &issuer, &true));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_upgrade_requires_admin_auth() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    env.set_auths(&[]);
+    client.upgrade(&BytesN::from_array(&env, &[0; 32]));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_upgrade_before_initialize_panics() {
+    let (env, client) = setup();
+    client.upgrade(&BytesN::from_array(&env, &[0; 32]));
 }

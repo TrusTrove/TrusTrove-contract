@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, map, panic_with_error, Address, Env, Map, String, Vec};
+use soroban_sdk::{
+    contract, contractimpl, map, panic_with_error, Address, BytesN, Env, Map, String, Vec,
+};
 use trusttrove_pause::{require_not_paused, set_paused};
 
 mod constants;
@@ -63,6 +65,27 @@ impl RegistryContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         events::contract_initialized(&env, &admin);
         Self::extend_instance_ttl(&env);
+    }
+
+    /// Replaces this contract's Wasm with an installed Wasm using the stored admin.
+    ///
+    /// The contract address and storage are preserved. Emits an `upgraded`
+    /// event carrying the new Wasm hash.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if no admin is stored.
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotInitialized));
+        admin.require_auth();
+
+        env.deployer()
+            .update_current_contract_wasm(new_wasm_hash.clone());
+        Self::extend_instance_ttl(&env);
+        events::upgraded(&env, &new_wasm_hash);
     }
 
     /// Registers a new issuer profile with initial metadata.
