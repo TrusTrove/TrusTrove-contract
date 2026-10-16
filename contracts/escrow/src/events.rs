@@ -56,6 +56,24 @@ pub fn default_resolved(
     );
 }
 
+/// Emitted by `set_timeout_window` when the admin updates the timeout window.
+pub fn timeout_window_set(env: &Env, window: u64) {
+    env.events()
+        .publish((Symbol::new(env, "timeout_window_set"),), window);
+}
+
+/// Emitted by `release_after_timeout` when a stale lock is returned to the pool.
+pub fn timeout_released(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amount: u128) {
+    env.events().publish(
+        (
+            Symbol::new(env, "timeout_released"),
+            invoice_id.clone(),
+            pool.clone(),
+        ),
+        amount,
+    );
+}
+
 #[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(

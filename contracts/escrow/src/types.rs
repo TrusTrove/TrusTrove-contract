@@ -42,6 +42,8 @@ pub enum EscrowAction {
     ReleasedToPool,
     /// Lock was resolved as a default and funds returned to the pool.
     DefaultHandled,
+    /// Stale lock returned to the pool via the permissionless `release_after_timeout`.
+    TimeoutReleased,
 }
 
 /// An entry in the escrow event history for a given invoice.
@@ -86,4 +88,7 @@ pub enum DataKey {
     /// Event history for a given invoice. The inner `BytesN<32>` is the
     /// invoice ID. Value type: `Vec<EscrowEvent>`.
     History(BytesN<32>),
+    /// Seconds after `locked_at` before `release_after_timeout` may return a
+    /// still-locked record to the pool. Instance key; value type: `u64`.
+    TimeoutWindow,
 }

@@ -14,6 +14,10 @@ pub use errors::*;
 pub use types::*;
 
 const DEFAULT_MIN_LOCK_SECONDS: u64 = 60;
+/// Default `release_after_timeout` window (30 days) used until the admin sets one.
+pub const DEFAULT_TIMEOUT_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
+/// Upper bound accepted by `set_timeout_window` (365 days), matching invoice's expiry cap.
+pub const MAX_TIMEOUT_WINDOW_SECONDS: u64 = 31_536_000;
 
 #[contract]
 pub struct EscrowContract;
@@ -430,6 +434,117 @@ impl EscrowContract {
         env.storage().persistent().remove(&key);
         Self::extend_instance_ttl(&env);
         events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount);
+        true
+    }
+
+    /// Sets the window (seconds after `locked_at`) after which
+    /// `release_after_timeout` may return a still-locked record to the pool.
+    ///
+    /// Mirrors `invoice::set_expiry_window`.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `InvalidTimeoutWindow` if `window` is `0` or exceeds `MAX_TIMEOUT_WINDOW_SECONDS`.
+    /// * `NotInitialized` if the contract has not been initialized.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_timeout_window(&(14 * 24 * 60 * 60));
+    /// ```
+    pub fn set_timeout_window(env: Env, window: u64) {
+        require_not_paused(&env);
+        if window == 0 || window > MAX_TIMEOUT_WINDOW_SECONDS {
+            panic_with_error!(&env, EscrowError::InvalidTimeoutWindow);
+        }
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::TimeoutWindow, &window);
+        events::timeout_window_set(&env, window);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the current `release_after_timeout` window in seconds.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `u64` - The window in seconds. Defaults to `DEFAULT_TIMEOUT_WINDOW_SECONDS` (30 days) if unset.
+    pub fn get_timeout_window(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TimeoutWindow)
+            .unwrap_or(DEFAULT_TIMEOUT_WINDOW_SECONDS)
+    }
+
+    /// Permissionlessly returns a stale lock to the pool once
+    /// `now >= locked_at + timeout_window`.
+    ///
+    /// Provides an exit path for locked funds when neither the pool nor the
+    /// admin ever acts. Funds go to the pool, the same safe default recipient
+    /// as `handle_default`. Mirrors `invoice::expire_listing`'s timeout pattern.
+    ///
+    /// # Auth
+    /// No authorization is required; anyone may call.
+    ///
+    /// # Panics
+    /// * `NotFound` if no lock exists for `invoice_id`.
+    /// * `TimeoutNotElapsed` if `now < locked_at + timeout_window`.
+    /// * `MathOverflow` if `locked_at + timeout_window` overflows.
+    /// * `NotInitialized` if the contract has not been initialized.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the funds are returned to the pool.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.release_after_timeout(&invoice_id);
+    /// ```
+    pub fn release_after_timeout(env: Env, invoice_id: BytesN<32>) -> bool {
+        require_not_paused(&env);
+        let key = DataKey::Locked(invoice_id.clone());
+        let record: EscrowRecord = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
+
+        let deadline = record
+            .locked_at
+            .checked_add(Self::get_timeout_window(env.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
+        if env.ledger().timestamp() < deadline {
+            panic_with_error!(&env, EscrowError::TimeoutNotElapsed);
+        }
+
+        let pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        if record.amount > i128::MAX as u128 {
+            panic_with_error!(&env, EscrowError::InvalidAmount);
+        }
+        Self::usdc_client(&env).transfer(
+            &env.current_contract_address(),
+            &pool,
+            &(record.amount as i128),
+        );
+
+        Self::append_history(
+            &env,
+            &invoice_id,
+            EscrowAction::TimeoutReleased,
+            record.amount,
+            None,
+        );
+        env.storage().persistent().remove(&key);
+        Self::extend_instance_ttl(&env);
+        events::timeout_released(&env, &invoice_id, &pool, record.amount);
         true
     }
 

@@ -19,6 +19,7 @@ use soroban_sdk::{
 
 use crate::{
     DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent, EscrowRecord,
+    DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
 };
 
 #[contract]
@@ -1525,4 +1526,86 @@ fn test_pause_is_scoped_to_one_instance() {
     let id = generate_invoice_id(&env, 1);
     assert!(a.try_lock(&id, &1_000, &issuer).is_err());
     assert!(b.lock(&id, &1_000, &issuer));
+}
+
+#[test]
+fn test_get_timeout_window_defaults() {
+    let (_env, client, _, _, _, _) = setup();
+    assert_eq!(client.get_timeout_window(), DEFAULT_TIMEOUT_WINDOW_SECONDS);
+}
+
+#[test]
+fn test_set_timeout_window_by_admin() {
+    let (_env, client, _, _, _, _) = setup();
+    client.set_timeout_window(&3600);
+    assert_eq!(client.get_timeout_window(), 3600);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_set_timeout_window_requires_admin_auth() {
+    let (_env, client, _, _, _, _) = setup_without_auths();
+    client.set_timeout_window(&3600);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_set_timeout_window_rejects_zero() {
+    let (_env, client, _, _, _, _) = setup();
+    client.set_timeout_window(&0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #9)")]
+fn test_set_timeout_window_rejects_above_max() {
+    let (_env, client, _, _, _, _) = setup();
+    client.set_timeout_window(&(MAX_TIMEOUT_WINDOW_SECONDS + 1));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_release_after_timeout_fails_before_window() {
+    let (env, client, _, _, issuer, _) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    client.lock(&invoice_id, &1_000_000_000u128, &issuer);
+    client.set_timeout_window(&3600);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3599);
+    client.release_after_timeout(&invoice_id);
+}
+
+#[test]
+fn test_release_after_timeout_returns_funds_to_pool() {
+    let (env, client, _, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+    client.set_timeout_window(&3600);
+    let pool_before = get_balance(&env, &usdc_id, &pool);
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3600);
+    // No auths: the call is permissionless.
+    env.set_auths(&[]);
+    assert!(client.release_after_timeout(&invoice_id));
+
+    assert_eq!(get_balance(&env, &usdc_id, &pool), pool_before + amount as i128);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    let history = client.get_history(&invoice_id);
+    assert_eq!(
+        history.last().unwrap().action,
+        EscrowAction::TimeoutReleased
+    );
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected timeout_released event");
+    let name: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    assert_eq!(name, Symbol::new(&env, "timeout_released"));
+    assert_eq!(u128::try_from_val(&env, &data).unwrap(), amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_release_after_timeout_without_lock_panics() {
+    let (env, client, _, _, _, _) = setup();
+    client.release_after_timeout(&generate_invoice_id(&env, 1));
 }
