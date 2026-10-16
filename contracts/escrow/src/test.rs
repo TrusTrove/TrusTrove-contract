@@ -1588,7 +1588,10 @@ fn test_release_after_timeout_returns_funds_to_pool() {
     env.set_auths(&[]);
     assert!(client.release_after_timeout(&invoice_id));
 
-    assert_eq!(get_balance(&env, &usdc_id, &pool), pool_before + amount as i128);
+    assert_eq!(
+        get_balance(&env, &usdc_id, &pool),
+        pool_before + amount as i128
+    );
     assert_eq!(client.get_locked(&invoice_id), 0);
     let history = client.get_history(&invoice_id);
     assert_eq!(
