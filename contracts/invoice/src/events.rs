@@ -27,6 +27,18 @@ pub fn invoice_listed(env: &Env, invoice_id: &BytesN<32>, discount_bps: u32) {
     );
 }
 
+pub fn invoice_cancelled(env: &Env, invoice_id: &BytesN<32>) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_cancelled"), invoice_id.clone()),
+        (),
+    );
+}
+
+pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());
+}
+
 pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_funded"), invoice_id.clone()),
@@ -98,6 +110,31 @@ pub fn expiry_window_set(env: &Env, window: u64) {
         .publish((Symbol::new(env, "expiry_window_set"),), window);
 }
 
+/// Emitted once per `batch_create` call, after the per-invoice
+/// `invoice_created` events, summarizing the batch outcome. `created` is the
+/// number of invoices persisted; `failed` is the number of rejected entries
+/// (always `0` today, because `batch_create` is atomic and reverts the whole
+/// batch on the first invalid entry — the field exists so indexers can key off
+/// a stable batch summary shape if partial-success semantics are added later).
+pub fn batch_invoices_created(env: &Env, created: u32, failed: u32) {
+    env.events().publish(
+        (Symbol::new(env, "batch_invoices_created"),),
+        (created, failed),
+    );
+}
+
+/// Emitted once per `batch_list_for_financing` call, summarizing the outcome
+/// as `(listed, failed)` counts. Unlike `batch_create`, listing is
+/// per-entry tolerant: entries that fail validation are reported in the
+/// returned failed-list rather than reverting the batch, so this event can
+/// legitimately report a non-zero `failed`.
+pub fn batch_invoices_listed(env: &Env, listed: u32, failed: u32) {
+    env.events().publish(
+        (Symbol::new(env, "batch_invoices_listed"),),
+        (listed, failed),
+    );
+}
+
 pub fn ownership_transferred(env: &Env, from: &Address, to: &Address) {
     env.events().publish(
         (
@@ -107,6 +144,20 @@ pub fn ownership_transferred(env: &Env, from: &Address, to: &Address) {
         ),
         (),
     );
+}
+
+/// Emitted by `pause` when the emergency circuit breaker is engaged. `admin` is
+/// the address that authorized the pause, indexed so indexers can track who
+/// flipped the breaker.
+pub fn paused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "paused"), admin.clone()), ());
+}
+
+/// Emitted by `unpause` when the emergency circuit breaker is disengaged.
+pub fn unpaused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "unpaused"), admin.clone()), ());
 }
 
 pub fn pool_contract_updated(env: &Env, old: &Address, new: &Address) {

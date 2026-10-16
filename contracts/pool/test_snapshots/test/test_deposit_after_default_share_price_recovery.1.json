@@ -328,6 +328,7 @@
     ],
     [],
     [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYRE5",
@@ -3069,6 +3070,18 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAATYON"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "FeeBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
                         }
                       },
                       {
@@ -5972,7 +5985,7 @@
                   "val": {
                     "u128": {
                       "hi": 0,
-                      "lo": 200000000
+                      "lo": 10000000000
                     }
                   }
                 },
@@ -5991,7 +6004,7 @@
                   "val": {
                     "u128": {
                       "hi": 0,
-                      "lo": 200000000
+                      "lo": 10000000000
                     }
                   }
                 },

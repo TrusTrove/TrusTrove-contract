@@ -41,6 +41,12 @@ fn setup() -> TestEnv {
     // authorization from a nested invocation, which only the non-root-capable
     // mock authorizes.
     env.mock_all_auths_allowing_non_root_auth();
+    // These tests drive many real cross-contract pool calls, and every pool /
+    // invoice entry point now also reads the shared pause flag. That is enough
+    // for the longer round trips to cross the default *test-host* budget (not
+    // the on-chain budget), so lift it suite-wide. Tests that actually measure
+    // gas call `budget().reset_default()` themselves before measuring.
+    env.budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);

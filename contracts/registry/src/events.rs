@@ -61,3 +61,17 @@ pub fn admin_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
         new_admin.clone(),
     );
 }
+
+/// Emitted by `pause` when the emergency circuit breaker is engaged. `admin` is
+/// the address that authorized the pause, indexed so indexers can track who
+/// flipped the breaker.
+pub fn paused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "paused"), admin.clone()), ());
+}
+
+/// Emitted by `unpause` when the emergency circuit breaker is disengaged.
+pub fn unpaused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "unpaused"), admin.clone()), ());
+}
