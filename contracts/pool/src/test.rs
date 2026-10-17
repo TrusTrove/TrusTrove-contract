@@ -6909,7 +6909,6 @@ fn test_upgrade_requires_admin_auth() {
     te.pool.upgrade(&BytesN::from_array(&te.env, &[0; 32]));
 }
 
-
 // --------------- Counting mock invoice (issue #833) ---------------
 //
 // Stand-in for the pool's invoice contract that tallies every cross-contract
@@ -7063,7 +7062,9 @@ mod counting_invoice {
 #[test]
 fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
     let te = setup();
-    let mock_id = te.env.register_contract(None, counting_invoice::MockCountingInvoice);
+    let mock_id = te
+        .env
+        .register_contract(None, counting_invoice::MockCountingInvoice);
     counting_invoice::MockCountingInvoiceClient::new(&te.env, &mock_id).configure_counting(
         &te.issuer,
         &te.buyer,
@@ -7093,18 +7094,10 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
     };
     assert_eq!(count("ctx_n"), 1, "exactly one batched invoice read");
     assert_eq!(count("mark_n"), 1);
-    assert_eq!(
-        count("terms_n"),
-        0,
-        "get_funding_terms must not be called"
-    );
+    assert_eq!(count("terms_n"), 0, "get_funding_terms must not be called");
     assert_eq!(count("issuer_n"), 0, "get_issuer must not be called");
     assert_eq!(count("buyer_n"), 0, "get_buyer must not be called");
-    assert_eq!(
-        count("asset_n"),
-        0,
-        "get_funding_asset must not be called"
-    );
+    assert_eq!(count("asset_n"), 0, "get_funding_asset must not be called");
     assert_eq!(
         count("ctx_n")
             + count("terms_n")
