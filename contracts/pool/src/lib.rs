@@ -1,8 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, IntoVal, String, Symbol,
-    Vec,
+    contract, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, IntoVal,
+    String, Symbol, Vec,
 };
 use trusttrove_pause::{require_not_paused, set_paused};
 
@@ -23,6 +23,37 @@ pub use types::*;
 /// the default: `totals()`'s fallback reads the same constant, so the two call
 /// sites can never silently desync if the default is ever changed.
 pub const DEFAULT_MAX_UTILIZATION_BPS: u32 = 8500;
+
+/// Mirror of `InvoiceContract::FundingContext` (issue #833).
+///
+/// `fund_invoice` previously read `(status, face_value, discount_bps)`,
+/// `issuer`, `buyer` and `funding_asset` through four separate cross-contract
+/// calls into the invoice contract, each re-loading and deserializing the
+/// whole `Invoice`. The invoice now exposes the single
+/// `get_funding_context(invoice_id) -> FundingContext` view and this pool
+/// consumes it with one call.
+///
+/// The pool never imports the invoice crate in production code (WASM size
+/// budget, refs issue #309), so this is a wire-compatible mirror: identical
+/// struct name and field names/types, which is all the symbolic
+/// `#[contracttype]` map representation depends on. Keep it in sync with
+/// `contracts/invoice/src/lib.rs`.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FundingContext {
+    /// Invoice status discriminant; `1` means `Listed`.
+    pub status: u32,
+    /// Face value in USDC stroops.
+    pub face_value: u128,
+    /// Discount in basis points (1 bp = 0.01%).
+    pub discount_bps: u32,
+    /// Issuer address (paid the discounted proceeds by `escrow.lock`).
+    pub issuer: Address,
+    /// Buyer address (repayment obligor).
+    pub buyer: Address,
+    /// Funding asset address, checked against the pool's `funding_asset`.
+    pub funding_asset: Address,
+}
 
 #[contract]
 pub struct PoolContract;
@@ -1213,49 +1244,47 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::AlreadyFunded);
         }
 
+        // Single batched read of every invoice field the funding path needs
+        // (status, face_value, discount_bps, issuer, buyer, funding_asset).
+        // This replaces four separate cross-contract calls —
+        // `get_funding_terms`, `get_issuer`, `get_buyer`, `get_funding_asset` —
+        // each of which loaded and deserialized the whole invoice
+        // independently (issue #833). The checks below run in exactly the
+        // order the four calls did, so error precedence is unchanged:
+        // a missing invoice still surfaces the invoice `NotFound` abort
+        // first, then `InvoiceNotListed`, `IssuerNotVerified`,
+        // `BuyerNotVerified`, `AssetMismatch` in that order.
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
-        let (invoice_status, face_value, discount_bps): (u32, u128, u32) = env.invoke_contract(
+        let ctx: FundingContext = env.invoke_contract(
             &invoice_contract,
-            &Symbol::new(&env, "get_funding_terms"),
+            &Symbol::new(&env, "get_funding_context"),
             args,
         );
-        if invoice_status != 1 {
+        if ctx.status != 1 {
             panic_with_error!(&env, PoolError::InvoiceNotListed);
         }
 
+        let issuer = ctx.issuer.clone();
         let registry_id = Self::registry_contract(&env);
         let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        let issuer: Address =
-            env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_issuer"), args);
-        let mut args = Vec::new(&env);
-        args.push_back(issuer.into_val(&env));
+        args.push_back(issuer.clone().into_val(&env));
         let issuer_verified: bool =
             env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
         if !issuer_verified {
             panic_with_error!(&env, PoolError::IssuerNotVerified);
         }
 
+        let buyer = ctx.buyer.clone();
         let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        let buyer: Address =
-            env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_buyer"), args);
-        let mut args = Vec::new(&env);
-        args.push_back(buyer.into_val(&env));
+        args.push_back(buyer.clone().into_val(&env));
         let buyer_verified: bool =
             env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
         if !buyer_verified {
             panic_with_error!(&env, PoolError::BuyerNotVerified);
         }
 
-        let mut args = Vec::new(&env);
-        args.push_back(invoice_id.clone().into_val(&env));
-        let invoice_asset: Address = env.invoke_contract(
-            &invoice_contract,
-            &Symbol::new(&env, "get_funding_asset"),
-            args,
-        );
+        let invoice_asset = ctx.funding_asset.clone();
         let usdc_id = Self::funding_asset(&env);
         if invoice_asset != usdc_id {
             panic_with_error!(&env, PoolError::AssetMismatch);
@@ -1264,6 +1293,8 @@ impl PoolContract {
         // `face_value` is read from the invoice contract via a cross-contract
         // call and is not bounded by this pool, so the scaling multiplication
         // must be guarded just like the utilization check below (#585).
+        let face_value = ctx.face_value;
+        let discount_bps = ctx.discount_bps;
         let funded_amount = face_value
             .checked_mul(10000 - discount_bps as u128)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))

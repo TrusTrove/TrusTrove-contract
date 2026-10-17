@@ -242,6 +242,37 @@ impl MockHugeFaceInvoice {
             .unwrap()
     }
 
+    pub fn get_funding_context(env: Env, _invoice_id: BytesN<32>) -> crate::FundingContext {
+        crate::FundingContext {
+            status: 1, // Listed
+            face_value: env
+                .storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "face")))
+                .unwrap(),
+            discount_bps: env
+                .storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "disc")))
+                .unwrap(),
+            issuer: env
+                .storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "issuer")))
+                .unwrap(),
+            buyer: env
+                .storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "buyer")))
+                .unwrap(),
+            funding_asset: env
+                .storage()
+                .instance()
+                .get(&InvKey(Symbol::new(&env, "asset")))
+                .unwrap(),
+        }
+    }
+
     pub fn get_face_value(env: Env, _invoice_id: BytesN<32>) -> u128 {
         env.storage()
             .instance()
@@ -6876,4 +6907,253 @@ fn test_upgrade_requires_admin_auth() {
     let te = setup();
     te.env.set_auths(&[]);
     te.pool.upgrade(&BytesN::from_array(&te.env, &[0; 32]));
+}
+
+
+// --------------- Counting mock invoice (issue #833) ---------------
+//
+// Stand-in for the pool's invoice contract that tallies every cross-contract
+// call `fund_invoice` makes into it. Used to prove the funding path now reads
+// the invoice exactly once (`get_funding_context`) plus the terminal
+// `mark_funded`, instead of four separate reads plus `mark_funded`.
+//
+// Wrapped in its own module because `#[contractimpl]` generates per-method
+// dispatch symbols from the *method* name only: identical entrypoint names
+// (`configure`, `get_issuer`, …) in two mocks in one module would collide.
+mod counting_invoice {
+    use crate::FundingContext;
+    use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Symbol};
+
+    #[contract]
+    pub struct MockCountingInvoice;
+
+    #[contractimpl]
+    impl MockCountingInvoice {
+        fn bump(env: &Env, name: &str) {
+            let key = super::InvKey(Symbol::new(env, name));
+            let count: u32 = env.storage().instance().get(&key).unwrap_or(0);
+            env.storage().instance().set(&key, &(count + 1));
+        }
+
+        pub fn configure_counting(
+            env: Env,
+            issuer: Address,
+            buyer: Address,
+            funding_asset: Address,
+            face_value: u128,
+            discount_bps: u32,
+        ) {
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "issuer")), &issuer);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "buyer")), &buyer);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "asset")), &funding_asset);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "face")), &face_value);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "disc")), &discount_bps);
+        }
+
+        pub fn call_count(env: Env, name: Symbol) -> u32 {
+            env.storage()
+                .instance()
+                .get(&super::InvKey(name))
+                .unwrap_or(0)
+        }
+
+        // Entrypoint names below must match what the pool's production code
+        // invokes: `get_funding_context` and `mark_funded` exactly; the four
+        // legacy names exist only so their counters stay at zero.
+        pub fn get_funding_context(env: Env, _invoice_id: BytesN<32>) -> FundingContext {
+            Self::bump(&env, "ctx_n");
+            FundingContext {
+                status: 1, // Listed
+                face_value: env
+                    .storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "face")))
+                    .unwrap(),
+                discount_bps: env
+                    .storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "disc")))
+                    .unwrap(),
+                issuer: env
+                    .storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "issuer")))
+                    .unwrap(),
+                buyer: env
+                    .storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "buyer")))
+                    .unwrap(),
+                funding_asset: env
+                    .storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "asset")))
+                    .unwrap(),
+            }
+        }
+
+        pub fn get_funding_terms(env: Env, _invoice_id: BytesN<32>) -> (u32, u128, u32) {
+            Self::bump(&env, "terms_n");
+            (
+                1,
+                env.storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "face")))
+                    .unwrap(),
+                env.storage()
+                    .instance()
+                    .get(&super::InvKey(Symbol::new(&env, "disc")))
+                    .unwrap(),
+            )
+        }
+
+        pub fn get_issuer(env: Env, _invoice_id: BytesN<32>) -> Address {
+            Self::bump(&env, "issuer_n");
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "issuer")))
+                .unwrap()
+        }
+
+        pub fn get_buyer(env: Env, _invoice_id: BytesN<32>) -> Address {
+            Self::bump(&env, "buyer_n");
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "buyer")))
+                .unwrap()
+        }
+
+        pub fn get_funding_asset(env: Env, _invoice_id: BytesN<32>) -> Address {
+            Self::bump(&env, "asset_n");
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "asset")))
+                .unwrap()
+        }
+
+        pub fn mark_funded(
+            env: Env,
+            _invoice_id: BytesN<32>,
+            _pool: Address,
+            _asset: Address,
+            _amount: u128,
+        ) -> bool {
+            Self::bump(&env, "mark_n");
+            true
+        }
+    }
+}
+
+/// #833: `fund_invoice` must touch the invoice contract exactly twice —
+/// one batched `get_funding_context` read plus the terminal `mark_funded`.
+/// Before the fix it was five calls (`get_funding_terms`, `get_issuer`,
+/// `get_buyer`, `get_funding_asset`, `mark_funded`). The old read entrypoints
+/// are still implemented on the mock and their counters prove the funding
+/// path no longer invokes them.
+#[test]
+fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
+    let te = setup();
+    let mock_id = te.env.register_contract(None, counting_invoice::MockCountingInvoice);
+    counting_invoice::MockCountingInvoiceClient::new(&te.env, &mock_id).configure_counting(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &DEFAULT_FACE_VALUE,
+        &DEFAULT_DISCOUNT_BPS,
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_id);
+    });
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let invoice_id = BytesN::from_array(&te.env, &[42u8; 32]);
+    assert!(te.pool.fund_invoice(&invoice_id));
+
+    let count = |name: &str| -> u32 {
+        te.env.as_contract(&mock_id, || {
+            te.env
+                .storage()
+                .instance()
+                .get::<_, u32>(&InvKey(Symbol::new(&te.env, name)))
+                .unwrap_or(0)
+        })
+    };
+    assert_eq!(count("ctx_n"), 1, "exactly one batched invoice read");
+    assert_eq!(count("mark_n"), 1);
+    assert_eq!(
+        count("terms_n"),
+        0,
+        "get_funding_terms must not be called"
+    );
+    assert_eq!(count("issuer_n"), 0, "get_issuer must not be called");
+    assert_eq!(count("buyer_n"), 0, "get_buyer must not be called");
+    assert_eq!(
+        count("asset_n"),
+        0,
+        "get_funding_asset must not be called"
+    );
+    assert_eq!(
+        count("ctx_n")
+            + count("terms_n")
+            + count("issuer_n")
+            + count("buyer_n")
+            + count("asset_n")
+            + count("mark_n"),
+        2,
+        "total invoice-contract calls per funding should be 2 (was 5 before #833)"
+    );
+
+    // State transitions on the pool side are unchanged by the consolidation.
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(stats.active_invoice_count, 1);
+    let funded: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&DataKey::FundedInvoice(invoice_id.clone()))
+            .unwrap()
+    });
+    assert_eq!(funded, DEFAULT_FUNDED_AMOUNT);
+}
+
+/// #833 budget regression guard. Baseline on plain `upstream/main` @
+/// `7d2c9198` (four separate invoice reads) for this exact
+/// deposit + create_and_list + fund_invoice sequence measured
+/// cpu = 1,503,282 and memory = 281,310 host budget units. With the single
+/// batched read the call must land strictly below that baseline; host budget
+/// accounting is deterministic, so these ceilings are stable.
+#[test]
+fn test_fund_invoice_host_budget_below_four_call_baseline() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    te.env.budget().reset_default();
+    assert!(te.pool.fund_invoice(&invoice_id));
+    let cpu = te.env.budget().cpu_instruction_cost();
+    let mem = te.env.budget().memory_bytes_cost();
+    std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
+
+    assert!(
+        cpu < 1_503_282,
+        "batched read should reduce fund_invoice CPU vs the four-call baseline: {cpu}"
+    );
+    assert!(
+        mem < 281_310,
+        "batched read should reduce fund_invoice memory vs the four-call baseline: {mem}"
+    );
 }
