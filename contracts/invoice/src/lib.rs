@@ -221,11 +221,11 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::PoolContract, &pool_contract);
+        Self::extend_instance_ttl(&env);
         if let Some(old) = old_pool {
             events::pool_contract_updated(&env, &old, &pool_contract);
         } else {
             events::pool_contract_updated(&env, &pool_contract, &pool_contract);
-            Self::extend_instance_ttl(&env);
         }
     }
 
@@ -307,6 +307,7 @@ impl InvoiceContract {
         env.storage()
             .instance()
             .set(&DataKey::AgentRegistryContract, &agent_registry_contract);
+        Self::extend_instance_ttl(&env);
         if let Some(old) = old {
             events::agent_registry_contract_updated(&env, &old, &agent_registry_contract);
         } else {
@@ -315,7 +316,6 @@ impl InvoiceContract {
                 &agent_registry_contract,
                 &agent_registry_contract,
             );
-            Self::extend_instance_ttl(&env);
         }
     }
 

@@ -5,7 +5,9 @@ use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::vec;
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{storage::Persistent as _, Address as _, Events as _, Ledger},
+    testutils::{
+        storage::Instance as _, storage::Persistent as _, Address as _, Events as _, Ledger,
+    },
     token,
     xdr::ToXdr,
     Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Vec,
@@ -4929,4 +4931,77 @@ fn test_move_status_index_compacts_storage() {
     let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
     assert_eq!(listed.len(), 1);
     assert_eq!(listed.get(0).unwrap().id, id2);
+}
+
+// ============== ISSUE #864: INSTANCE TTL EXTENSION ON WIRING-SETTER UPDATES ==============
+//
+// `set_pool_contract` and `set_agent_registry_contract` used to extend the
+// instance TTL only in the "no previous value" branch of their `if let`, so
+// re-pointing the address on an already-initialised instance skipped the
+// bump and left the instance entry to expire. Both setters must extend on
+// every successful call, matching `set_escrow_contract`. These tests drain
+// the instance TTL below `TTL_THRESHOLD` after the first set, then confirm
+// the update path refreshes it.
+
+#[test]
+fn test_set_pool_contract_replacement_extends_instance_ttl() {
+    let (env, client, _, _, _, _) = setup();
+
+    // First set (no previous value): extends the instance TTL to ~TTL_EXTEND_TO.
+    let pool_a = Address::generate(&env);
+    client.set_pool_contract(&pool_a);
+
+    // Advance the ledger so the remaining instance TTL falls below the
+    // threshold at which `extend_ttl` refreshes it.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    let ttl_before_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_update < TTL_THRESHOLD,
+        "instance ttl should be drained below TTL_THRESHOLD before the update call, got {ttl_before_update}"
+    );
+
+    // Update path: replacing the stored address must extend the TTL too.
+    let pool_b = Address::generate(&env);
+    client.set_pool_contract(&pool_b);
+    assert_eq!(client.get_pool_contract().unwrap(), pool_b);
+
+    let ttl_after_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_update >= TTL_THRESHOLD,
+        "replacing the pool contract should extend the instance ttl, got {ttl_after_update}"
+    );
+}
+
+#[test]
+fn test_set_agent_registry_contract_replacement_extends_instance_ttl() {
+    let (env, client, _, _, _, _) = setup();
+
+    // First set (no previous value): extends the instance TTL to ~TTL_EXTEND_TO.
+    let agent_registry_a = Address::generate(&env);
+    client.set_agent_registry_contract(&agent_registry_a);
+
+    // Advance the ledger so the remaining instance TTL falls below the
+    // threshold at which `extend_ttl` refreshes it.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    let ttl_before_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_update < TTL_THRESHOLD,
+        "instance ttl should be drained below TTL_THRESHOLD before the update call, got {ttl_before_update}"
+    );
+
+    // Update path: replacing the stored address must extend the TTL too.
+    let agent_registry_b = Address::generate(&env);
+    client.set_agent_registry_contract(&agent_registry_b);
+    assert_eq!(
+        client.get_agent_registry_contract().unwrap(),
+        agent_registry_b
+    );
+
+    let ttl_after_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_update >= TTL_THRESHOLD,
+        "replacing the agent registry contract should extend the instance ttl, got {ttl_after_update}"
+    );
 }
