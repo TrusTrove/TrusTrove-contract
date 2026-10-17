@@ -2473,11 +2473,7 @@ impl InvoiceContract {
         page_size: u32,
     ) -> Vec<Invoice> {
         let count_key = DataKey::StatusIndexCount(status as u32);
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&count_key)
-            .unwrap_or(0);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
         // Issue #832: re-bump the count key on every read so it cannot outlive
         // the entries it bounds (or be archived itself) between pushes.
         bump_persistent(&env, &count_key);
@@ -2537,11 +2533,7 @@ impl InvoiceContract {
     /// ```
     pub fn get_by_issuer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
         let count_key = DataKey::IssuerIndexCount(address.clone());
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&count_key)
-            .unwrap_or(0);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
         bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
@@ -2587,11 +2579,7 @@ impl InvoiceContract {
     /// ```
     pub fn get_by_buyer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
         let count_key = DataKey::BuyerIndexCount(address.clone());
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&count_key)
-            .unwrap_or(0);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
         bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
