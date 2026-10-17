@@ -37,4 +37,14 @@ pub enum InvoiceError {
     /// [`MAX_BATCH_SIZE`](crate::MAX_BATCH_SIZE), which would defeat the
     /// per-call cost bound batching exists to provide.
     BatchSizeExceeded = 28,
+    /// A signed attestation payload was bound to a different invoice
+    /// contract address or network than the one executing
+    /// `submit_attestation` (issue #822). Prevents signatures from
+    /// replaying across deployments (testnet vs mainnet, redeploys).
+    PayloadBindingMismatch = 29,
+    /// An attestation payload was already past its `valid_until`
+    /// timestamp at submission, or the recorded attestation expired
+    /// before `list_for_financing` ran (issue #823). Staleness check on
+    /// the ledger timestamp, strict `>` semantics.
+    AttestationExpired = 30,
 }

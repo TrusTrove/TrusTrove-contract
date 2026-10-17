@@ -151,10 +151,13 @@ fn attest(p: &FullProtocol, invoice_id: &BytesN<32>) {
             &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
         ),
         invoice_id: invoice_id.clone(),
+        contract_address: p.invoice.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(env, &[9u8; 32]),
         agent_id: test_agent_id(env),
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = ToXdr::to_xdr(payload, env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();

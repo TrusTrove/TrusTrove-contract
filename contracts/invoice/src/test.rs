@@ -13,7 +13,7 @@ use soroban_sdk::{
 
 use crate::{
     InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, MAX_BATCH_SIZE,
-    MAX_FACE_VALUE, MAX_PAGE_SIZE, TTL_EXTEND_TO, TTL_THRESHOLD,
+    MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 // Default invoice parameters used across tests.
@@ -289,10 +289,16 @@ fn attest(env: &Env, client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        // Far-future expiry: helper attestations stay valid no matter how
+        // far the calling test advances the ledger timestamp. Expiry
+        // behaviour has its own dedicated tests.
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -335,10 +341,14 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -379,10 +389,14 @@ fn test_submit_attestation_inactive_agent() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -414,10 +428,14 @@ fn test_submit_attestation_unregistered_agent() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -458,10 +476,14 @@ fn test_submit_attestation_replay_rejection() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 6000,
         evidence_hash: BytesN::from_array(&env, &[10u8; 32]),
         agent_id,
         nonce: 2,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -505,10 +527,14 @@ fn test_submit_attestation_domain_separator_mismatch() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &wrong_domain),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -547,10 +573,14 @@ fn test_submit_attestation_invoice_id_mismatch() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: wrong_invoice_id,
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -563,6 +593,242 @@ fn test_submit_attestation_invoice_id_mismatch() {
     let signature = BytesN::from_array(&env, &sig_bytes);
 
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+// ============== ISSUE #822 / #823: PAYLOAD BINDING & EXPIRY ==============
+
+/// Register the shared test agent in a fresh mock agent-registry and wire it
+/// into `client`. Returns the registry address so a second invoice instance
+/// can be pointed at the same registry.
+fn register_test_agent(env: &Env, client: &InvoiceContractClient) -> Address {
+    let agent_id = Symbol::new(env, "test_agent");
+    let registry_id = env.register_contract(None, MockAgentRegistry);
+    MockAgentRegistryClient::new(env, &registry_id).register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(env),
+        },
+    );
+    client.set_agent_registry_contract(&registry_id);
+    registry_id
+}
+
+/// Build a v2 [`crate::AttestationPayload`] bound to `bound_contract` on the
+/// current network, XDR-encode it, and sign `keccak256(payload)` with the
+/// shared test agent key. Returns the raw bytes and the 65-byte signature —
+/// the exact pair `submit_attestation` consumes.
+fn sign_attestation(
+    env: &Env,
+    bound_contract: &Address,
+    invoice_id: &BytesN<32>,
+    valid_until: u64,
+) -> (soroban_sdk::Bytes, BytesN<65>) {
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: bound_contract.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(env, &[9u8; 32]),
+        agent_id: Symbol::new(env, "test_agent"),
+        nonce: 1,
+        valid_until,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    (payload_bytes, BytesN::from_array(env, &sig_bytes))
+}
+
+/// Issue #822: an attestation signed for invoice contract A must be rejected
+/// by a *second* invoice contract instance in the same `Env` even when the
+/// invoice id is identical — which it is, because ids derive from
+/// (issuer, buyer, face_value, due_date, counter, asset) and the counter
+/// restarts at 0 per deployment.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_attestation_signed_for_one_deployment_rejected_by_another() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+    let usdc = env.register_contract(None, MockToken);
+
+    // Deployment A.
+    let a_id = env.register_contract(None, InvoiceContract);
+    let a = InvoiceContractClient::new(&env, &a_id);
+    a.initialize(&Address::generate(&env), &registry_id);
+    a.add_supported_asset(&usdc);
+    let agent_registry = register_test_agent(&env, &a);
+
+    // Deployment B: same network, same agent registry, same parties.
+    let b_id = env.register_contract(None, InvoiceContract);
+    let b = InvoiceContractClient::new(&env, &b_id);
+    b.initialize(&Address::generate(&env), &registry_id);
+    b.add_supported_asset(&usdc);
+    b.set_agent_registry_contract(&agent_registry);
+
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id_a = a.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let id_b = b.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(id_a, id_b, "replay premise: ids collide across deployments");
+
+    let (payload_bytes, signature) = sign_attestation(&env, &a_id, &id_a, u64::MAX);
+    a.submit_attestation(&id_a, &payload_bytes, &signature);
+
+    // The very same bytes must not unlock B.
+    b.submit_attestation(&id_b, &payload_bytes, &signature);
+}
+
+/// Issue #822: a payload bound to a different network id is rejected with the
+/// typed `PayloadBindingMismatch` error, not just a generic one.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_attestation_wrong_network_id_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        // A network id that is not this ledger's (the test `Env` defaults
+        // to the all-zero id, so any nonzero value differs).
+        network_id: BytesN::from_array(&env, &[42u8; 32]),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
+        agent_id: Symbol::new(&env, "test_agent"),
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(&env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    let signature = BytesN::from_array(&env, &sig_bytes);
+
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+/// Issue #823: submission of an already-expired payload is rejected with the
+/// typed `AttestationExpired` error.
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_submit_attestation_expired_payload_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) = sign_attestation(&env, &client.address, &invoice_id, now - 1);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+/// Issue #823 boundary: `valid_until == now` is still valid — the expiry
+/// comparator is strict `>`, so the boundary second is accepted on the
+/// submit path (mirrored on the list path below).
+#[test]
+fn test_submit_attestation_boundary_second_accepted() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) = sign_attestation(&env, &client.address, &invoice_id, now);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+    assert_eq!(
+        client.get_attestation(&invoice_id).unwrap().valid_until,
+        now
+    );
+    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+}
+
+/// Issue #823: an attestation valid at submission but past `valid_until`
+/// when listing runs must block `list_for_financing`.
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_list_for_financing_rejected_after_attestation_expires() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) =
+        sign_attestation(&env, &client.address, &invoice_id, now + 100);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    // One second past the window: the listing gate closes.
+    env.ledger().set_timestamp(now + 101);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+}
+
+/// Issue #823 boundary on the list path: listing exactly at `valid_until`
+/// still succeeds.
+#[test]
+fn test_list_for_financing_boundary_second_accepted() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let valid_until = env.ledger().timestamp() + 100;
+    let (payload_bytes, signature) =
+        sign_attestation(&env, &client.address, &invoice_id, valid_until);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    env.ledger().set_timestamp(valid_until);
+    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Listed);
+}
+
+/// Issue #823 on the tolerant batch path: an expired attestation must be a
+/// failed entry, never a listing and never a panic.
+#[test]
+fn test_batch_list_reports_expired_attestation_as_failed_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) = sign_attestation(&env, &client.address, &invoice_id, now + 10);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    env.ledger().set_timestamp(now + 11);
+    let entries = vec![&env, (invoice_id.clone(), DEFAULT_DISCOUNT_BPS)];
+    let failed = client.batch_list_for_financing(&entries);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), invoice_id);
+    assert_eq!(
+        client.get(&invoice_id).status,
+        InvoiceStatus::Created,
+        "expired attestation must leave the invoice unlisted"
+    );
 }
 
 #[test]
@@ -597,10 +863,13 @@ fn test_submit_attestation_nonexistent_invoice() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: fake_invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -784,6 +1053,39 @@ fn test_create_fails_above_max_face_value() {
     let above_max = MAX_FACE_VALUE.checked_add(1).unwrap();
 
     client.create(&issuer, &buyer, &above_max, &due_date, &usdc);
+}
+
+// ============== ISSUE #824: MIN_FACE_VALUE DUST FLOOR ==============
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_create_fails_below_min_face_value() {
+    // Boundary: MIN_FACE_VALUE - 1 is dust — rejected with InvalidFaceValue
+    // so it can never be created/attested/listed and bloat the status views.
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let below_min = MIN_FACE_VALUE.checked_sub(1).unwrap();
+
+    client.create(&issuer, &buyer, &below_min, &due_date, &usdc);
+}
+
+#[test]
+fn test_create_succeeds_at_min_face_value_and_is_fundable_at_max_discount() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &MIN_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(client.get(&invoice_id).face_value, MIN_FACE_VALUE);
+
+    // Fundability invariant behind the floor: even at the maximum 5000 bps
+    // discount the pool's `funded_amount = face_value * (10_000 -
+    // discount_bps) / 10_000` must not round to zero — one strope is the
+    // smallest amount `fund_invoice` accepts.
+    let funded_at_max_discount = MIN_FACE_VALUE * (10_000 - 5_000) / 10_000;
+    assert!(
+        funded_at_max_discount >= 1,
+        "MIN_FACE_VALUE must keep funded_amount >= 1 at the maximum discount"
+    );
 }
 
 #[test]
@@ -2641,21 +2943,27 @@ fn test_repay_fails_no_auth() {
 // to stay within CI time budgets for the Soroban in-process host.
 
 #[test]
-fn prop_any_positive_face_value_creates_invoice_in_created_status() {
+fn prop_any_min_face_value_creates_invoice_in_created_status() {
+    // Range starts at MIN_FACE_VALUE: issue #824 made smaller (dust) face
+    // values a rejection case, covered by
+    // `test_create_fails_below_min_face_value` instead.
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
-        .run(&(1u128..=1_000_000_000_000_000u128), |face_value| {
-            let (env, client, issuer, buyer, _, usdc) = setup();
-            let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-            let id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
-            let inv = client.get(&id);
-            prop_assert_eq!(inv.face_value, face_value);
-            prop_assert_eq!(inv.status, InvoiceStatus::Created);
-            prop_assert!(!inv.issuer_confirmed);
-            prop_assert!(!inv.buyer_confirmed);
-            prop_assert_eq!(inv.funded_amount, 0);
-            Ok(())
-        })
+        .run(
+            &(MIN_FACE_VALUE..=1_000_000_000_000_000u128),
+            |face_value| {
+                let (env, client, issuer, buyer, _, usdc) = setup();
+                let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+                let id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+                let inv = client.get(&id);
+                prop_assert_eq!(inv.face_value, face_value);
+                prop_assert_eq!(inv.status, InvoiceStatus::Created);
+                prop_assert!(!inv.issuer_confirmed);
+                prop_assert!(!inv.buyer_confirmed);
+                prop_assert_eq!(inv.funded_amount, 0);
+                Ok(())
+            },
+        )
         .unwrap();
 }
 
@@ -2700,7 +3008,7 @@ fn prop_invoice_id_is_deterministic_for_same_inputs() {
     // timestamp must always produce the same invoice ID.
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
-        .run(&(1u128..=1_000_000_000_000u128), |face_value| {
+        .run(&(MIN_FACE_VALUE..=1_000_000_000_000u128), |face_value| {
             let (env, client, issuer, buyer, _, usdc) = setup();
             let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
             let id1 = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
@@ -4206,10 +4514,16 @@ fn attest_no_mock_auth(env: &Env, client: &InvoiceContractClient, invoice_id: &B
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        // Far-future expiry: helper attestations stay valid no matter how
+        // far the calling test advances the ledger timestamp. Expiry
+        // behaviour has its own dedicated tests.
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
