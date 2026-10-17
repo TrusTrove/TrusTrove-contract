@@ -118,10 +118,13 @@ fn attest_invoice(te: &TestEnv, invoice_id: &BytesN<32>) {
             &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
         ),
         invoice_id: invoice_id.clone(),
+        contract_address: te.invoice.address.clone(),
+        network_id: te.env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&te.env, &[9u8; 32]),
         agent_id: test_agent_id(&te.env),
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&te.env);
     let digest = te.env.crypto().keccak256(&payload_bytes).to_array();
@@ -905,34 +908,46 @@ fn test_transfer_insufficient_balance_panics() {
 
 //  FUND INVOICE TESTS
 #[test]
-fn test_fund_invoice_rejects_zero_funded_amount() {
+fn test_fund_invoice_dust_face_value_never_reaches_pool() {
+    // Issue #824 moved this boundary upstream: `face_value = 1` used to be
+    // creatable/listable and only died on the pool's zero-amount guard.
+    // The invoice contract now rejects dust at `create` (InvalidFaceValue
+    // #6), so a rounding-to-zero listing can never reach `fund_invoice`.
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
-    let invoice_id = create_and_list_with_params(&te, &te.usdc_id, 1, 5000);
+    let due_date = te.env.ledger().timestamp() + 86400;
+    let result = te
+        .invoice
+        .try_create(&te.issuer, &te.buyer, &1u128, &due_date, &te.usdc_id);
+    assert!(
+        std::format!("{result:?}").contains("#6"),
+        "dust face value must be rejected by invoice.create with InvalidFaceValue: {result:?}"
+    );
+    assert!(result.is_err());
 
     let before = te.pool.get_stats();
-    let result = te.pool.try_fund_invoice(&invoice_id);
-    assert!(result.is_err(), "zero funded amount should be rejected");
-
     let after = te.pool.get_stats();
     assert_eq!(after.total_funded, before.total_funded);
     assert_eq!(after.active_invoice_count, before.active_invoice_count);
     assert_eq!(after.available_liquidity, before.available_liquidity);
-    assert_eq!(te.invoice.get_status(&invoice_id), 1);
 }
 
 #[test]
-fn test_fund_invoice_allows_boundary_amount_of_one() {
+fn test_fund_invoice_allows_min_face_value_at_max_discount() {
     let te = setup();
     te.pool.deposit(&te.lp, &100_000_000_000);
-    // face_value=2, discount_bps=5000 -> funded_amount = 2 * 5000 / 10000 = 1
-    let invoice_id = create_and_list_with_params(&te, &te.usdc_id, 2, 5000);
+    // MIN_FACE_VALUE is the new funding floor: at the maximum 5000 bps
+    // discount it still yields funded_amount = MIN_FACE_VALUE / 2 = 50_000
+    // stroops >= 1, so the pool's zero-amount guard cannot trip on a
+    // legitimately created invoice (issue #824 boundary).
+    let invoice_id =
+        create_and_list_with_params(&te, &te.usdc_id, trusttrove_invoice::MIN_FACE_VALUE, 5000);
 
     let result = te.pool.fund_invoice(&invoice_id);
     assert!(result);
 
     let stats = te.pool.get_stats();
-    assert_eq!(stats.total_funded, 1);
+    assert_eq!(stats.total_funded, trusttrove_invoice::MIN_FACE_VALUE / 2);
     assert_eq!(stats.active_invoice_count, 1);
 }
 
@@ -3833,10 +3848,13 @@ mod real_registry_integration {
                 &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
             ),
             invoice_id: invoice_id.clone(),
+            contract_address: invoice.address.clone(),
+            network_id: env.ledger().network_id(),
             risk_score: 5000,
             evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
             agent_id: test_agent_id(&env),
             nonce: 1,
+            valid_until: u64::MAX,
         };
         let payload_bytes = payload.to_xdr(&env);
         let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -3901,10 +3919,13 @@ mod real_registry_integration {
                 &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
             ),
             invoice_id: second_invoice_id.clone(),
+            contract_address: invoice.address.clone(),
+            network_id: env.ledger().network_id(),
             risk_score: 5000,
             evidence_hash: BytesN::from_array(&env, &[8u8; 32]),
             agent_id: test_agent_id(&env),
             nonce: 2,
+            valid_until: u64::MAX,
         };
         let second_payload_bytes = second_payload.to_xdr(&env);
         let second_digest = env.crypto().keccak256(&second_payload_bytes).to_array();
