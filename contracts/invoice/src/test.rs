@@ -5005,3 +5005,98 @@ fn test_set_agent_registry_contract_replacement_extends_instance_ttl() {
         "replacing the agent registry contract should extend the instance ttl, got {ttl_after_update}"
     );
 }
+
+// ============ BATCHED FUNDING VIEW (issue #833) ============
+//
+// `PoolContract::fund_invoice` used to read the invoice contract four times
+// (`get_funding_terms`, `get_issuer`, `get_buyer`, `get_funding_asset`), each
+// call loading and deserializing the whole `Invoice`. `get_funding_context`
+// consolidates those fields into one read; these tests pin its parity with
+// the four views, its error behavior on a missing invoice, and its lower
+// host budget cost.
+
+#[test]
+fn test_get_funding_context_matches_individual_views() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &200);
+
+    let ctx = client.get_funding_context(&invoice_id);
+
+    // Every field equals what the corresponding individual view returns for
+    // the same invoice — the batched read is a pure consolidation, with no
+    // behaviour drift.
+    let (status, face_value, discount_bps) = client.get_funding_terms(&invoice_id);
+    assert_eq!(ctx.status, status);
+    assert_eq!(ctx.status, 1, "status should be 1 (Listed)");
+    assert_eq!(ctx.face_value, face_value);
+    assert_eq!(ctx.face_value, 1_000_000_000);
+    assert_eq!(ctx.discount_bps, discount_bps);
+    assert_eq!(ctx.discount_bps, 200);
+    assert_eq!(ctx.issuer, client.get_issuer(&invoice_id));
+    assert_eq!(ctx.buyer, client.get_buyer(&invoice_id));
+    assert_eq!(ctx.funding_asset, client.get_funding_asset(&invoice_id));
+    assert_eq!(ctx.issuer, issuer);
+    assert_eq!(ctx.buyer, buyer);
+    assert_eq!(ctx.funding_asset, usdc);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_funding_context_unknown_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    // Same `NotFound` abort as `get_funding_terms`, the first of the four
+    // calls this view replaces (the pool relies on this staying the first
+    // failure on the funding path).
+    client.get_funding_context(&fake_id);
+}
+
+#[test]
+fn test_get_funding_context_costs_less_than_four_separate_views() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &200);
+
+    // Measure the old read pattern: four host calls, four invoice loads.
+    env.budget().reset_default();
+    let four = (
+        client.get_funding_terms(&invoice_id),
+        client.get_issuer(&invoice_id),
+        client.get_buyer(&invoice_id),
+        client.get_funding_asset(&invoice_id),
+    );
+    let cpu_four = env.budget().cpu_instruction_cost();
+    let mem_four = env.budget().memory_bytes_cost();
+
+    // Measure the consolidated read: one host call, one invoice load.
+    env.budget().reset_default();
+    let ctx = client.get_funding_context(&invoice_id);
+    let cpu_one = env.budget().cpu_instruction_cost();
+    let mem_one = env.budget().memory_bytes_cost();
+
+    // Parity first (the cheaper path must answer identically)...
+    assert_eq!(ctx.status, four.0 .0);
+    assert_eq!(ctx.face_value, four.0 .1);
+    assert_eq!(ctx.discount_bps, four.0 .2);
+    assert_eq!(ctx.issuer, four.1);
+    assert_eq!(ctx.buyer, four.2);
+    assert_eq!(ctx.funding_asset, four.3);
+
+    // ...then the performance claim. Host budget accounting is deterministic,
+    // so 3/4ths of the reads saved must show up as a strict reduction in both
+    // CPU and memory. Use a generous floor (one call is clearly under 3/4 of
+    // four) so the assertion is about direction, not an exact instruction mix.
+    assert!(
+        cpu_one * 2 < cpu_four,
+        "single batched read should cost well under the four separate reads: {cpu_one} vs {cpu_four} cpu"
+    );
+    assert!(
+        mem_one * 2 < mem_four,
+        "single batched read should cost well under the four separate reads: {mem_one} vs {mem_four} bytes"
+    );
+}

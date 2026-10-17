@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token,
+    contract, contractimpl, contracttype, panic_with_error, token,
     xdr::{FromXdr, ToXdr},
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Vec,
 };
@@ -59,6 +59,41 @@ pub const MAX_PAGE_SIZE: u32 = 50;
 /// so an unbounded `Vec` would let one transaction exceed the per-call budget.
 /// Requests over the cap panic with [`InvoiceError::BatchSizeExceeded`].
 pub const MAX_BATCH_SIZE: u32 = 50;
+
+/// All invoice data `PoolContract::fund_invoice` needs, consolidated into a
+/// single read.
+///
+/// Returned by [`InvoiceContract::get_funding_context`]. Before issue #833
+/// the pool fetched these six fields through four separate cross-contract
+/// calls (`get_funding_terms`, `get_issuer`, `get_buyer`, `get_funding_asset`),
+/// each of which loaded and deserialized the whole [`Invoice`] from persistent
+/// storage. One call now serves them all.
+///
+/// `status` is the numeric discriminant (`InvoiceStatus as u32`), matching the
+/// tuple element `get_funding_terms` already exposes, so wire-level consumers
+/// see identical encodings.
+///
+/// Defined in `lib.rs` (next to its only producer) rather than `types.rs` to
+/// keep this view's storage-layout surface minimal while the setter/index work
+/// of issues #832/#914 is in flight on adjacent branches; move it if a later
+/// refactor centralizes all wire types.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FundingContext {
+    /// Invoice status as its numeric discriminant (`InvoiceStatus as u32`);
+    /// `1` means `Listed`.
+    pub status: u32,
+    /// Face value in USDC stroops, same as [`Invoice::face_value`].
+    pub face_value: u128,
+    /// Discount in basis points, same as [`Invoice::discount_bps`].
+    pub discount_bps: u32,
+    /// Issuer address, same as [`Invoice::issuer`].
+    pub issuer: Address,
+    /// Buyer address, same as [`Invoice::buyer`].
+    pub buyer: Address,
+    /// Funding asset address, same as [`Invoice::funding_asset`].
+    pub funding_asset: Address,
+}
 
 #[contract]
 pub struct InvoiceContract;
@@ -2254,6 +2289,12 @@ impl InvoiceContract {
 
     /// Returns (status, face_value, discount_bps) in a single cross-contract call.
     ///
+    /// Kept for compatibility with existing off-chain and third-party
+    /// consumers. `PoolContract::fund_invoice` no longer uses it: since issue
+    /// #833 it reads [`Self::get_funding_context`] instead, which returns
+    /// these three fields plus `issuer`, `buyer` and `funding_asset` in one
+    /// load.
+    ///
     /// # Arguments
     /// - `invoice_id` - The invoice to query.
     ///
@@ -2276,6 +2317,52 @@ impl InvoiceContract {
             invoice.face_value,
             invoice.discount_bps,
         )
+    }
+
+    /// Returns every invoice field the pool needs to fund, in one call.
+    ///
+    /// Consolidates the four separate cross-contract reads `fund_invoice`
+    /// previously made (`get_funding_terms`, `get_issuer`, `get_buyer`,
+    /// `get_funding_asset`) into a single invoice load, cutting the pool's
+    /// invoice read calls from four to one (issue #833). Field values are
+    /// exactly what the four individual views return for the same invoice;
+    /// the view is read-only and performs no storage writes or TTL bumps,
+    /// matching the four views it replaces.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found — the same
+    ///   error (and same first-failure position) as `get_funding_terms`, the
+    ///   first of the four calls this view replaces.
+    ///
+    /// # Returns
+    /// * [`FundingContext`] - `(status, face_value, discount_bps, issuer,
+    ///   buyer, funding_asset)` for the invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ctx = client.get_funding_context(&invoice_id);
+    /// ```
+    pub fn get_funding_context(env: Env, invoice_id: BytesN<32>) -> FundingContext {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        FundingContext {
+            status: invoice.status as u32,
+            face_value: invoice.face_value,
+            discount_bps: invoice.discount_bps,
+            issuer: invoice.issuer,
+            buyer: invoice.buyer,
+            funding_asset: invoice.funding_asset,
+        }
     }
 
     /// Returns the funding asset for an invoice.
