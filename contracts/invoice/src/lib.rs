@@ -2472,19 +2472,28 @@ impl InvoiceContract {
         page: u32,
         page_size: u32,
     ) -> Vec<Invoice> {
+        let count_key = DataKey::StatusIndexCount(status as u32);
         let count: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::StatusIndexCount(status as u32))
+            .get(&count_key)
             .unwrap_or(0);
+        // Issue #832: re-bump the count key on every read so it cannot outlive
+        // the entries it bounds (or be archived itself) between pushes.
+        bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in start..end {
+            let entry_key = DataKey::StatusIndexEntry(status as u32, i);
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::StatusIndexEntry(status as u32, i))
+                .get(&entry_key)
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            // Issue #832: index entries were only TTL-extended at write time,
+            // so entries older than TTL_EXTEND_TO could be archived while the
+            // count stayed alive and this read would hit a missing entry.
+            bump_persistent(&env, &entry_key);
             ids.push_back(id);
         }
         let invoices = hydrate_ids(&env, ids);
@@ -2527,19 +2536,24 @@ impl InvoiceContract {
     /// let invoices = client.get_by_issuer(&issuer, 0, 20);
     /// ```
     pub fn get_by_issuer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+        let count_key = DataKey::IssuerIndexCount(address.clone());
         let count: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::IssuerIndexCount(address.clone()))
+            .get(&count_key)
             .unwrap_or(0);
+        bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in start..end {
+            let entry_key = DataKey::IssuerIndexEntry(address.clone(), i);
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::IssuerIndexEntry(address.clone(), i))
+                .get(&entry_key)
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            // Issue #832: read-time TTL bump, see `get_by_status`.
+            bump_persistent(&env, &entry_key);
             ids.push_back(id);
         }
         hydrate_ids(&env, ids)
@@ -2572,19 +2586,24 @@ impl InvoiceContract {
     /// let invoices = client.get_by_buyer(&buyer, 0, 20);
     /// ```
     pub fn get_by_buyer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
+        let count_key = DataKey::BuyerIndexCount(address.clone());
         let count: u32 = env
             .storage()
             .persistent()
-            .get(&DataKey::BuyerIndexCount(address.clone()))
+            .get(&count_key)
             .unwrap_or(0);
+        bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in start..end {
+            let entry_key = DataKey::BuyerIndexEntry(address.clone(), i);
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::BuyerIndexEntry(address.clone(), i))
+                .get(&entry_key)
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            // Issue #832: read-time TTL bump, see `get_by_status`.
+            bump_persistent(&env, &entry_key);
             ids.push_back(id);
         }
         hydrate_ids(&env, ids)
@@ -3206,17 +3225,40 @@ fn page_range(env: &Env, count: u32, page: u32, page_size: u32) -> (u32, u32) {
     (start, end)
 }
 
+/// Re-bumps the TTL of a persistent-storage entry that has just been read,
+/// using the shared `TTL_THRESHOLD`/`TTL_EXTEND_TO` policy.
+///
+/// Secondary index entries (`IssuerIndexEntry`, `BuyerIndexEntry`,
+/// `StatusIndexEntry`), their `*IndexCount` keys and `Invoice` records of
+/// terminal invoices were previously only extended at write time. Reads
+/// through `get_by_issuer`/`get_by_buyer`/`get_by_status` therefore did not
+/// affect liveness, and entries could be archived between queries (issue #832).
+/// Bumping on the read path keeps every entry that is still actually being
+/// queried alive. Extending an entry that is not (or no longer) in storage
+/// would fail with `MissingValue`, so the bump is guarded by a presence check.
+fn bump_persistent(env: &Env, key: &DataKey) {
+    let store = env.storage().persistent();
+    if store.has(key) {
+        store.extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+}
+
 fn hydrate_ids(env: &Env, ids: Vec<BytesN<32>>) -> Vec<Invoice> {
     let mut result: Vec<Invoice> = Vec::new(env);
     for i in 0..ids.len() {
         let id = ids
             .get(i)
             .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let inv_key = DataKey::Invoice(id);
         let invoice: Invoice = env
             .storage()
             .persistent()
-            .get(&DataKey::Invoice(id))
+            .get(&inv_key)
             .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        // Issue #832: terminal invoices (Repaid/Cancelled/Defaulted/Expired)
+        // receive no further state transitions, so without this read-time bump
+        // their records could archive while the index still references them.
+        bump_persistent(env, &inv_key);
         result.push_back(invoice);
     }
     result

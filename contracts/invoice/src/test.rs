@@ -5100,3 +5100,139 @@ fn test_get_funding_context_costs_less_than_four_separate_views() {
         "single batched read should cost well under the four separate reads: {mem_one} vs {mem_four} bytes"
     );
 }
+
+// ============== ISSUE #832: INDEX ENTRIES AND INVOICES RE-BUMPED ON READ ==============
+//
+// `IssuerIndexEntry`, `BuyerIndexEntry`, `StatusIndexEntry`, the matching
+// `*IndexCount` keys and the `Invoice` records hydrated behind them were
+// previously TTL-extended only at write time. Once the ledger passed
+// `TTL_EXTEND_TO` ledgers after a create, a read through `get_by_issuer`,
+// `get_by_buyer` or `get_by_status` could hit archived entries and panic
+// with `NotFound` — for terminal invoices (e.g. `Cancelled`) there is no
+// later transition to bump the record at all. The views now re-bump every
+// persistent entry they read.
+
+/// Keeps the contract *instance* entry alive across the ledger jumps below,
+/// so each test isolates the archival behaviour of the persistent index
+/// entries and invoice records. On a live network a keeper does the same for
+/// the instance via any state-changing call.
+fn keep_instance_alive(env: &Env, contract: &Address) {
+    env.as_contract(contract, || {
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    });
+}
+
+#[test]
+fn test_get_by_issuer_rebumps_index_entries_and_invoices_on_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Drain the create-time TTLs to just below the extension threshold.
+    env.ledger().set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+
+    // Advance past the point where the entries would have archived without
+    // the read-time bump applied by the first `get_by_issuer` call. Without
+    // the fix this panics with `InvoiceError::NotFound`.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_get_by_buyer_rebumps_index_entries_and_invoices_on_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let page = client.get_by_buyer(&buyer, &0, &20);
+    assert_eq!(page.len(), 1);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_buyer(&buyer, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_get_by_status_rebumps_index_entries_and_invoices_on_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let page = client.get_by_status(&InvoiceStatus::Created, &0, &20);
+    assert_eq!(page.len(), 1);
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_status(&InvoiceStatus::Created, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_terminal_invoice_stays_available_when_read_through_indexes() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // `cancel` is the last write to this Invoice record: without a read-time
+    // bump its TTL can never be recovered by a later transition, and the
+    // entry moved into the `Cancelled` status index has the same problem.
+    assert!(client.cancel(&invoice_id));
+
+    env.ledger().set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    // First pass through every index re-bumps count key, index entry and the
+    // terminal Invoice record.
+    assert_eq!(client.get_by_issuer(&issuer, &0, &20).len(), 1);
+    assert_eq!(client.get_by_buyer(&buyer, &0, &20).len(), 1);
+    assert_eq!(
+        client.get_by_status(&InvoiceStatus::Cancelled, &0, &20).len(),
+        1
+    );
+
+    // Past the point where all of the above would have archived without the
+    // read-time bumps. Without the fix these calls panic with
+    // `InvoiceError::NotFound` (index entries) or return empty pages.
+    env.ledger().set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+    let invoice = page.get(0).unwrap();
+    assert_eq!(invoice.id, invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Cancelled);
+
+    let page = client.get_by_buyer(&buyer, &0, &20);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+    let page = client.get_by_status(&InvoiceStatus::Cancelled, &0, &20);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Storage, InternalError)")]
+fn test_get_by_issuer_fails_when_entries_are_never_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Documented archival behaviour (issue #832): the read-time bump only
+    // protects entries that are actually still being queried. Once the
+    // write-time TTL has fully elapsed with no `get_by_*` call in between,
+    // the index entries are archived and any read through them hard-fails
+    // (`Storage::InternalError` in the test env: "Accessed contract data key
+    // that has been archived"; on the real network the transaction fails
+    // before the contract runs). Recovery then requires a `RestoreFootprint`
+    // by a keeper, as documented in DEPLOYMENT.md.
+    env.ledger().set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    env.ledger().set_sequence_number(env.ledger().sequence() + 100_010);
+    client.get_by_issuer(&issuer, &0, &20);
+}

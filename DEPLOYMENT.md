@@ -290,3 +290,37 @@ To manually invalidate old deployments:
 | Deploy hangs waiting for contract | Check network connection; testnet may be slow |
 | `400` from Friendbot | Account likely already funded — this is normal |
 | Contract not found on verify | Wait longer after deploy; re-run `verify.sh` |
+
+## Storage TTL and Index Maintenance
+
+All invoice storage follows the workspace TTL policy
+(`trusttrove-ttl`: `THRESHOLD = 500_000`, `EXTEND_TO = 2_000_000` ledgers,
+roughly 115 days). Since issue #832 the paginated views
+`get_by_issuer`, `get_by_buyer` and `get_by_status` re-bump every persistent
+entry they read — the `*IndexCount` keys, the `IssuerIndexEntry` /
+`BuyerIndexEntry` / `StatusIndexEntry` rows and the hydrated `Invoice`
+records — so any index that is still actively queried keeps itself alive,
+including invoices in terminal statuses (`Repaid`, `Cancelled`, `Defaulted`,
+`Expired`) that never receive another state transition.
+
+Entries that are *never* read still expire at their write-time TTL and get
+archived; a subsequent read then fails (the transaction aborts on the real
+network). Two keeper options prevent or recover from that:
+
+1. **Poll-based keep-alive (recommended, no privileged access):** a keeper
+   periodically calls `get_by_issuer` / `get_by_buyer` / `get_by_status` for
+   the indexes it cares about, paging within `MAX_PAGE_SIZE`. Every read
+   re-bumps the touched entries.
+2. **Restore after archival:** fetch the archived entries' footprints from
+   history and restore them before the next read:
+
+   ```bash
+   stellar contract restore \
+     --contract <CONTRACT_ID> \
+     --restore-footprint <FOOTPRINT_LEDGER_KEY_FILE> \
+     --source <KEEPER_ACCOUNT> --network <NETWORK>
+   ```
+
+   `stellar ledger-entry read <ledger-key-key>` (or an RPC
+   `getLedgerEntries` call) can be used to confirm an entry is missing
+   before restoring.
