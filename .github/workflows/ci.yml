@@ -1,6 +1,14 @@
 name: CI
 
-on: [push, pull_request]
+on:
+  push:
+  pull_request:
+  # Nightly cargo audit against the default branch so a newly published
+  # RUSTSEC advisory is caught even with zero pushes/PRs (issue #803).
+  # Scheduled workflows run only the `cargo-audit-nightly` job below; the
+  # heavy jobs are gated off for this trigger.
+  schedule:
+    - cron: "0 3 * * *"
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -14,6 +22,9 @@ permissions:
 
 jobs:
   build-and-test:
+    # The full build/test pipeline is pointless on the nightly schedule;
+    # only the audit job runs then (issue #803).
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -96,6 +107,7 @@ jobs:
 
   coverage:
     name: coverage
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     env:
       # Exposed as env so the upload step can be skipped when the secret is
@@ -158,6 +170,7 @@ jobs:
 
   integration-test:
     name: integration-test
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -189,4 +202,21 @@ jobs:
 
       - name: Run cross-contract integration tests
         run: cargo test -p trusttrove-integration-tests -- --nocapture
+
+  cargo-audit-nightly:
+    name: cargo-audit (nightly)
+    # Runs only on the schedule trigger; on push/PR the audit still runs as a
+    # step inside build-and-test above (issue #803).
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit@0.22.1
+
+      - name: Audit dependencies (RUSTSEC)
+        run: cargo audit
 
