@@ -220,3 +220,14 @@ jobs:
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
 
+  readme-addresses:
+    name: readme-addresses
+    # Structural validation of README.md's deployed-addresses table (issue #806).
+    # Cheap (no toolchain), so it also runs on the nightly schedule.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate README deployed-addresses table
+        run: bash scripts/maintainer/check-readme-addresses.sh
+
