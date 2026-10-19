@@ -233,6 +233,46 @@ fn test_initialize() {
     assert_eq!(client.get_locked(&generate_invoice_id(&env, 1)), 0);
 }
 
+//  ISSUE #867: initialize must announce itself, like every other contract
+//  (invoice/registry emit `contract_initialized`, pool emits
+//  `pool_initialized`). Assert the event is published with the configured
+//  admin, pool and USDC asset as topics.
+#[test]
+fn test_initialize_emits_contract_initialized_event() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = Address::generate(&env);
+    let pool = Address::generate(&env);
+    let usdc = env.register_contract(None, MockToken);
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    client.initialize(&admin, &pool, &usdc);
+
+    let events = env.events().all();
+    let (contract, topics, _) = events
+        .last()
+        .expect("initialize must publish a contract_initialized event");
+    assert_eq!(contract, contract_id);
+    assert_eq!(topics.len(), 4, "symbol + admin + pool + usdc topics");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "contract_initialized")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap(),
+        pool
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(3).unwrap()).unwrap(),
+        usdc
+    );
+}
+
 #[test]
 #[should_panic(expected = "Error(Auth")]
 fn test_upgrade_requires_admin_auth() {

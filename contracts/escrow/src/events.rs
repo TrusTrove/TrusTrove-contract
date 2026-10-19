@@ -1,5 +1,26 @@
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
+/// Emitted by `initialize` when the escrow is first configured, so indexers
+/// following escrow deployments can see the admin, pool and funding asset
+/// from the event alone. Matches the `contract_initialized` convention used
+/// by the invoice and registry contracts (#867).
+pub fn contract_initialized(
+    env: &Env,
+    admin: &Address,
+    pool_contract: &Address,
+    usdc_asset: &Address,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "contract_initialized"),
+            admin.clone(),
+            pool_contract.clone(),
+            usdc_asset.clone(),
+        ),
+        (),
+    );
+}
+
 pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
     env.events()
         .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());

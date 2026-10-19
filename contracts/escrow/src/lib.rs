@@ -63,6 +63,9 @@ impl EscrowContract {
             .instance()
             .set(&DataKey::UsdcAsset, &usdc_asset);
         Self::extend_instance_ttl(&env);
+        // #867: every other contract announces initialization; escrow must
+        // too, so an indexer sees admin/pool/asset without reading storage.
+        events::contract_initialized(&env, &admin, &pool_contract, &usdc_asset);
     }
 
     /// Get a token client for the USDC asset stored in the contract.
