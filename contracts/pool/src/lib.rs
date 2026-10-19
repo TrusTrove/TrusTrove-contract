@@ -1176,6 +1176,11 @@ impl PoolContract {
 
     /// Funds a listed invoice by moving USDC through escrow and invoice contracts.
     ///
+    /// The funded amount travels `pool → escrow.lock → escrow.release_to_issuer`
+    /// in this call, so the issuer is paid at funding time (issue #819,
+    /// restoring #56) and escrow retains only a release marker for the
+    /// repayment/default paths.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice to fund.
@@ -1359,7 +1364,7 @@ impl PoolContract {
         let mut args = Vec::new(&env);
         args.push_back(invoice_id.clone().into_val(&env));
         args.push_back(funded_amount.into_val(&env));
-        args.push_back(issuer.into_val(&env));
+        args.push_back(issuer.clone().into_val(&env));
         let _: bool = env.invoke_contract(&escrow_contract, &Symbol::new(&env, "lock"), args);
 
         let pool_address = env.current_contract_address();
@@ -1370,6 +1375,22 @@ impl PoolContract {
         args.push_back(funded_amount.into_val(&env));
         let _: bool =
             env.invoke_contract(&invoice_contract, &Symbol::new(&env, "mark_funded"), args);
+
+        // Issue #819 (restores #56 / 5f6dc7c): pay the issuer at funding time.
+        // The principal just locked in escrow is released to the invoice's
+        // issuer so the SME receives funds when the pool funds the invoice;
+        // escrow records the release (DataKey::IssuerReleased) so the
+        // repayment path (`release_to_pool`) and the default path
+        // (`handle_default` below) can tell this payout apart from an
+        // out-of-band lock removal.
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        args.push_back(issuer.into_val(&env));
+        let _: bool = env.invoke_contract(
+            &escrow_contract,
+            &Symbol::new(&env, "release_to_issuer"),
+            args,
+        );
 
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
@@ -1556,17 +1577,30 @@ impl PoolContract {
     /// Forwards a defaulted invoice to escrow default handling and updates
     /// the invoice status on the invoice contract.
     ///
-    /// This function performs the following cross-contract sequence:
-    /// 1. Calls `escrow.handle_default()` to release escrowed funds back
-    ///    to the pool.
+    /// Since issue #819 the funding path releases the locked principal to the
+    /// issuer at funding time, so escrow normally holds no principal at
+    /// default time. This function performs the following cross-contract
+    /// sequence:
+    /// 1. Calls `escrow.handle_default()`. It returns `true` only when a lock
+    ///    record was still live in escrow and its principal came back to the
+    ///    pool. When it returns `false`, the pool verifies via
+    ///    `escrow.was_released_to_issuer()` that the principal had already
+    ///    been paid to the issuer (the standard post-#819 case) and books it
+    ///    as an unrecoverable LP capital loss by reducing `TotalDeposits` by
+    ///    the funded amount; without that marker the lock vanished out of
+    ///    band and `EscrowDefaultNotReleased` trips (#21).
     /// 2. Calls `invoice.mark_defaulted()` to persist the `Defaulted` status
     ///    on the invoice record, update the status index, and emit the
     ///    `invoice_defaulted` event.
     /// 3. Updates the pool's local accounting and removes the funded invoice
-    ///    entry. Only `TotalFunded`, `TotalLossRealised`, and
-    ///    `ActiveInvoiceCount` change: `TotalDeposits` is intentionally left
-    ///    untouched because escrow returns the principal to the pool, so LP
-    ///    capital is preserved (issue #439).
+    ///    entry. When escrow returned the principal (`true`), only
+    ///    `TotalFunded`, `TotalLossRealised`, and `ActiveInvoiceCount`
+    ///    change — `TotalDeposits` is left untouched because the recovered
+    ///    principal backs it (issue #439). When the principal was already
+    ///    with the issuer, `TotalDeposits` additionally shrinks by the funded
+    ///    amount so deposit accounting keeps matching the pool's token
+    ///    balance; shares are not burned, the loss surfaces as a lower share
+    ///    price.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1579,12 +1613,13 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `InvoiceNotFound` if no funded invoice entry exists for `invoice_id`.
-    /// * `EscrowDefaultNotReleased` if `escrow.handle_default()` returns `false`
-    ///   (e.g. no lock record exists in escrow for this invoice, so no tokens
-    ///   were actually transferred back to the pool). Without this check, pool
-    ///   accounting would otherwise proceed to record a loss and free up
-    ///   utilization as if funds had been recovered, even though escrow moved
-    ///   nothing.
+    /// * `EscrowDefaultNotReleased` if `escrow.handle_default()` returns
+    ///   `false` and escrow carries no issuer-release marker for this invoice
+    ///   (the lock was removed out of band, so neither escrow nor the issuer
+    ///   can account for the principal). Pool accounting must not proceed to
+    ///   record a loss as if funds had been recovered.
+    /// * `Overflow` if `TotalDeposits` would underflow while booking a loss
+    ///   for principal already paid to the issuer.
     /// * `ActiveCountUnderflow` if the active-invoice counter would underflow
     ///   (e.g. double-default of the same invoice).
     ///
@@ -1619,19 +1654,38 @@ impl PoolContract {
         args.push_back(pool_address.into_val(&env));
         let escrow_released: bool =
             env.invoke_contract(&escrow_contract, &Symbol::new(&env, "handle_default"), args);
-        if !escrow_released {
-            panic_with_error!(&env, PoolError::EscrowDefaultNotReleased);
+
+        // Issue #819: the funding path released the principal to the issuer,
+        // so a `false` here is the normal case for every invoice funded by
+        // this code — but only if escrow still carries the issuer-release
+        // marker. Without the marker the lock vanished out of band and the
+        // #21 guard must keep rejecting the default.
+        let principal_paid_to_issuer = !escrow_released;
+        if principal_paid_to_issuer {
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let was_paid: bool = env.invoke_contract(
+                &escrow_contract,
+                &Symbol::new(&env, "was_released_to_issuer"),
+                args,
+            );
+            if !was_paid {
+                panic_with_error!(&env, PoolError::EscrowDefaultNotReleased);
+            }
         }
 
-        // Escrow returns the full locked principal to the pool on default (see
-        // `EscrowContract::handle_default`), so LP capital is not lost here:
-        // only `TotalFunded` — capital currently out on funded invoices — is
-        // decremented. `TotalDeposits` is intentionally left unchanged so
-        // `available_liquidity = TotalDeposits - TotalFunded` rises by exactly
-        // the recovered amount and LP share value is preserved. Previously this
-        // also subtracted `funded_amount` from `TotalDeposits`, which
-        // double-counted the loss and artificially deflated share value. Refs:
-        // issue #439.
+        // When escrow still held and returned the principal (pre-#819 locks
+        // or out-of-band `lock` calls), LP capital is not lost here: only
+        // `TotalFunded` — capital currently out on funded invoices — is
+        // decremented and `TotalDeposits` is left unchanged so LP share value
+        // is preserved (issue #439). When the principal had already been paid
+        // to the issuer at funding time (the standard flow now), it cannot be
+        // recovered on default: `TotalDeposits` shrinks by the funded amount
+        // so deposit accounting keeps matching the pool's token balance and
+        // LPs absorb the loss as a lower share price instead of the pool
+        // going insolvent. Previously this also subtracted `funded_amount`
+        // from `TotalDeposits` on the recovered path, which double-counted
+        // the loss. Refs: issue #439, issue #819.
         let totals = Self::totals(&env);
         let total_funded = totals.funded;
         let total_loss_realised = totals.loss_realised;
@@ -1646,6 +1700,16 @@ impl PoolContract {
             &DataKey::TotalLossRealised,
             &(total_loss_realised + funded_amount),
         );
+        if principal_paid_to_issuer {
+            let new_total_deposits = totals
+                .deposits
+                .checked_sub(funded_amount)
+                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+            env
+                .storage()
+                .instance()
+                .set(&DataKey::TotalDeposits, &new_total_deposits);
+        }
 
         let active_count = totals.active_invoices;
         let new_active_count = active_count
