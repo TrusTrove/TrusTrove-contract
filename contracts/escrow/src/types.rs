@@ -85,6 +85,18 @@ pub enum DataKey {
     /// Active escrow lock for a given invoice. The inner `BytesN<32>` is the
     /// invoice ID. Value type: [`EscrowRecord`].
     Locked(BytesN<32>),
+    /// Evidence that the locked principal for a given invoice was released to
+    /// the issuer at funding time (issue #819). The inner `BytesN<32>` is the
+    /// invoice ID. Value type: `u128` (the amount released to the issuer).
+    ///
+    /// Written by [`EscrowContract::release_to_issuer`] when it removes the
+    /// [`DataKey::Locked`] record, and consumed by exactly one subsequent
+    /// [`EscrowContract::release_to_pool`] (repayment) call. The pool reads it
+    /// via [`EscrowContract::was_released_to_issuer`] in
+    /// `PoolContract::handle_default` to tell "principal already paid to the
+    /// issuer at funding" (normal) apart from an out-of-band lock removal
+    /// (#21 guard).
+    IssuerReleased(BytesN<32>),
     /// Event history for a given invoice. The inner `BytesN<32>` is the
     /// invoice ID. Value type: `Vec<EscrowEvent>`.
     History(BytesN<32>),

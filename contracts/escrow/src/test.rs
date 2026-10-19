@@ -769,6 +769,56 @@ fn test_release_to_pool_second_call_panics() {
     client.release_to_pool(&invoice_id, &amount);
 }
 
+// ---- Issue #819: issuer-release marker on the funding-time payout path ----
+
+#[test]
+fn test_release_to_issuer_leaves_marker_that_release_to_pool_consumes() {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 30);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_issuer(&invoice_id, &issuer);
+
+    // Principal left escrow to the issuer; only the marker remains.
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert!(client.was_released_to_issuer(&invoice_id));
+
+    // The repayment route works off the marker: buyer funds land in escrow,
+    // then exactly one release_to_pool forwards them to the pool.
+    let escrow_key = BalanceKey(client.address.clone());
+    env.as_contract(&usdc_id, || {
+        env.storage().persistent().set(&escrow_key, &1_500_000_000i128);
+    });
+    let pool_before = get_balance(&env, &usdc_id, &pool);
+    assert!(client.release_to_pool(&invoice_id, &1_500_000_000));
+    assert_eq!(
+        get_balance(&env, &usdc_id, &pool) - pool_before,
+        1_500_000_000
+    );
+
+    // The marker was consumed — no second release, and the default path can
+    // no longer attribute any missing principal to the issuer.
+    assert!(!client.was_released_to_issuer(&invoice_id));
+    assert!(!client.handle_default(&invoice_id, &pool));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_release_to_pool_after_marker_second_call_panics() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 31);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_issuer(&invoice_id, &issuer);
+
+    client.release_to_pool(&invoice_id, &500_000_000);
+    // Replay after the marker was consumed must surface NotFound (#2), the
+    // same guard the lock-record path provides.
+    client.release_to_pool(&invoice_id, &500_000_000);
+}
+
 #[test]
 fn test_handle_default_returns_funds_to_pool() {
     let (env, client, _admin, pool, issuer, _usdc_id) = setup();
@@ -1368,6 +1418,10 @@ fn prop_escrow_balance_equals_sum_of_locked_records() {
             ];
             let stranger = Address::generate(&env);
             let mut expected_locks = [None; 4];
+            // Issue #819: `release_to_issuer` removes the lock record but
+            // leaves an `IssuerReleased` marker that exactly one
+            // `release_to_pool` call may consume.
+            let mut issuer_released = [false; 4];
             let mut history_lengths = [0u32; 4];
 
             for operation in operations {
@@ -1397,6 +1451,26 @@ fn prop_escrow_balance_equals_sum_of_locked_records() {
                             prop_assert!(client.release_to_pool(invoice_id, &amount));
                             expected_locks[invoice] = None;
                             prop_assert_eq!(client.get_locked(invoice_id), 0);
+                        } else if issuer_released[invoice] {
+                            // Issue #819 flow: the principal left escrow at
+                            // `release_to_issuer`; the buyer's repayment lands
+                            // in escrow before `release_to_pool` consumes the
+                            // marker. Credit one unit to mirror that deposit so
+                            // the balance invariant below keeps holding.
+                            let escrow_balance_key = BalanceKey(client.address.clone());
+                            env.as_contract(&usdc_id, || {
+                                let bal: i128 = env
+                                    .storage()
+                                    .persistent()
+                                    .get(&escrow_balance_key)
+                                    .unwrap_or(0);
+                                env.storage()
+                                    .persistent()
+                                    .set(&escrow_balance_key, &(bal + 1));
+                            });
+                            prop_assert!(client.release_to_pool(invoice_id, &1));
+                            issuer_released[invoice] = false;
+                            prop_assert_eq!(client.get_locked(invoice_id), 0);
                         } else {
                             let balance_before = get_balance(&env, &usdc_id, &client.address);
                             let history_before = client.get_history(invoice_id).len();
@@ -1415,6 +1489,7 @@ fn prop_escrow_balance_equals_sum_of_locked_records() {
                         if expected_locks[invoice].is_some() {
                             prop_assert!(client.release_to_issuer(invoice_id, &issuer));
                             expected_locks[invoice] = None;
+                            issuer_released[invoice] = true;
                             prop_assert_eq!(client.get_locked(invoice_id), 0);
                         } else {
                             let balance_before = get_balance(&env, &usdc_id, &client.address);
