@@ -50,6 +50,7 @@ impl PoolFactoryContract {
     /// client.initialize(&admin);
     /// ```
     pub fn initialize(env: Env, admin: Address) {
+        Self::extend_instance_ttl(&env);
         if env.storage().instance().has(&DataKey::Admin) {
             panic_with_error!(&env, PoolFactoryError::AlreadyInitialized);
         }
@@ -131,6 +132,7 @@ impl PoolFactoryContract {
         invoice_contract: Address,
         escrow_contract: Address,
     ) -> Address {
+        Self::extend_instance_ttl(&env);
         let admin = Self::admin(&env);
         admin.require_auth();
         Self::assert_unregistered(&env, &asset);
@@ -187,6 +189,7 @@ impl PoolFactoryContract {
     /// client.register_existing_pool(&usdc, &existing_pool);
     /// ```
     pub fn register_existing_pool(env: Env, asset: Address, pool_address: Address) {
+        Self::extend_instance_ttl(&env);
         let admin = Self::admin(&env);
         admin.require_auth();
         Self::assert_unregistered(&env, &asset);
@@ -212,6 +215,12 @@ impl PoolFactoryContract {
     /// both registration paths, since `register_asset` and
     /// `register_existing_pool` write the same key.
     ///
+    /// # TTL
+    /// Reads the `PoolForAsset` entry from persistent storage and refreshes
+    /// its TTL on hit. Values written by a pre-#866 build (instance storage)
+    /// remain resolvable: the first read migrates them lazily to persistent.
+    /// See `docs/STORAGE.md`, Contract: pool_factory.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `asset` - The asset to look up.
@@ -231,7 +240,7 @@ impl PoolFactoryContract {
     /// let pool = client.get_pool_for_asset(&usdc);
     /// ```
     pub fn get_pool_for_asset(env: Env, asset: Address) -> Option<Address> {
-        env.storage().instance().get(&DataKey::PoolForAsset(asset))
+        Self::read_pool_for_asset(&env, &asset)
     }
 
     /// Returns aggregated statistics across all registered pool instances.
@@ -273,6 +282,10 @@ impl PoolFactoryContract {
 
     /// Lists all registered assets.
     ///
+    /// Reads the `AssetIndex` entries from persistent storage and refreshes
+    /// each touched entry's TTL; pre-#866 instance-storage copies are
+    /// lazily migrated the same way (see `docs/STORAGE.md`).
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     ///
@@ -298,7 +311,7 @@ impl PoolFactoryContract {
 
         let mut assets = Vec::new(&env);
         for i in 0..count {
-            if let Some(asset) = env.storage().instance().get(&DataKey::AssetIndex(i)) {
+            if let Some(asset) = Self::read_asset_index(&env, i) {
                 assets.push_back(asset);
             }
         }
@@ -313,24 +326,92 @@ impl PoolFactoryContract {
             .unwrap_or_else(|| panic_with_error!(env, PoolFactoryError::NotInitialized))
     }
 
+    /// Bumps the factory instance's TTL so a live factory's `Admin` and
+    /// `AssetCount` never lapse. Mirrors `pool::extend_instance_ttl`
+    /// (contracts/pool/src/lib.rs); constants come from `trusttrove-ttl`
+    /// via [`TTL_THRESHOLD`]/[`TTL_EXTEND_TO`].
+    fn extend_instance_ttl(env: &Env) {
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Reads `asset`'s pool from persistent storage, refreshing the entry's
+    /// TTL on hit (the documented read path from #866).
+    ///
+    /// Issue #866 moved `PoolForAsset` from instance to persistent storage.
+    /// State written by a pre-#866 build still lives under the instance map,
+    /// so a value missing from persistent falls back to the legacy instance
+    /// location and is written through to persistent on first hit (lazy
+    /// migration), its TTL extended, and the legacy instance copy removed so
+    /// it stops inflating the instance ledger entry. This keeps every pool a
+    /// deployed factory has ever registered resolvable after the upgrade.
+    fn read_pool_for_asset(env: &Env, asset: &Address) -> Option<Address> {
+        let key = DataKey::PoolForAsset(asset.clone());
+        if let Some(pool) = env.storage().persistent().get::<DataKey, Address>(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            return Some(pool);
+        }
+        let legacy: Option<Address> = env.storage().instance().get(&key);
+        if let Some(pool) = legacy {
+            env.storage().persistent().set(&key, &pool);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            env.storage().instance().remove(&key);
+            return Some(pool);
+        }
+        None
+    }
+
+    /// Reads the indexed asset at position `i` from persistent storage,
+    /// refreshing the entry's TTL on hit. Lazy-migrates a pre-#866 instance
+    /// copy exactly like [`Self::read_pool_for_asset`].
+    fn read_asset_index(env: &Env, i: u32) -> Option<Address> {
+        let key = DataKey::AssetIndex(i);
+        if let Some(asset) = env.storage().persistent().get::<DataKey, Address>(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            return Some(asset);
+        }
+        let legacy: Option<Address> = env.storage().instance().get(&key);
+        if let Some(asset) = legacy {
+            env.storage().persistent().set(&key, &asset);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            env.storage().instance().remove(&key);
+            return Some(asset);
+        }
+        None
+    }
+
     /// Panics if `asset` already has a pool registered.
     ///
     /// Guards both registration paths so neither can silently repoint an
     /// asset at a different pool and orphan the instance (and any LP position)
-    /// behind the previous mapping.
+    /// behind the previous mapping. Checks the persistent location first and
+    /// the pre-#866 instance location second (without migrating), so a legacy
+    /// registration is never double-registered over.
     fn assert_unregistered(env: &Env, asset: &Address) {
-        if env
-            .storage()
-            .instance()
-            .has(&DataKey::PoolForAsset(asset.clone()))
-        {
+        let key = DataKey::PoolForAsset(asset.clone());
+        if env.storage().persistent().has(&key) || env.storage().instance().has(&key) {
             panic_with_error!(env, PoolFactoryError::AssetAlreadyRegistered);
         }
     }
 
     /// Records `pool_address` as `asset`'s pool and appends `asset` to the
     /// enumeration index used by `list_assets`.
+    ///
+    /// Since #866 the per-asset registry entries (`AssetIndex`/`PoolForAsset`)
+    /// live in persistent storage and carry their own TTL, so registering an
+    /// asset no longer grows the single instance ledger entry; only the
+    /// constant-size `AssetCount` counter stays in instance storage.
     fn record_pool(env: &Env, asset: &Address, pool_address: &Address) {
+        Self::extend_instance_ttl(env);
         let count: u32 = env
             .storage()
             .instance()
@@ -339,12 +420,16 @@ impl PoolFactoryContract {
         env.storage()
             .instance()
             .set(&DataKey::AssetCount, &(count + 1));
+        let index_key = DataKey::AssetIndex(count);
+        env.storage().persistent().set(&index_key, asset);
         env.storage()
-            .instance()
-            .set(&DataKey::AssetIndex(count), asset);
+            .persistent()
+            .extend_ttl(&index_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        let pool_key = DataKey::PoolForAsset(asset.clone());
+        env.storage().persistent().set(&pool_key, pool_address);
         env.storage()
-            .instance()
-            .set(&DataKey::PoolForAsset(asset.clone()), pool_address);
+            .persistent()
+            .extend_ttl(&pool_key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
     /// Derives the per-asset deploy salt.

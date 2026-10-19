@@ -376,14 +376,43 @@ In practice most pools will have:
 |---------|------|-------------|------------|
 | `Admin` | `Address` | Contract admin | `initialize()` |
 | `AssetCount` | `u32` | Number of registered assets | `register_asset()` / `register_existing_pool()` |
+
+### Persistent Storage
+
+| DataKey | Type | Description | Set During |
+|---------|------|-------------|------------|
 | `AssetIndex(u32)` | `Address` | Ordered index of registered assets | `register_asset()` / `register_existing_pool()` |
 | `PoolForAsset(Address)` | `Address` | The pool contract deployed/tracked for an asset | `register_asset()` / `register_existing_pool()` |
 
+Since #866 the two per-asset registry keys above live in **persistent** storage
+(each entry gets its own TTL, extended on write to `TTL_THRESHOLD` /
+`TTL_EXTEND_TO` from `contracts/ttl`), while the constant-size `Admin` and
+`AssetCount` stay in instance storage. Every state-changing entry point
+(`initialize`, `register_asset`, `register_existing_pool`, and the internal
+`record_pool`) calls `extend_instance_ttl`, so the instance entry never
+expires while the factory is in use. Read paths refresh the registry entries'
+TTLs: `get_pool_for_asset` extends the `PoolForAsset` entry it hits, and
+`list_assets` extends each `AssetIndex` entry it walks (`get_aggregate_stats`
+benefits from both).
+
+**Migration (lazy, #866).** Before #866 these same keys were written under the
+*instance* map. Reads therefore check persistent first and fall back to the
+legacy instance location: on a fallback hit the value is written through to
+persistent storage, its TTL extended, and the instance copy removed. No bulk
+migration entry point is provided; pre-existing registrations are migrated
+automatically on first read (a full sweep is implicit for every asset once
+`list_assets`/`get_aggregate_stats` has run over them). Until an entry has been
+migrated, it still counts for the duplicate-registration guard
+(`assert_unregistered` checks both stores), so a legacy mapping can never be
+silently overwritten by a second registration of the same asset.
+
 ### Storage Key Count
 
-**Approximately 2 + (2 × number_of_assets).**
+**Instance: exactly 2 keys, constant.** **Persistent: 2 × number_of_assets.**
 
-Each registered asset requires two keys: one for its position in the list (`AssetIndex`) and one mapping its address to a pool (`PoolForAsset`).
+Registering an asset no longer grows the instance ledger entry: each asset
+adds one `AssetIndex` and one `PoolForAsset` entry to persistent storage
+instead.
 
 
 ## Gas / Budget Estimates
