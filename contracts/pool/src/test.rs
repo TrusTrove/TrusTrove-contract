@@ -3526,6 +3526,107 @@ fn test_get_lp_position_extends_ttl_for_yield_earned_entry() {
     );
 }
 
+//  ISSUE #865: DEPOSIT / WITHDRAW INSTANCE TTL EXTENSION (regression of #281)
+// `deposit` and `withdraw` refresh the LP persistent entries they write but
+// never bump the contract instance itself, so a pool whose LP activity is
+// only deposits/withdrawals lets the instance (admin, contract wiring, all
+// totals) lapse toward expiry. Drive the instance TTL below the write-path
+// threshold — keeping the mock token's own entries alive across the jump —
+// and confirm each entrypoint bumps the instance back near EXTEND_TO.
+
+/// Extend the mock token's instance and the LP/pool balance keys to the same
+/// headroom the pool instance carries after `setup()`, so the ledger jump
+/// below ages the pool instance below `TTL_THRESHOLD` without expiring the
+/// token contract the transfers cross into.
+fn keep_mock_token_alive_across_jump(te: &TestEnv) {
+    let usdc = te.usdc_id.clone();
+    let lp = te.lp.clone();
+    let pool_id = te.pool_id.clone();
+    te.env.as_contract(&usdc, || {
+        te.env
+            .storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+        for key in [TKey(lp.clone()), TKey(pool_id.clone())] {
+            if te.env.storage().persistent().has(&key) {
+                te.env
+                    .storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            }
+        }
+    });
+}
+
+#[test]
+fn test_deposit_extends_instance_ttl_after_ledger_drain() {
+    let te = setup();
+    keep_mock_token_alive_across_jump(&te);
+
+    // Everything extended at setup time (~initialize) has ~EXTEND_TO left,
+    // so one jump drives the pool instance — and only the pool instance
+    // matters for this assertion — down to ~50 ledgers.
+    let ttl_before_drain: u32 = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_deposit: u32 = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_deposit < TTL_THRESHOLD,
+        "instance ttl should be below threshold before deposit, got {ttl_before_deposit}"
+    );
+
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let ttl_after_deposit: u32 = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_deposit >= 1_999_000,
+        "deposit should extend instance ttl close to EXTEND_TO, got {ttl_after_deposit}"
+    );
+}
+
+#[test]
+fn test_withdraw_extends_instance_ttl_after_ledger_drain() {
+    let te = setup();
+    // Establish an LP position (and the pool's token balance) before aging.
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    keep_mock_token_alive_across_jump(&te);
+
+    let ttl_before_drain: u32 = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_withdraw: u32 = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_withdraw < TTL_THRESHOLD,
+        "instance ttl should be below threshold before withdraw, got {ttl_before_withdraw}"
+    );
+
+    // Partial withdrawal: 4B of the 10B shares, price 1:1 so no yield path.
+    let returned = te.pool.withdraw(&te.lp, &4_000_000_000);
+    assert_eq!(returned, 4_000_000_000);
+
+    let ttl_after_withdraw: u32 = te
+        .env
+        .as_contract(&te.pool_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_withdraw >= 1_999_000,
+        "withdraw should extend instance ttl close to EXTEND_TO, got {ttl_after_withdraw}"
+    );
+}
+
 //  ISSUE #273: INITIALIZATION & AUTH REGRESSION COVERAGE
 #[test]
 #[should_panic(expected = "Error(Contract, #1)")]

@@ -651,6 +651,12 @@ impl PoolContract {
             .extend_ttl(&lp_init_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
+        // #865: deposit is the most frequent LP write path; like every other
+        // state-changing entrypoint it must refresh the instance TTL (the
+        // regression of #281 was introduced when the bump was lost in the
+        // _mint/_burn refactor), so a pool with only LP activity never
+        // expires its instance entry.
+        Self::extend_instance_ttl(&env);
         shares_to_issue
     }
 
@@ -824,6 +830,10 @@ impl PoolContract {
             .extend_ttl(&yield_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         events::lp_withdrawn(&env, &lp, usdc_to_return, shares);
+        // #865: mirror of the deposit fix — the withdrawal success path must
+        // bump the instance TTL too, otherwise the LP-facing entrypoints
+        // alone cannot keep an active pool's instance alive.
+        Self::extend_instance_ttl(&env);
         usdc_to_return
     }
 
