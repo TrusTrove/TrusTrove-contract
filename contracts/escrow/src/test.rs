@@ -14,7 +14,7 @@ use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
-    Address, BytesN, Env, Symbol, TryFromVal, Vec,
+    Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Vec,
 };
 
 use crate::{
@@ -52,6 +52,33 @@ pub struct MockCaller;
 #[contractimpl]
 impl MockCaller {
     pub fn noop(_env: Env) {}
+}
+
+/// Pool stand-in exposing the `get_invoice_contract` view that escrow's
+/// `release_to_pool` reads to resolve the invoice contract it must authorize
+/// (issue #820). Lives in its own module because `#[contractimpl]` emits
+/// helper symbols at module scope.
+mod poolmock {
+    use soroban_sdk::{contract, contractimpl, Address, Env, Symbol};
+
+    #[contract]
+    pub struct MockPool;
+
+    #[contractimpl]
+    impl MockPool {
+        pub fn set_invoice_contract(env: Env, invoice: Address) {
+            env.storage()
+                .persistent()
+                .set(&Symbol::new(&env, "invoice"), &invoice);
+        }
+
+        pub fn get_invoice_contract(env: Env) -> Address {
+            env.storage()
+                .persistent()
+                .get(&Symbol::new(&env, "invoice"))
+                .unwrap()
+        }
+    }
 }
 
 #[contracttype]
@@ -117,7 +144,13 @@ fn setup() -> (
     env.mock_all_auths();
 
     let admin = env.register_contract(None, MockCaller);
-    let pool = env.register_contract(None, MockCaller);
+    // Issue #820: `release_to_pool` resolves the invoice contract it must
+    // authorize from the pool's `get_invoice_contract` view, so the pool
+    // stand-in in `setup()` serves that read instead of being an inert
+    // `MockCaller`.
+    let pool = env.register_contract(None, poolmock::MockPool);
+    let invoice = env.register_contract(None, MockCaller);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
     let issuer = env.register_contract(None, MockCaller);
     let usdc_id = env.register_contract(None, MockToken);
     let _mock_token_client = MockTokenClient::new(&env, &usdc_id);
@@ -603,16 +636,40 @@ fn test_release_to_pool_over_repayment_succeeds() {
 }
 
 #[test]
-fn test_release_to_pool_requires_pool_auth() {
-    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+fn test_release_to_pool_requires_invoice_contract_auth() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount, &issuer);
-    client.release_to_pool(&invoice_id, &amount);
 
-    let auths = env.auths();
-    assert!(auths.iter().any(|(addr, _)| *addr == pool));
+    // Issue #820 / #628 under REAL auth verification (explicit `mock_auths`,
+    // not the recording mock): an unrelated address that fully authorizes the
+    // root `release_to_pool` call still cannot move funds — the guard demands
+    // the invoice contract configured on the pool, which this caller cannot
+    // present. On the pre-fix code the same tree was rejected only because it
+    // lacked the (impossible) pool authorization; the positive settlement is
+    // pinned end-to-end in `tests/integration/tests/repay_auth.rs`.
+    let attacker = env.register_contract(None, MockCaller);
+    let mut args = Vec::new(&env);
+    args.push_back(invoice_id.clone().into_val(&env));
+    args.push_back(amount.into_val(&env));
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &attacker,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "release_to_pool",
+            args,
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_release_to_pool(&invoice_id, &amount).is_err());
+
+    // The guard resolves exactly one principal: the pool-configured invoice
+    // contract, and it is neither the attacker nor the escrow itself.
+    let invoice = client.get_invoice_contract();
+    assert_ne!(invoice, attacker);
+    assert_ne!(invoice, client.address);
 }
 
 #[test]

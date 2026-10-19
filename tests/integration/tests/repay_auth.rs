@@ -13,8 +13,8 @@ extern crate std;
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, testutils::Address as _, testutils::Ledger as _,
-    testutils::MockAuth, testutils::MockAuthInvoke, xdr::ToXdr, Address, BytesN, Env, IntoVal,
-    Map, String, Symbol, Val, Vec,
+    testutils::MockAuth, testutils::MockAuthInvoke, xdr::ToXdr, Address, BytesN, Env, IntoVal, Map,
+    String, Symbol, Val, Vec,
 };
 
 use trusttrove_escrow::{EscrowContract, EscrowContractClient};
@@ -39,9 +39,7 @@ impl MockToken {
         env.storage()
             .persistent()
             .set(&from_key, &(from_bal - amount));
-        env.storage()
-            .persistent()
-            .set(&to_key, &(to_bal + amount));
+        env.storage().persistent().set(&to_key, &(to_bal + amount));
     }
 
     pub fn balance(env: Env, addr: Address) -> i128 {
@@ -245,13 +243,18 @@ fn test_repay_settles_under_blanket_mock_control() {
     assert_eq!(w.invoice.get(&w.invoice_id).status, InvoiceStatus::Repaid);
 }
 
-/// Issue #820, AC step 1: the identical repayment under an explicit, realistic
-/// buyer-only auth tree. Recorded result on pristine `main`
-/// (`aa7acc257961aad10e8621040225ebcdc17c6981`): FAILS —
-/// `escrow.release_to_pool` starts with `require_pool_auth`, and no real
-/// transaction can carry an authorization rooted at the pool contract address.
+/// Issue #820, AC step 1 — recorded reproduction result: on pristine `main`
+/// (`aa7acc257961aad10e8621040225ebcdc17c6981`) this exact call failed under
+/// the same explicit buyer-only tree with
+/// `Err(Ok(Error(Context, InvalidAction)))`, because `release_to_pool` started
+/// with `require_pool_auth` and no real transaction can carry an
+/// authorization rooted at the pool contract address.
+///
+/// With the #628 principal restored (escrow now authorizes the invoice
+/// contract read from the pool's own configuration), the identical realistic
+/// tree settles the invoice.
 #[test]
-fn test_repay_requires_impossible_pool_auth_on_main() {
+fn test_repay_settles_with_explicit_buyer_only_auth() {
     let w = setup_repay_wiring();
     w.env.ledger().set_timestamp(w.due_date);
 
@@ -289,16 +292,98 @@ fn test_repay_requires_impossible_pool_auth_on_main() {
 
     let res = w.invoice.try_repay(&w.invoice_id);
     std::println!(
-        "#820 repro: invoice.repay under explicit buyer-only auth => {:?}",
+        "#820 fixed: invoice.repay under explicit buyer-only auth => {:?}",
+        res
+    );
+    assert!(res.is_ok(), "repay must settle with only buyer auths");
+    assert_eq!(w.invoice.get(&w.invoice_id).status, InvoiceStatus::Repaid);
+
+    // Settlement actually moved: the escrow lock was consumed and the face
+    // value landed at the pool (pool held 12e9 − 9.8e9 funded = 2.2e9 before).
+    assert_eq!(w.escrow.get_locked(&w.invoice_id), 0);
+    let token = MockTokenClient::new(&w.env, &w.usdc_id);
+    assert_eq!(token.balance(&w.pool_id), 12_200_000_000i128);
+}
+
+/// Same invariant for `repay_partial` when the partial payment happens to
+/// settle the invoice in full (the branch that routes through
+/// `escrow.release_to_pool`).
+#[test]
+fn test_repay_partial_settles_with_explicit_buyer_only_auth() {
+    let w = setup_repay_wiring();
+    w.env.ledger().set_timestamp(w.due_date);
+
+    let release_to_pool_sub = MockAuthInvoke {
+        contract: &w.escrow_id,
+        fn_name: "release_to_pool",
+        args: (w.invoice_id.clone(), FACE_VALUE).into_val(&w.env),
+        sub_invokes: &[],
+    };
+    let receive_repayment_sub = MockAuthInvoke {
+        contract: &w.pool_id,
+        fn_name: "receive_repayment_with_refund",
+        args: (w.invoice_id.clone(), FACE_VALUE, 0u128, w.buyer.clone()).into_val(&w.env),
+        sub_invokes: &[],
+    };
+    let sub_invokes = [release_to_pool_sub, receive_repayment_sub];
+    let repay_invoke = MockAuthInvoke {
+        contract: &w.invoice_addr,
+        fn_name: "repay_partial",
+        args: (w.invoice_id.clone(), FACE_VALUE).into_val(&w.env),
+        sub_invokes: &sub_invokes,
+    };
+    w.env.mock_auths(&[MockAuth {
+        address: &w.buyer,
+        invoke: &repay_invoke,
+    }]);
+
+    let res = w.invoice.try_repay_partial(&w.invoice_id, &FACE_VALUE);
+    std::println!(
+        "#820 fixed: invoice.repay_partial under explicit buyer-only auth => {:?}",
         res
     );
     assert!(
-        res.is_err(),
-        "claim false: repay would succeed with only buyer auths"
+        res.is_ok(),
+        "repay_partial must settle with only buyer auths"
     );
+    assert_eq!(w.invoice.get(&w.invoice_id).status, InvoiceStatus::Repaid);
+}
 
-    // Settlement must not have happened: invoice still Funded/Active/Confirmed,
-    // pool still owes the repayment, escrow lock still present.
-    let invoice = w.invoice.get(&w.invoice_id);
-    assert_ne!(invoice.status, InvoiceStatus::Repaid);
+/// Negative control for the tests above: with the auth set emptied, the
+/// buyer's own `require_auth` inside `repay_partial` rejects the call — the
+/// positive tests are not passing "for free".
+#[test]
+fn test_repay_without_buyer_auth_is_rejected() {
+    let w = setup_repay_wiring();
+    w.env.ledger().set_timestamp(w.due_date);
+    w.env.set_auths(&[]);
+
+    let res = w.invoice.try_repay(&w.invoice_id);
+    assert!(res.is_err(), "repay must require the buyer's auth");
+    assert_ne!(w.invoice.get(&w.invoice_id).status, InvoiceStatus::Repaid);
+}
+
+/// Issue #820, AC: an unrelated caller cannot call `release_to_pool` — the
+/// invoice contract's authorization is not present and cannot be forged by
+/// whatever signature the caller does carry.
+#[test]
+fn test_release_to_pool_by_unrelated_caller_is_rejected() {
+    let w = setup_repay_wiring();
+    let attacker = Address::generate(&w.env);
+
+    let release_invoke = MockAuthInvoke {
+        contract: &w.escrow_id,
+        fn_name: "release_to_pool",
+        args: (w.invoice_id.clone(), FACE_VALUE).into_val(&w.env),
+        sub_invokes: &[],
+    };
+    w.env.mock_auths(&[MockAuth {
+        address: &attacker,
+        invoke: &release_invoke,
+    }]);
+
+    let res = w.escrow.try_release_to_pool(&w.invoice_id, &FACE_VALUE);
+    assert!(res.is_err(), "only the invoice contract may release");
+    // The lock is untouched — no funds moved, no desync was possible.
+    assert_eq!(w.escrow.get_locked(&w.invoice_id), 9_800_000_000);
 }

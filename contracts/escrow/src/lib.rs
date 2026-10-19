@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Vec};
+use soroban_sdk::{
+    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Symbol, Vec,
+};
 use trusttrove_pause::{require_not_paused, set_paused};
 
 mod constants;
@@ -168,6 +170,38 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized))
     }
 
+    /// Returns the invoice contract authorized to call `release_to_pool`.
+    ///
+    /// Issue #820: the principal is read from the configured pool's own
+    /// `get_invoice_contract` view, so escrow and the pool can never drift on
+    /// who may settle a buyer repayment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool contract address is unset.
+    ///
+    /// # Returns
+    /// * `Address` - The invoice contract address configured on the pool.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let invoice = client.get_invoice_contract();
+    /// ```
+    pub fn get_invoice_contract(env: Env) -> Address {
+        let pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        env.invoke_contract(
+            &pool,
+            &Symbol::new(&env, "get_invoice_contract"),
+            Vec::new(&env),
+        )
+    }
+
     /// Locks USDC in escrow against a funded invoice.
     ///
     /// # Arguments
@@ -301,7 +335,11 @@ impl EscrowContract {
     ///   originally locked amount when the buyer repays the full face value including yield).
     ///
     /// # Auth
-    /// Requires authorization from the configured pool contract.
+    /// Requires authorization from the invoice contract configured on the
+    /// pool (issue #820). A contract address only authorizes calls it makes
+    /// itself, so this is satisfied exactly when the invoice contract is the
+    /// direct caller — never by an unrelated address, and never by a
+    /// buyer-signed transaction pretending to carry the pool's authorization.
     ///
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
@@ -317,7 +355,23 @@ impl EscrowContract {
     /// ```
     pub fn release_to_pool(env: Env, invoice_id: BytesN<32>, repayment_amount: u128) -> bool {
         require_not_paused(&env);
-        let pool = Self::require_pool_auth(&env);
+        // Issue #820: this entry point is only ever invoked by the invoice
+        // contract as part of `buyer → invoice.repay → escrow.release_to_pool
+        // → pool`. The previous `require_pool_auth` guard was unsatisfiable
+        // from that flow: a contract address (the pool) implicitly authorizes
+        // only calls it makes itself, so no buyer-signed transaction can
+        // present one, and the repayment path passed in tests only under the
+        // blanket `mock_all_auths*` mocks (issue #637). The correct principal
+        // is the configured invoice contract — the resolution closed issue
+        // #628 shipped — restored here by reading the invoice address from
+        // the pool's own configuration and requiring its auth.
+        let pool: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PoolContract)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        let invoice_contract: Address = Self::get_invoice_contract(env.clone());
+        invoice_contract.require_auth();
 
         if repayment_amount == 0 || repayment_amount > i128::MAX as u128 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
