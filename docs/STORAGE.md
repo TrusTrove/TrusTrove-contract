@@ -185,15 +185,15 @@ Cancelled = 8   // issuer cancelled before listing
 
 #### Index Entries
 
-| DataKey | Type | Description |
-|---------|------|-------------|
-| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer |
-| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index |
-| `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer |
-| `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index |
-| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status |
-| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index |
-| `StatusCount(u32)` | `u64` | Count of invoices in each status |
+| DataKey | Type | Description | TTL extended |
+|---------|------|-------------|--------------|
+| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
+| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
+| `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
+| `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
+| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
+| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
+| `StatusCount(u32)` | `u64` | Count of invoices in each status | On write (`increment_status_count` / `decrement_status_count`, issue #830) |
 
 #### Indexing Notes
 

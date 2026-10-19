@@ -3170,6 +3170,12 @@ fn increment_status_count(env: &Env, status: InvoiceStatus) {
     let key = DataKey::StatusCount(status as u32);
     let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
     env.storage().persistent().set(&key, &(current + 1));
+    // Issue #830: bump the counter with the same TTL policy as every other
+    // persistent invoice entry, otherwise it archives and every later
+    // `create` / transition that touches it fails.
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 fn decrement_status_count(env: &Env, status: InvoiceStatus) {
@@ -3179,6 +3185,11 @@ fn decrement_status_count(env: &Env, status: InvoiceStatus) {
         .checked_sub(1)
         .unwrap_or_else(|| panic_with_error!(env, InvoiceError::InvalidStatusTransition));
     env.storage().persistent().set(&key, &next);
+    // Issue #830: see `increment_status_count` — the counter must stay live
+    // for `read_status_count`/`get_counts` and for later transitions.
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {

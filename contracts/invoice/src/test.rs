@@ -5248,3 +5248,70 @@ fn test_get_by_issuer_fails_when_entries_are_never_read() {
         .set_sequence_number(env.ledger().sequence() + 100_010);
     client.get_by_issuer(&issuer, &0, &20);
 }
+
+// ============== ISSUE #830: STATUSCOUNT ENTRIES ARE TTL-EXTENDED ON WRITE ==============
+//
+// `increment_status_count` / `decrement_status_count` wrote
+// `DataKey::StatusCount(status)` without ever calling `extend_ttl`, so the
+// counter archived once the ledger passed its default write TTL. Every later
+// `create` and status transition that touches the counter then fails with an
+// archival error, and `get_counts` — which reads all nine counters through
+// `read_status_count` — becomes unreliable too. The fix bumps the key with
+// the same `TTL_THRESHOLD` / `TTL_EXTEND_TO` policy as every other persistent
+// invoice entry on each write.
+
+#[test]
+fn test_status_count_ttl_extended_across_ledger_jumps() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let first = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Drain the write-time TTL of `StatusCount(Created)` to just below the
+    // extension threshold. Without the fix the counter is never re-bumped —
+    // it carried only the default write TTL and is long archived by now, so
+    // the `get_counts` below fails with the host's archival error.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let counts = client.get_counts();
+    assert_eq!(
+        counts.get(String::from_str(&env, "Created")).unwrap(),
+        1,
+        "get_counts must report the create across the ledger jump"
+    );
+
+    // A status transition still works: `cancel` decrements
+    // `StatusCount(Created)` and increments `StatusCount(Cancelled)`.
+    // Without the fix the decrement's read of the archived counter fails the
+    // whole transition; with it, both writes re-bump for another
+    // `TTL_EXTEND_TO` ledgers.
+    assert!(client.cancel(&first));
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(
+        counts.get(String::from_str(&env, "Cancelled")).unwrap(),
+        1,
+        "the transition must be reflected in the counters"
+    );
+
+    // Advance past where the counters written at create time would have
+    // archived. `get_counts` still works because the transition re-bumped
+    // both counters. (Entries that were not re-bumped — e.g. the
+    // `StatusMembership(Created, …)` marker — are expected to archive per
+    // issue #832's documented keeper/RestoreFootprint model, so nothing
+    // after this point reads them.)
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 150_000);
+    let counts = client.get_counts();
+    assert_eq!(
+        counts.get(String::from_str(&env, "Created")).unwrap(),
+        0,
+        "counters must survive a ledger jump past their write-time TTL"
+    );
+    assert_eq!(
+        counts.get(String::from_str(&env, "Cancelled")).unwrap(),
+        1,
+        "counters must stay reliable after every later transition too"
+    );
+}
