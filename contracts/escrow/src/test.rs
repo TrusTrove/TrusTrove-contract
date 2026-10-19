@@ -788,7 +788,9 @@ fn test_release_to_issuer_leaves_marker_that_release_to_pool_consumes() {
     // then exactly one release_to_pool forwards them to the pool.
     let escrow_key = BalanceKey(client.address.clone());
     env.as_contract(&usdc_id, || {
-        env.storage().persistent().set(&escrow_key, &1_500_000_000i128);
+        env.storage()
+            .persistent()
+            .set(&escrow_key, &1_500_000_000i128);
     });
     let pool_before = get_balance(&env, &usdc_id, &pool);
     assert!(client.release_to_pool(&invoice_id, &1_500_000_000));

@@ -1124,7 +1124,10 @@ fn test_repay_after_issuer_payout_leaves_no_stranded_principal() {
     assert!(lifecycle.invoice.repay(&invoice_id));
 
     let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
-    assert_eq!(lifecycle.invoice.get_status(&invoice_id), InvoiceStatus::Repaid as u32);
+    assert_eq!(
+        lifecycle.invoice.get_status(&invoice_id),
+        InvoiceStatus::Repaid as u32
+    );
     // The buyer's face-value repayment passed through escrow to the pool:
     // nothing is left behind.
     assert_eq!(
@@ -1177,7 +1180,10 @@ fn test_default_after_issuer_payout_does_not_strand_principal() {
     let after = lifecycle.pool.get_stats();
     assert_eq!(after.total_funded, 0);
     assert_eq!(after.active_invoice_count, 0);
-    assert_eq!(after.total_loss_realised, before.total_loss_realised + funded_amount);
+    assert_eq!(
+        after.total_loss_realised,
+        before.total_loss_realised + funded_amount
+    );
     // LP capital actually left the pool at funding time: deposits shrink by
     // the unrecoverable principal.
     assert_eq!(after.total_deposits, before.total_deposits - funded_amount);

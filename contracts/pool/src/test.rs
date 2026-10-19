@@ -2409,10 +2409,7 @@ fn test_handle_default() {
     // funded amount to keep deposit accounting matched to the pool's token
     // balance (LPs absorb the loss through a lower share price); shares are
     // not burned.
-    assert_eq!(
-        after.total_deposits,
-        before.total_deposits - funded_amount
-    );
+    assert_eq!(after.total_deposits, before.total_deposits - funded_amount);
     assert_eq!(after.total_funded, 0);
     assert_eq!(after.active_invoice_count, 0);
     assert_eq!(after.total_shares, before.total_shares);
@@ -2420,7 +2417,10 @@ fn test_handle_default() {
         after.total_loss_realised,
         before.total_loss_realised + funded_amount
     );
-    assert_eq!(position_after.usdc_value, position_before.usdc_value - funded_amount);
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value - funded_amount
+    );
 
     let events = te.env.events().all();
     let (contract, topics, data) = events.get(events.len() - 1).unwrap();

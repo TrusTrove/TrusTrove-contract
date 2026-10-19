@@ -1705,8 +1705,7 @@ impl PoolContract {
                 .deposits
                 .checked_sub(funded_amount)
                 .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-            env
-                .storage()
+            env.storage()
                 .instance()
                 .set(&DataKey::TotalDeposits, &new_total_deposits);
         }
