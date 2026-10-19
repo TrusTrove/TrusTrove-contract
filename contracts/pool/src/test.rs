@@ -1594,19 +1594,75 @@ fn test_set_max_utilization_above_10000_panics() {
     te.pool.set_max_utilization(&te.admin, &10001);
 }
 
-// set_max_utilization must reject callers other than the admin (#581). The
-// admin-authorized path is already covered by
+// set_max_utilization must reject callers other than the admin (#581, #821).
+// Since #821 the mismatch is caught by the stored-admin comparison and
+// surfaces as the typed `PoolError::NotAuthorized` before auth is even
+// attempted; the admin-authorized path is covered by
 // test_updated_max_utilization_reflected_in_stats and
 // test_set_max_utilization_emits_event.
 #[test]
-#[should_panic(expected = "Error(Auth, InvalidAction)")]
+#[should_panic(expected = "Error(Contract, #27)")]
 fn test_set_max_utilization_requires_admin_authorization() {
     let te = setup();
     let non_admin = Address::generate(&te.env);
 
-    // Clear all mocked auths so the non-admin's require_auth() fails.
+    // Clear all mocked auths so the non-admin cannot authorize at all.
     te.env.set_auths(&[]);
     te.pool.set_max_utilization(&non_admin, &9000);
+}
+
+// #821: the #581 test above only covers a non-admin that never authorizes —
+// it passes even with the bug present. The actual hole was that
+// `set_max_utilization` called `require_auth()` on the caller-supplied
+// `admin` argument, so a non-admin that passes its OWN address and signs for
+// itself was accepted. `setup()` mocks auth for every address, so the call
+// below is exactly that self-authorizing attacker.
+#[test]
+#[should_panic(expected = "Error(Contract, #27)")]
+fn test_set_max_utilization_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let attacker = Address::generate(&te.env);
+    // Cap 0 bricks every `fund_invoice`; must be rejected outright.
+    te.pool.set_max_utilization(&attacker, &0);
+}
+
+// Companion assertion form: the self-authorizing non-admin reverts with the
+// typed error, the stored cap is untouched, and the stored admin still
+// succeeds (acceptance criterion 2 of #821).
+#[test]
+fn test_set_max_utilization_self_authorizing_non_admin_leaves_cap_untouched() {
+    let te = setup();
+    let attacker = Address::generate(&te.env);
+    let cap_before = te.pool.get_stats().max_utilization_bps;
+
+    let res = te.pool.try_set_max_utilization(&attacker, &0);
+    assert!(
+        res.is_err(),
+        "self-authorizing non-admin must not be able to set the cap (#821)"
+    );
+    assert_eq!(
+        te.pool.get_stats().max_utilization_bps,
+        cap_before,
+        "rejected call must leave the stored cap untouched (#821)"
+    );
+
+    // The stored admin still succeeds.
+    assert!(te.pool.set_max_utilization(&te.admin, &7500));
+    assert_eq!(te.pool.get_stats().max_utilization_bps, 7500);
+}
+
+// #821 acceptance criterion 1: with no stored admin the setter must revert
+// with the typed `NotInitialized` error instead of accepting a
+// caller-supplied address.
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_set_max_utilization_uninitialized_pool_rejects_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let pool_id = env.register_contract(None, PoolContract);
+    let pool = PoolContractClient::new(&env, &pool_id);
+    let attacker = Address::generate(&env);
+    pool.set_max_utilization(&attacker, &10000);
 }
 
 #[test]

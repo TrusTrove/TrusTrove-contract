@@ -93,7 +93,7 @@ Only the stored admin address may call this function.
 | `set_pool_contract` | Invoice | Wiring a new pool changes fund flows |
 | `set_expiry_window` | Invoice | Configuration parameter |
 | `fund_invoice` | Pool | (*currently*) Capital allocation from pool |
-| `set_max_utilization` | Pool | Risk parameter |
+| `set_max_utilization` | Pool | Risk parameter (stored admin only since #821) |
 | `transfer_ownership` | All | Changes the admin key |
 
 ### Pattern B2 — Admin-or-Verifier (`caller.require_auth()` + role check)
@@ -230,7 +230,10 @@ the current permissionless funding model.
 allow over-leveraging the pool.
 
 **Mitigation:** `set_max_utilization` validates `new_cap_bps <= 10000` and
-rejects values above 10000.
+rejects values above 10000. Since #821 it also authorizes the **stored**
+admin (reverting with `PoolError::NotAuthorized` when the caller-supplied
+`admin` argument differs), so a non-admin can no longer self-authorize and
+set the cap to 0 or 10000.
 
 ### 8. Batch Registration Overflow
 

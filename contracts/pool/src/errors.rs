@@ -36,4 +36,8 @@ pub enum PoolError {
     /// cap bounds the worst-case cost of a single batch so a caller cannot
     /// exceed the per-transaction budget by batching.
     BatchSizeExceeded = 26,
+    /// The caller is not (or did not authorize) the contract's stored admin,
+    /// or a setter's caller-supplied `admin` argument does not match the
+    /// stored admin (`set_max_utilization`, issue #821).
+    NotAuthorized = 27,
 }
