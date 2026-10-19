@@ -1558,7 +1558,8 @@ fn test_get_by_status_filters_correctly() {
 
 /// Reads the raw `DataKey::StatusMembership` marker straight from contract
 /// storage, so these tests assert on the key itself and not only on the
-/// public query helper.
+/// public query helper. The marker's value is the invoice's row position in
+/// the status index (issue #831); membership means the key is present.
 fn raw_status_membership(
     env: &Env,
     client: &InvoiceContractClient,
@@ -1567,10 +1568,7 @@ fn raw_status_membership(
 ) -> bool {
     let key = crate::status_membership_key(status, invoice_id);
     env.as_contract(&client.address, || {
-        env.storage()
-            .persistent()
-            .get::<_, bool>(&key)
-            .unwrap_or(false)
+        env.storage().persistent().get::<_, u32>(&key).is_some()
     })
 }
 
@@ -5313,5 +5311,209 @@ fn test_status_count_ttl_extended_across_ledger_jumps() {
         counts.get(String::from_str(&env, "Cancelled")).unwrap(),
         1,
         "counters must stay reliable after every later transition too"
+    );
+}
+
+// ============== ISSUE #831: INDEX HELPERS STAY O(1) AS INDEXES GROW ==============
+//
+// `extend_issuer_index`, `extend_buyer_index` and the `StatusIndexEntry`
+// walk behind `move_status_index` used to scan their whole index on every
+// call just to detect duplicates/membership, so `create` and every status
+// transition cost O(total invoices). Eventually one call exceeds the
+// transaction budget and the protocol stops accepting new invoices for
+// everyone. The helpers now use O(1) membership markers (`DataKey::IssuerMembership`,
+// `DataKey::BuyerMembership`, and a stored position in
+// `DataKey::StatusMembership`), and the budget assertions below pin that
+// cost to a small constant factor of the first call with 300 invoices in
+// the indexes.
+
+/// CPU budget factor allowed between the shallowest and deepest helper call
+/// at one and the same environment size. "Small constant factor" per issue
+/// #831's acceptance criteria, measured as a scan-depth pair so the host's
+/// own bookkeeping (which inflates every full call with the number of stored
+/// keys, ~23x at N=300 even with O(1) helpers) cancels out between the two
+/// measurements. Before the fix the deep/shallow ratio is >100x.
+const MAX_GROWTH_FACTOR: u64 = 16;
+
+#[test]
+fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
+    const N: usize = 300;
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.budget().reset_unlimited();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut ids = Vec::new(&env);
+    // Measured "first create": empty indexes (this is also the literal AC2
+    // baseline pair; see the end of the test for why its factor is bounded
+    // by the test host rather than the contract).
+    env.budget().reset_unlimited();
+    ids.push_back(client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
+    let cpu_first_create = env.budget().cpu_instruction_cost();
+    for _ in 1..N {
+        ids.push_back(client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
+    }
+
+    // Both measurements in each pair run back-to-back in the same grown
+    // environment with the same stored-key count; only the number of rows
+    // the pre-fix linear scans had to walk differs.
+
+    // 1. `extend_issuer_index` duplicate detection: `ids[0]` sat at row 0
+    //    of the issuer index (pre-fix scan: 1 read), `ids[N-1]` at the last
+    //    row (pre-fix scan: N reads).
+    env.budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_issuer_index(&env, &issuer, &ids.get(0).unwrap());
+    });
+    let cpu_issuer_shallow = env.budget().cpu_instruction_cost();
+    env.budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_issuer_index(&env, &issuer, &ids.get(N as u32 - 1).unwrap());
+    });
+    let cpu_issuer_deep = env.budget().cpu_instruction_cost();
+
+    // 2. Same pair for `extend_buyer_index`.
+    env.budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_buyer_index(&env, &buyer, &ids.get(0).unwrap());
+    });
+    let cpu_buyer_shallow = env.budget().cpu_instruction_cost();
+    env.budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_buyer_index(&env, &buyer, &ids.get(N as u32 - 1).unwrap());
+    });
+    let cpu_buyer_deep = env.budget().cpu_instruction_cost();
+
+    // 3. `move_status_index`-driven transition: moving `ids[0]` (row 0 of
+    //    the Created index) is the shallow case; moving `ids[N-2]` (second
+    //    to last row once the shallow move swapped the tail forward) is the
+    //    deep case. These double as the "last create / last transition"
+    //    end-to-end signal: every public create and transition funnels
+    //    through exactly these three helpers.
+    env.budget().reset_unlimited();
+    assert!(client.cancel(&ids.get(0).unwrap()));
+    let cpu_move_shallow = env.budget().cpu_instruction_cost();
+    env.budget().reset_unlimited();
+    assert!(client.cancel(&ids.get(N as u32 - 2).unwrap()));
+    let cpu_move_deep = env.budget().cpu_instruction_cost();
+
+    assert!(
+        cpu_issuer_deep <= cpu_issuer_shallow * MAX_GROWTH_FACTOR,
+        "issuer index cost must not grow with scan depth: shallow {cpu_issuer_shallow}, deep {cpu_issuer_deep} ({}x)",
+        cpu_issuer_deep / cpu_issuer_shallow.max(1)
+    );
+    assert!(
+        cpu_buyer_deep <= cpu_buyer_shallow * MAX_GROWTH_FACTOR,
+        "buyer index cost must not grow with scan depth: shallow {cpu_buyer_shallow}, deep {cpu_buyer_deep} ({}x)",
+        cpu_buyer_deep / cpu_buyer_shallow.max(1)
+    );
+    assert!(
+        cpu_move_deep <= cpu_move_shallow * MAX_GROWTH_FACTOR,
+        "status transition cost must not grow with scan depth: shallow {cpu_move_shallow}, deep {cpu_move_deep} ({}x)",
+        cpu_move_deep / cpu_move_shallow.max(1)
+    );
+
+    // Index results stay consistent after the marker-driven rewrite.
+    let counts = client.get_counts();
+    assert_eq!(
+        counts.get(String::from_str(&env, "Created")).unwrap(),
+        (N - 2) as u64
+    );
+    assert_eq!(counts.get(String::from_str(&env, "Cancelled")).unwrap(), 2);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), N as u32);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), N as u32);
+    let cancelled = client.get_by_status(&InvoiceStatus::Cancelled, &0, &2);
+    assert_eq!(cancelled.len(), 2);
+    assert!(client.has_status_membership(&InvoiceStatus::Cancelled, &ids.get(0).unwrap()));
+    assert!(
+        client.has_status_membership(&InvoiceStatus::Cancelled, &ids.get(N as u32 - 2).unwrap())
+    );
+    assert!(!client.has_status_membership(&InvoiceStatus::Created, &ids.get(0).unwrap()));
+    assert!(client.has_status_membership(&InvoiceStatus::Created, &ids.get(N as u32 - 1).unwrap()));
+
+    // Literal AC2 pair: last create (all indexes hold 300 invoices) vs the
+    // first create (empty indexes) above. The 25x bound is deliberately
+    // generous: measurements on this repo's test host show per-call CPU
+    // itself grows ~23x with the *number of stored keys* at N=300 even when
+    // every helper is O(1) (probed during this fix), so the load-bearing
+    // assertion is the scan-depth gate above. Before the fix the extra
+    // full-index scans pushed this ratio to ~27x, failing the bound; with
+    // the marker rewrite it lands back at the host floor.
+    env.budget().reset_unlimited();
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let cpu_last_create = env.budget().cpu_instruction_cost();
+    assert!(
+        cpu_last_create <= cpu_first_create * 25,
+        "create cost must stay at the test-host floor: first {cpu_first_create}, last {cpu_last_create} ({}x)",
+        cpu_last_create / cpu_first_create.max(1)
+    );
+}
+
+#[test]
+fn test_move_status_index_replayed_transition_is_noop() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Public transition moves Created -> Cancelled (record, counters,
+    // indexes and markers together).
+    assert!(client.cancel(&id));
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(counts.get(String::from_str(&env, "Cancelled")).unwrap(), 1);
+
+    // Replaying the same `move_status_index` transition must be a pure
+    // no-op: membership in the target status returns early, so the source
+    // counter is not decremented a second time (which would underflow-panic
+    // with InvalidStatusTransition) and the Cancelled index is not appended
+    // twice.
+    env.as_contract(&client.address, || {
+        crate::move_status_index(&env, &id, InvoiceStatus::Created, InvoiceStatus::Cancelled);
+    });
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(
+        counts.get(String::from_str(&env, "Cancelled")).unwrap(),
+        1,
+        "replayed transition must not change counters"
+    );
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Cancelled, &0, &20)
+            .len(),
+        1,
+        "replayed transition must not double-append the status index"
+    );
+    assert!(client.has_status_membership(&InvoiceStatus::Cancelled, &id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Created, &id));
+}
+
+#[test]
+fn test_extend_issuer_and_buyer_index_duplicate_append_is_noop() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let first = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Re-appending the same invoice id to either personal index is a no-op
+    // (the behaviour the old linear scan provided, now delivered by the
+    // O(1) membership marker).
+    env.as_contract(&client.address, || {
+        crate::extend_issuer_index(&env, &issuer, &first);
+        crate::extend_buyer_index(&env, &buyer, &first);
+    });
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 1);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 1);
+    assert_eq!(client.get_by_issuer(&issuer, &0, &20).len(), 1);
+    assert_eq!(client.get_by_buyer(&buyer, &0, &20).len(), 1);
+
+    // A different invoice is still appended to both.
+    let second = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 2);
+    assert_eq!(
+        client.get_by_issuer(&issuer, &0, &20).get(1).unwrap().id,
+        second
+    );
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 2);
+    assert_eq!(
+        client.get_by_buyer(&buyer, &0, &20).get(1).unwrap().id,
+        second
     );
 }
