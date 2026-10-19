@@ -3881,6 +3881,93 @@ fn test_mark_funded_fails_zero_amount() {
     client.mark_funded(&invoice_id, &pool, &usdc, &0);
 }
 
+// ============ ISSUE #863: SUPPORTED-ASSET MARKER TTL KEEP-ALIVE ============
+//
+// `add_supported_asset` wrote the persistent `SupportedAsset(Address)`
+// marker with no `extend_ttl`, while the instance-side `SupportedAssetCount`
+// was re-extended by every admin write. The marker could therefore lapse
+// (default persistence bump) long before the count entry, after which
+// `remove_supported_asset`'s `has()` guard early-returns and the count is
+// permanently out of sync with membership. These tests pin the write-time
+// extension, the bump-on-use keep-alive on `is_supported_asset` / `create`,
+// and the resulting count/membership consistency.
+
+#[test]
+fn test_add_supported_asset_extends_marker_ttl_issue_863() {
+    let (env, client, _, _, _, usdc) = setup();
+    let asset_key = crate::DataKey::SupportedAsset(usdc.clone());
+    let ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&asset_key)
+    });
+    assert!(
+        ttl >= TTL_EXTEND_TO - 100_000,
+        "add_supported_asset must extend the marker to ~TTL_EXTEND_TO, got {ttl}"
+    );
+}
+
+#[test]
+fn test_supported_asset_marker_cannot_lapse_while_in_use() {
+    let (env, client, _, _, _, usdc) = setup();
+    // Three keep-alive cycles of ~TTL_EXTEND_TO ledgers each: total elapsed
+    // (~5.7M) far exceeds the marker's lifetime. Touching the allow-list the
+    // way an active deployment does (idempotent admin re-add, membership
+    // query) must re-bump it every cycle, so membership and the count stay
+    // in lockstep instead of the #863 lapse.
+    for step in 0..3 {
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+        keep_instance_alive(&env, &client.address);
+        client.add_supported_asset(&usdc);
+        assert!(
+            client.is_supported_asset(&usdc),
+            "supported-asset marker lapsed after keep-alive cycle {step} while the allow-list is in use"
+        );
+    }
+    assert_eq!(
+        client.get_supported_asset_count(),
+        1,
+        "count must not double-count a marker that was never actually removed"
+    );
+    // Removal stays consistent with the live marker (count reaches 0).
+    client.remove_supported_asset(&usdc);
+    assert_eq!(client.get_supported_asset_count(), 0);
+    assert!(!client.is_supported_asset(&usdc));
+}
+
+#[test]
+fn test_is_supported_asset_rebumps_drained_marker() {
+    let (env, client, _, _, _, usdc) = setup();
+    let asset_key = crate::DataKey::SupportedAsset(usdc.clone());
+    // Drain the marker to just above expiry (same measured drain style as
+    // the pool LP tests) so the use-time bump is observable.
+    let marker_ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&asset_key)
+    });
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + marker_ttl - 50);
+    keep_instance_alive(&env, &client.address);
+
+    assert!(client.is_supported_asset(&usdc));
+    let after = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&asset_key)
+    });
+    assert!(
+        after >= TTL_EXTEND_TO - 100_000,
+        "is_supported_asset must re-bump the drained supported-asset marker, got {after}"
+    );
+    // Membership and the instance-side count are still in lockstep after
+    // the drain-and-rebump cycle: the #863 divergence cannot occur.
+    assert_eq!(client.get_supported_asset_count(), 1);
+    //
+    // `create`'s allow-list check performs the identical `bump_persistent`
+    // on the same key (see `create_inner`); it is not re-measured across a
+    // drained marker here because creating after a ~2M-ledger drain would
+    // dispatch to the mock registry, whose test-only instance the host
+    // archives once its default TTL elapses (it carries no keep-alive of
+    // its own). T2 pins the end-to-end count consistency for the paths the
+    // admin and callers actually exercise.
+}
+
 #[test]
 fn test_remove_supported_asset() {
     let (env, client, _, _, _, usdc) = setup();

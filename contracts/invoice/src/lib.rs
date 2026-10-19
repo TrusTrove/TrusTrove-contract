@@ -536,6 +536,13 @@ impl InvoiceContract {
 
         let key = DataKey::SupportedAsset(asset.clone());
         if env.storage().persistent().has(&key) {
+            // Issue #863: re-adding an already-supported asset re-bumps the
+            // marker's liveness, so the admin's repeated write keeps the
+            // entry (and thus the `SupportedAssetCount` it backs) alive.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::extend_instance_ttl(&env);
             return;
         }
 
@@ -548,6 +555,15 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::SupportedAssetCount, &(count + 1));
         env.storage().persistent().set(&key, &true);
+        // Issue #863: without this the marker was left at the default
+        // persistence bump, could lapse while `SupportedAssetCount` (an
+        // instance entry re-extended by `extend_instance_ttl`) stayed high,
+        // and `remove_supported_asset`'s `has()` guard then early-returned
+        // forever — leaving the count permanently stale. Mirror the
+        // write-time extension used by the #830/#832 paths.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
         events::supported_asset_added(&env, &asset);
     }
@@ -622,9 +638,15 @@ impl InvoiceContract {
     /// let supported = client.is_supported_asset(&usdc);
     /// ```
     pub fn is_supported_asset(env: Env, asset: Address) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::SupportedAsset(asset))
+        let key = DataKey::SupportedAsset(asset);
+        let supported = env.storage().persistent().has(&key);
+        if supported {
+            // Issue #863 keep-alive: querying membership re-bumps the
+            // marker, matching the read-path bump introduced for the
+            // index keys in #832.
+            bump_persistent(&env, &key);
+        }
+        supported
     }
 
     /// Returns the number of assets currently on the funding allow-list.
@@ -730,13 +752,15 @@ impl InvoiceContract {
         require_verified(env, &registry_id, &issuer, InvoiceError::IssuerNotVerified);
         require_verified(env, &registry_id, &buyer, InvoiceError::BuyerNotVerified);
 
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::SupportedAsset(funding_asset.clone()))
-        {
+        let asset_key = DataKey::SupportedAsset(funding_asset.clone());
+        if !env.storage().persistent().has(&asset_key) {
             panic_with_error!(env, InvoiceError::UnsupportedAsset);
         }
+        // Issue #863 keep-alive (bump-on-use): every invoice actually
+        // created against an asset re-extends that asset's allow-list
+        // marker, so a marker cannot lapse underneath a still-in-use asset
+        // and strand `SupportedAssetCount` out of sync with membership.
+        bump_persistent(env, &asset_key);
 
         if face_value == 0 {
             panic_with_error!(env, InvoiceError::InvalidFaceValue);
