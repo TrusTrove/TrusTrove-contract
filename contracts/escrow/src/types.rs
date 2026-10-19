@@ -85,6 +85,12 @@ pub enum DataKey {
     /// Active escrow lock for a given invoice. The inner `BytesN<32>` is the
     /// invoice ID. Value type: [`EscrowRecord`].
     Locked(BytesN<32>),
+    /// Event history for a given invoice. The inner `BytesN<32>` is the
+    /// invoice ID. Value type: `Vec<EscrowEvent>`.
+    History(BytesN<32>),
+    /// Seconds after `locked_at` before `release_after_timeout` may return a
+    /// still-locked record to the pool. Instance key; value type: `u64`.
+    TimeoutWindow,
     /// Evidence that the locked principal for a given invoice was released to
     /// the issuer at funding time (issue #819). The inner `BytesN<32>` is the
     /// invoice ID. Value type: `u128` (the amount released to the issuer).
@@ -96,11 +102,12 @@ pub enum DataKey {
     /// `PoolContract::handle_default` to tell "principal already paid to the
     /// issuer at funding" (normal) apart from an out-of-band lock removal
     /// (#21 guard).
+    ///
+    /// **Storage-key layout:** this enum is unnumbered, so each variant's
+    /// discriminant is its positional index and that index *is* the on-chain
+    /// storage-key encoding. New variants must therefore be **appended at the
+    /// end** (this one takes index 6) — inserting one mid-enum would silently
+    /// renumber every later variant and orphan the keys already written by
+    /// deployed ledgers.
     IssuerReleased(BytesN<32>),
-    /// Event history for a given invoice. The inner `BytesN<32>` is the
-    /// invoice ID. Value type: `Vec<EscrowEvent>`.
-    History(BytesN<32>),
-    /// Seconds after `locked_at` before `release_after_timeout` may return a
-    /// still-locked record to the pool. Instance key; value type: `u64`.
-    TimeoutWindow,
 }
