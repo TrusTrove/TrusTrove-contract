@@ -7251,3 +7251,321 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
         "batched read should reduce fund_invoice memory vs the four-call baseline: {mem}"
     );
 }
+
+//  ISSUE #845: SOLVENCY PROPTEST — POOL TOKEN BALANCE ALWAYS COVERS AVAILABLE LIQUIDITY
+// Sibling of the #844 property above: #844 checks the pool's internal counters against
+// each other across funding-op sequences; this one checks that the counters are actually
+// backed by the funding-asset balance:
+//
+//     usdc.balance(pool) >= total_deposits - total_funded
+//
+// after EVERY step of a random operation sequence. `withdraw` pays LPs out of the token
+// balance using only the counters (`preview_withdraw_amount` bounds redemptions by
+// `total_deposits - total_funded`), so any counter/balance drift either fails
+// withdrawals (counters exceed the balance) or, worse, pays an LP out of another LP's
+// money (balance exceeds the counters, stranding the difference).
+//
+// The generated sequence covers the five operations from the issue, driven through the
+// real contracts the way production drives them:
+//   * `pool.deposit` / `pool.withdraw` directly (LP surface);
+//   * `pool.fund_invoice` directly (`escrow.lock` pulls the funded principal out of the
+//     pool's balance);
+//   * full repayment via `invoice.repay` and early repayment via `invoice.repay_early`,
+//     both of which settle through `pool.receive_repayment_with_refund` called BY the
+//     real invoice contract, so the buyer refund and the protocol-fee transfer to the
+//     treasury are real balance movements, not bookkeeping;
+//   * default via `invoice.trigger_default` -> `pool.handle_default` ->
+//     `escrow.handle_default` (locked principal returns to the pool balance).
+// Each sequence runs with a random `protocol_fee_bps <= MAX_PROTOCOL_FEE_BPS`.
+//
+// The acceptance criteria also require the treasury's balance change to equal the sum of
+// `protocol_cut`s. Instead of re-deriving the contract's fee math (which would only
+// prove the test agrees with itself), the cut is read from every `repayment_received`
+// event the pool emits during the sequence and summed; the treasury's final balance must
+// equal that sum exactly.
+//
+// Every step dispatches through its `try_*` entry point: rejections (insufficient
+// liquidity, utilization cap, wrong invoice status, escrow default grace) are legal
+// outcomes and the invariant must survive them too, so the invariant is checked after
+// every step regardless of the step's result.
+//
+// Case budget and sequence length reuse the file's existing property constants
+// (`PROP_CASES` = 10, `PROP_MAX_STEPS` = 12): every step here performs real cross-
+// contract settlement (escrow + invoice), which is several times the per-step cost of
+// the share-ledger properties in #842, so the same modest budget is the deliberate
+// choice for the CI time bound of the in-process Soroban host.
+
+/// Listed invoices prepared per sequence: enough that funding steps routinely have a
+/// target, small enough that the warm liquidity deposits cover several of them.
+const SOLVENCY_INVOICES: usize = 3;
+
+/// Opening deposit per LP. Sized so the whole invoice set can be funded (so `Fund`
+/// steps succeed and later repay/default steps have real positions to settle) while
+/// random withdrawals remain large enough to hit the liquidity guard.
+const SOLVENCY_WARM_DEPOSIT: u128 = 400_000_000_000;
+
+/// One step of a generated sequence. `lp`/`invoice` selectors are raw bytes reduced
+/// modulo the case's participant/invoice counts, so every value addresses a real one.
+#[derive(Clone, Debug)]
+enum SolvencyStep {
+    Deposit {
+        lp: u8,
+        amount: u128,
+    },
+    Withdraw {
+        lp: u8,
+        shares: u128,
+    },
+    Fund {
+        invoice: u8,
+    },
+    /// Ship + confirm the full lifecycle, advance time, `invoice.repay` — settles at
+    /// `receive_repayment_with_refund` with refund 0 once past the due date.
+    Repay {
+        invoice: u8,
+        advance: u64,
+    },
+    /// Ship + confirm, advance time, `invoice.repay_early` — the pro-rata branch of
+    /// `receive_repayment_with_refund` that moves the buyer refund out of the pool.
+    RepayEarly {
+        invoice: u8,
+        advance: u64,
+    },
+    /// `invoice.trigger_default` — routes to `pool.handle_default` ->
+    /// `escrow.handle_default`, returning the locked principal to the pool balance.
+    Default {
+        invoice: u8,
+        advance: u64,
+    },
+}
+
+/// Deposit sizes: mostly fundable, with a minority of zero/below-minimum sizes for the
+/// typed rejections (same shape as `deposit_amount_strategy` used by #842/#844).
+fn solvency_deposit_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        4 => DEFAULT_MIN_INITIAL_DEPOSIT..=PROP_MAX_AMOUNT,
+        1 => 0u128..DEFAULT_MIN_INITIAL_DEPOSIT,
+    ]
+}
+
+/// Share sizes: usually redeemable against a warm position, regularly oversized so the
+/// `InsufficientShares`/`NoShares` rejections stay reachable.
+fn solvency_shares_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        2 => 1u128..SOLVENCY_WARM_DEPOSIT,
+        1 => PROP_MAX_AMOUNT / 2..=PROP_MAX_AMOUNT,
+    ]
+}
+
+/// Ledger advance per settlement step: usually a small tick (keeps `repay_early` and
+/// the refund branch reachable while the invoice is still within its 1-day term),
+/// sometimes a jump past the term (keeps on-time `repay` and `trigger_default`, whose
+/// due-date gate plus the escrow's 60-second default grace both need real elapsed
+/// time).
+fn solvency_advance_strategy() -> impl Strategy<Value = u64> {
+    prop_oneof![
+        3 => 0u64..3_600,
+        2 => 90_000u64..302_400,
+    ]
+}
+
+fn solvency_step_strategy() -> impl Strategy<Value = SolvencyStep> {
+    prop_oneof![
+        (any::<u8>(), solvency_deposit_strategy())
+            .prop_map(|(lp, amount)| SolvencyStep::Deposit { lp, amount }),
+        (any::<u8>(), solvency_shares_strategy())
+            .prop_map(|(lp, shares)| SolvencyStep::Withdraw { lp, shares }),
+        any::<u8>().prop_map(|invoice| SolvencyStep::Fund { invoice }),
+        (any::<u8>(), solvency_advance_strategy())
+            .prop_map(|(invoice, advance)| SolvencyStep::Repay { invoice, advance }),
+        (any::<u8>(), solvency_advance_strategy())
+            .prop_map(|(invoice, advance)| SolvencyStep::RepayEarly { invoice, advance }),
+        (any::<u8>(), solvency_advance_strategy())
+            .prop_map(|(invoice, advance)| SolvencyStep::Default { invoice, advance }),
+    ]
+}
+
+/// Dispatches one generated step, always through the real counterparties: settlement
+/// and default go through the invoice contract, funding and the LP surface through the
+/// pool client. Lifecycle transitions inside `Repay`/`RepayEarly`/`Default` may
+/// legitimately fail (wrong status, already shipped); those results are ignored — the
+/// property is about the invariant, not about the step succeeding.
+fn run_solvency_step(
+    te: &TestEnv,
+    lps: &[Address; 2],
+    invoices: &[BytesN<32>; SOLVENCY_INVOICES],
+    step: &SolvencyStep,
+) -> StepOutcome {
+    let lp_at = |raw: &u8| &lps[*raw as usize % lps.len()];
+    let invoice_at = |raw: &u8| invoices[*raw as usize % invoices.len()].clone();
+    let advance_time = |delta: u64| {
+        te.env
+            .ledger()
+            .set_timestamp(te.env.ledger().timestamp() + delta);
+    };
+    match step {
+        SolvencyStep::Deposit { lp, amount } => classify(te.pool.try_deposit(lp_at(lp), amount)),
+        SolvencyStep::Withdraw { lp, shares } => classify(te.pool.try_withdraw(lp_at(lp), shares)),
+        SolvencyStep::Fund { invoice } => classify(te.pool.try_fund_invoice(&invoice_at(invoice))),
+        SolvencyStep::Repay { invoice, advance } => {
+            let id = invoice_at(invoice);
+            let _ = te.invoice.try_mark_shipped(&id);
+            let _ = te.invoice.try_confirm_delivery(&id, &te.issuer);
+            let _ = te.invoice.try_confirm_delivery(&id, &te.buyer);
+            advance_time(*advance);
+            classify(te.invoice.try_repay(&id))
+        }
+        SolvencyStep::RepayEarly { invoice, advance } => {
+            let id = invoice_at(invoice);
+            let _ = te.invoice.try_mark_shipped(&id);
+            let _ = te.invoice.try_confirm_delivery(&id, &te.issuer);
+            let _ = te.invoice.try_confirm_delivery(&id, &te.buyer);
+            advance_time(*advance);
+            classify(te.invoice.try_repay_early(&id))
+        }
+        SolvencyStep::Default { invoice, advance } => {
+            let id = invoice_at(invoice);
+            advance_time(*advance);
+            classify(te.invoice.try_trigger_default(&id))
+        }
+    }
+}
+
+/// The solvency property itself: the pool's funding-asset balance must cover the
+/// available liquidity the counters advertise, and the counters themselves must stay in
+/// the order the subtraction requires. Re-checked after every generated step, accepted
+/// or rejected.
+fn check_solvency_invariant(te: &TestEnv, usdc: &MockTokenClient) -> Result<(), TestCaseError> {
+    let stats = te.pool.get_stats();
+    prop_assert!(
+        stats.total_funded <= stats.total_deposits,
+        "total_funded {} exceeds total_deposits {}",
+        stats.total_funded,
+        stats.total_deposits
+    );
+    prop_assert_eq!(
+        stats.available_liquidity,
+        stats.total_deposits - stats.total_funded,
+        "available_liquidity must equal total_deposits - total_funded"
+    );
+    let balance = usdc.balance(&te.pool_id);
+    prop_assert!(
+        balance >= stats.available_liquidity as i128,
+        "insolvent: pool USDC balance {balance} below available liquidity {}",
+        stats.available_liquidity
+    );
+    Ok(())
+}
+
+/// Sums the `protocol_cut` field of `repayment_received` events emitted by the pool
+/// since the previous scan (`seen` advances in place), so the treasury assertion reads
+/// the fee the contract actually booked instead of a re-derivation of its math.
+fn solvency_new_protocol_cuts(te: &TestEnv, seen: &mut usize) -> u128 {
+    let events = te.env.events().all();
+    let name = Symbol::new(&te.env, "repayment_received");
+    let mut cuts = 0u128;
+    while *seen < events.len() as usize {
+        let (contract, topics, data) = events.get(*seen as u32).unwrap();
+        *seen += 1;
+        if contract != te.pool_id || topics.is_empty() {
+            continue;
+        }
+        let Ok(topic) = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()) else {
+            continue;
+        };
+        if topic != name {
+            continue;
+        }
+        if let Ok((_amount, _lp_yield, cut)) = <(u128, u128, u128)>::try_from_val(&te.env, &data) {
+            cuts += cut;
+        }
+    }
+    cuts
+}
+
+// Core property: for any random `protocol_fee_bps <= MAX_PROTOCOL_FEE_BPS` and any
+// bounded interleaving of deposit / fund_invoice / invoice-driven repayment (full and
+// early) / invoice-driven default / withdraw, the pool's real USDC balance always
+// covers `total_deposits - total_funded`, and the treasury's final balance equals the
+// sum of the protocol cuts booked on the `repayment_received` events.
+#[test]
+fn prop_pool_token_balance_always_covers_available_liquidity() {
+    // `TestRunner::run` takes an `Fn`, so the step counters use interior mutability.
+    extern crate std;
+    let accepted_steps = std::cell::Cell::new(0usize);
+    let rejected_steps = std::cell::Cell::new(0usize);
+
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(PROP_CASES));
+    runner
+        .run(
+            &(
+                // Most sequences run a live protocol fee (so the treasury transfer and
+                // the cut-vs-balance assertion bite); some run fee 0 (full yield stays
+                // with the LPs).
+                prop_oneof![1 => Just(0u32), 3 => 1u32..=MAX_PROTOCOL_FEE_BPS],
+                prop::collection::vec(solvency_step_strategy(), 1..=PROP_MAX_STEPS),
+            ),
+            |(fee_bps, steps)| {
+                let te = setup();
+                let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+
+                // One random fee configuration per sequence (the issue's
+                // `protocol_fee_bps <= MAX_PROTOCOL_FEE_BPS`), pointed at a freshly
+                // generated treasury whose balance starts at exactly zero.
+                let treasury = Address::generate(&te.env);
+                te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+                // Two LPs topped far above anything the sequence can deposit, so steps
+                // fail on pool rules rather than on the token balance.
+                let lps = [te.lp.clone(), create_lp_with_balance(&te, PROP_LP_USDC)];
+                for lp in &lps {
+                    te.pool.deposit(lp, &SOLVENCY_WARM_DEPOSIT);
+                }
+
+                let invoices = [
+                    create_and_list(&te, &te.usdc_id),
+                    create_and_list(&te, &te.usdc_id),
+                    create_and_list(&te, &te.usdc_id),
+                ];
+
+                let mut seen_events = te.env.events().all().len() as usize;
+                let mut protocol_cuts = 0u128;
+
+                check_solvency_invariant(&te, &usdc)?;
+
+                for step in steps.iter() {
+                    match run_solvency_step(&te, &lps, &invoices, step) {
+                        StepOutcome::Succeeded => {
+                            accepted_steps.set(accepted_steps.get() + 1);
+                        }
+                        StepOutcome::Rejected(_) => {
+                            rejected_steps.set(rejected_steps.get() + 1);
+                        }
+                    }
+
+                    // The invariant holds after every step, accepted or rejected.
+                    check_solvency_invariant(&te, &usdc)?;
+                    protocol_cuts += solvency_new_protocol_cuts(&te, &mut seen_events);
+                }
+
+                // Treasury conservation from the AC: every booked protocol cut actually
+                // arrived, and nothing else did.
+                prop_assert_eq!(
+                    usdc.balance(&treasury),
+                    protocol_cuts as i128,
+                    "treasury balance must equal the sum of protocol cuts booked on repayment_received events"
+                );
+                Ok(())
+            },
+        )
+        .unwrap();
+
+    // The generator must actually exercise both sides; a run where everything
+    // succeeded (or everything failed) would make the per-step checks vacuous.
+    assert!(
+        accepted_steps.get() > 0 && rejected_steps.get() > 0,
+        "expected both accepted and rejected steps, got {} accepted / {} rejected",
+        accepted_steps.get(),
+        rejected_steps.get()
+    );
+}
