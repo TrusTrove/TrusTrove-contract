@@ -1362,14 +1362,6 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::NotAuthorized);
         }
         pool_address.require_auth();
-        let configured_pool: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PoolContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        if pool_address != configured_pool {
-            panic_with_error!(&env, InvoiceError::NotAuthorized);
-        }
 
         if funded_amount == 0 {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
@@ -1389,9 +1381,6 @@ impl InvoiceContract {
         }
         if asset_address != invoice.funding_asset {
             panic_with_error!(&env, InvoiceError::UnsupportedAsset);
-        }
-        if funded_amount > invoice.face_value {
-            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
 
         invoice.status = InvoiceStatus::Funded;
