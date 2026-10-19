@@ -7289,8 +7289,13 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// the pre-payout baseline no longer bounds the corrected flow. The ceilings
 /// below are the re-measured deterministic budget of deposit + create_and_list
 /// + fund_invoice WITH the payout; the #833 batching guarantee itself is still
-/// enforced by the invoice-call-count assertions in
-/// `test_fund_invoice_uses_single_batched_read` (2 invoice calls, not 5).
+///   enforced by the invoice-call-count assertions in
+///   `test_fund_invoice_uses_single_batched_read` (2 invoice calls, not 5).
+///
+/// Re-measured on the `b4a32a0f` (#865/#867) rebase: the invoice reads
+/// `fund_invoice` batches now carry the per-entrypoint instance-TTL bumps
+/// #865 added, so the corrected flow costs cpu = 1,562,040 / mem = 318,929
+/// on this branch; the ceilings below pin that re-measurement.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -7304,11 +7309,11 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_530_000,
+        cpu < 1_570_000,
         "fund_invoice (batched read + #819 issuer payout) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 310_000,
+        mem < 330_000,
         "fund_invoice (batched read + #819 issuer payout) must stay within its re-pinned memory budget: {mem}"
     );
 }
