@@ -637,6 +637,52 @@ fn test_create_invoice_with_verified_parties() {
     assert!(!invoice.buyer_confirmed);
 }
 
+/// Golden vector for the invoice id (#834).
+///
+/// Rebuilds `create`'s SHA-256 preimage with the byte-at-a-time algorithm
+/// (one `push_back` host call per byte) and asserts the id returned by the
+/// contract is byte-for-byte identical. This protects the bulk-append
+/// rewrite of the preimage builder from silently changing invoice ids.
+#[test]
+fn test_create_invoice_id_matches_pre_refactor_preimage() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+
+    // Reference preimage, built the slow way, in the original component
+    // order: issuer_xdr || buyer_xdr || face_value_be || due_date_be ||
+    // counter_be || asset_xdr. `create` hashes the counter value read
+    // *before* the increment, so the first invoice on a fresh contract
+    // hashes 0.
+    let mut reference = soroban_sdk::Bytes::new(&env);
+    for b in issuer.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    for b in buyer.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    for b in face_value.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in due_date.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in 0u64.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in usdc.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    let expected: BytesN<32> = env.crypto().sha256(&reference).into();
+
+    assert_eq!(
+        invoice_id, expected,
+        "invoice id changed across the preimage refactor"
+    );
+}
+
 #[test]
 fn test_cancel_created_invoice() {
     let (env, client, issuer, buyer, _, usdc) = setup();
@@ -5430,18 +5476,25 @@ fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
     assert!(client.has_status_membership(&InvoiceStatus::Created, &ids.get(N as u32 - 1).unwrap()));
 
     // Literal AC2 pair: last create (all indexes hold 300 invoices) vs the
-    // first create (empty indexes) above. The 25x bound is deliberately
+    // first create (empty indexes) above. The bound is deliberately
     // generous: measurements on this repo's test host show per-call CPU
     // itself grows ~23x with the *number of stored keys* at N=300 even when
     // every helper is O(1) (probed during this fix), so the load-bearing
     // assertion is the scan-depth gate above. Before the fix the extra
     // full-index scans pushed this ratio to ~27x, failing the bound; with
     // the marker rewrite it lands back at the host floor.
+    //
+    // Recalibrated from 25x to 40x for #834: the preimage refactor cut the
+    // *first* create's own cost ~39% (907,222 -> 557,318 CPU on this host),
+    // so the same host-key-count floor now expresses as a larger ratio
+    // (~35x measured). The growth signal is unchanged — a re-introduced
+    // full-index scan would push the ratio back past this bound, and the
+    // scan-depth gate above is the load-bearing O(1) assertion regardless.
     env.budget().reset_unlimited();
     client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     let cpu_last_create = env.budget().cpu_instruction_cost();
     assert!(
-        cpu_last_create <= cpu_first_create * 25,
+        cpu_last_create <= cpu_first_create * 40,
         "create cost must stay at the test-host floor: first {cpu_first_create}, last {cpu_last_create} ({}x)",
         cpu_last_create / cpu_first_create.max(1)
     );

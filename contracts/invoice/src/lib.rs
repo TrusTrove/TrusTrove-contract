@@ -771,28 +771,19 @@ impl InvoiceContract {
         let issuer_xdr = issuer.clone().to_xdr(env);
         let buyer_xdr = buyer.clone().to_xdr(env);
 
-        // Safely append all XDR bytes without assuming a fixed length
-        for b in issuer_xdr.iter() {
-            hash_input.push_back(b);
-        }
-        for b in buyer_xdr.iter() {
-            hash_input.push_back(b);
-        }
-        for b in face_value.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        for b in due_date.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        for b in counter.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        {
-            let asset_xdr = funding_asset.clone().to_xdr(env);
-            for b in asset_xdr.iter() {
-                hash_input.push_back(b);
-            }
-        }
+        // Issue #834: build the preimage with bulk appends instead of one
+        // `push_back` host call per byte. Component order is unchanged from
+        // the previous byte-at-a-time loops:
+        // issuer_xdr || buyer_xdr || face_value_be || due_date_be ||
+        // counter_be || asset_xdr, so invoice ids are byte-for-byte stable
+        // (asserted by `test_create_invoice_id_matches_pre_refactor_preimage`).
+        hash_input.append(&issuer_xdr);
+        hash_input.append(&buyer_xdr);
+        hash_input.extend_from_array(&face_value.to_be_bytes());
+        hash_input.extend_from_array(&due_date.to_be_bytes());
+        hash_input.extend_from_array(&counter.to_be_bytes());
+        let asset_xdr = funding_asset.clone().to_xdr(env);
+        hash_input.append(&asset_xdr);
         let invoice_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
 
         let invoice = Invoice {
