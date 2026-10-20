@@ -294,18 +294,22 @@ The issuer calls `mark_shipped`. Then **both** the issuer and the buyer must ind
 No fund movement. Invoice status: Funded → Active → Confirmed.
 ```
 
-#### Step 6 — Repay (Buyer → Pool, bypassing Escrow)
-The buyer calls `invoice.repay(invoice_id)`, which transfers `face_value` USDC **directly from the buyer to the pool**, then calls `pool.receive_repayment` to account for the yield.
+#### Step 6 — Repay (Buyer → Escrow → Pool)
+The buyer calls `invoice.repay(invoice_id)` (or `repay_partial` / `repay_early`), which transfers USDC from the buyer into escrow; escrow releases it to the pool via `release_to_pool`, and the pool records the yield split.
 
 ```
-Buyer ──[face_value USDC]──► Pool
-  Pool books yield: face_value − funded_amount = gross yield
-  Protocol fee cut: protocol_cut = gross_yield × fee_bps / 10000 ──► Treasury
-  LP yield: lp_yield = gross_yield − protocol_cut
+Buyer ──[face_value USDC]──► Escrow ──[face_value USDC]──► Pool
+  earned_by_pool = discount × elapsed / term   (capped at the full discount
+                                                at/after due_date)
+  refund_to_buyer = discount − earned_by_pool ──► Buyer
+  Protocol fee cut: protocol_cut = earned_by_pool × fee_bps / 10000 ──► Treasury
+  LP yield: lp_yield = earned_by_pool − protocol_cut
   TotalDeposits += lp_yield  (share price rises for all LPs)
   TotalYieldDistributed += lp_yield
-Invoice status: Confirmed → Repaid
+Invoice status: → Repaid
 ```
+
+`repay_early` is restricted to `Confirmed` invoices strictly before `due_date`; `repay` accepts `Funded`, `Active`, or `Confirmed` at any time and also refunds the unearned discount before maturity. Partial installments accumulate in escrow and settle at the pool only when the final one clears the balance. See [Repayment Timing and Refund Math](./docs/LIMITATIONS.md#repayment-timing-and-refund-math) for the allowed statuses, formulas, and worked examples.
 
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
 
@@ -333,7 +337,7 @@ Invoice status: → Defaulted
 | LP deposit | LP wallet | Pool | `usdc_amount` | No |
 | LP withdraw | Pool | LP wallet | `shares × price` | No |
 | Fund invoice | Pool → Escrow → Issuer | Issuer | `face_value × (1 − discount)` | Yes — locks then releases in one call |
-| Repay | Buyer wallet → Escrow → Pool | Pool | `face_value` | Yes — `release_to_pool` settles |
+| Repay | Buyer wallet → Escrow → Pool | Pool | `face_value` (or the outstanding balance for partial flow) | Yes — `release_to_pool` settles |
 | Default | Pool books LP loss *(principal already with issuer)* | Pool | `funded_amount` written off | Only if escrow still holds a live lock; otherwise marker-verified write-off (#819) |
 
 ### Security Invariants
