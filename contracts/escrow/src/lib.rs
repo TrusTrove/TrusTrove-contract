@@ -260,6 +260,14 @@ impl EscrowContract {
 
     /// Releases escrowed funds to the issuer.
     ///
+    /// Wired into `PoolContract::fund_invoice` (issue #819): the pool locks
+    /// the funded principal with [`Self::lock`] and immediately releases it to
+    /// the issuer here, so the SME receives funds at funding time. Removing
+    /// the `Locked` record also writes the [`DataKey::IssuerReleased`] marker
+    /// that lets the repayment path (`release_to_pool`) and the default path
+    /// (`PoolContract::handle_default`) recognize that the principal left
+    /// escrow to the issuer rather than having been removed out of band.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice whose escrow is released.
@@ -273,6 +281,8 @@ impl EscrowContract {
     /// * `NotFound` if no escrow record exists for the invoice.
     /// * `InvalidRecipient` if issuer is escrow or pool contract address.
     /// * `InvalidRecipient` if issuer does not match the stored issuer address.
+    /// * `InvalidAmount` if the stored amount exceeds `i128::MAX` (checked
+    ///   conversion fails before any transfer or record removal).
     ///
     /// # Returns
     /// * `bool` - `true` when funds are released.
@@ -301,14 +311,13 @@ impl EscrowContract {
         }
 
         let usdc = Self::usdc_client(&env);
-        if record.amount > i128::MAX as u128 {
-            panic_with_error!(&env, EscrowError::InvalidAmount);
-        }
-        usdc.transfer(
-            &env.current_contract_address(),
-            &issuer,
-            &(record.amount as i128),
-        );
+        // #1001: checked conversion — a corrupted record whose stored amount
+        // exceeds `i128::MAX` must surface the typed `InvalidAmount` error
+        // before any transfer or record removal, instead of wrapping into an
+        // invalid token amount.
+        let amount = i128::try_from(record.amount)
+            .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
+        usdc.transfer(&env.current_contract_address(), &issuer, &amount);
 
         Self::append_history(
             &env,
@@ -318,6 +327,18 @@ impl EscrowContract {
             None,
         );
         env.storage().persistent().remove(&key);
+        // Issue #819: keep durable evidence that the principal was paid out to
+        // the issuer. `release_to_pool` consumes this marker on the repayment
+        // path; `PoolContract::handle_default` reads it (via
+        // `was_released_to_issuer`) to accept a default where escrow holds no
+        // principal.
+        let released_key = DataKey::IssuerReleased(invoice_id.clone());
+        env.storage()
+            .persistent()
+            .set(&released_key, &record.amount);
+        env.storage()
+            .persistent()
+            .extend_ttl(&released_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
         events::released_to_issuer(&env, &invoice_id, &issuer, record.amount);
         true
@@ -328,11 +349,22 @@ impl EscrowContract {
     /// Called by the invoice contract during buyer repayment flows:
     /// `buyer → invoice.repay → escrow.release_to_pool → pool`.
     ///
+    /// Since issue #819 the funding path releases the locked principal to the
+    /// issuer at funding time, so at repayment there is normally no
+    /// [`DataKey::Locked`] record left. The replay/unknown-invoice guard
+    /// therefore accepts either evidence of a prior lock for this invoice:
+    /// the live `Locked` record (principal still in escrow) or the
+    /// [`DataKey::IssuerReleased`] marker written by
+    /// [`Self::release_to_issuer`] (principal already paid out). Whichever
+    /// exists is consumed, so `release_to_pool` can succeed at most once per
+    /// funded invoice.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice whose escrow is being released.
-    /// * `repayment_amount` - The amount transferred to the pool (may exceed the
-    ///   originally locked amount when the buyer repays the full face value including yield).
+    /// * `repayment_amount` - The amount transferred to the pool (the buyer's
+    ///   repayment routed through escrow; the full `face_value` including
+    ///   yield when the invoice settles).
     ///
     /// # Auth
     /// Requires authorization from the invoice contract configured on the
@@ -343,7 +375,8 @@ impl EscrowContract {
     ///
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
-    /// * `NotFound` if no escrow record exists for the invoice.
+    /// * `NotFound` if neither a lock record nor an issuer-release marker
+    ///   exists for the invoice (unknown invoice or replayed release).
     /// * `InvalidAmount` if `repayment_amount` is zero.
     ///
     /// # Returns
@@ -378,11 +411,11 @@ impl EscrowContract {
         }
 
         let key = DataKey::Locked(invoice_id.clone());
-        let _record: EscrowRecord = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
+        let released_key = DataKey::IssuerReleased(invoice_id.clone());
+        let locked = env.storage().persistent().has(&key);
+        if !locked && !env.storage().persistent().has(&released_key) {
+            panic_with_error!(&env, EscrowError::NotFound);
+        }
 
         let usdc = Self::usdc_client(&env);
         usdc.transfer(
@@ -398,10 +431,44 @@ impl EscrowContract {
             repayment_amount,
             None,
         );
-        env.storage().persistent().remove(&key);
+        if locked {
+            env.storage().persistent().remove(&key);
+        } else {
+            env.storage().persistent().remove(&released_key);
+        }
         Self::extend_instance_ttl(&env);
         events::released_to_pool(&env, &invoice_id, &pool, repayment_amount);
         true
+    }
+
+    /// Returns whether the locked principal for an invoice was released to
+    /// the issuer and that release has not yet been consumed by
+    /// `release_to_pool` (issue #819).
+    ///
+    /// Read by `PoolContract::handle_default`: a `false` from
+    /// [`Self::handle_default`] (no lock to return) combined with a `true`
+    /// here means the funding path already paid the issuer, which is the
+    /// normal post-#819 default case; `false` here means the lock was
+    /// removed out of band and the pool must reject the default (#21).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to check.
+    ///
+    /// # Auth
+    /// None. This is a read-only view.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when an unconsumed issuer-release marker exists.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let paid = client.was_released_to_issuer(&invoice_id);
+    /// ```
+    pub fn was_released_to_issuer(env: Env, invoice_id: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::IssuerReleased(invoice_id))
     }
 
     /// Handles an escrow default by returning the locked funds to the pool.
@@ -424,18 +491,16 @@ impl EscrowContract {
     /// This grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from
     /// [`EscrowRecord::locked_at`]) is independent of, and not known to,
     /// `invoice.trigger_default`'s own due-date gate (`now >= due_date`).
-    /// `invoice.trigger_default` sets the invoice to `Defaulted` and then calls
-    /// this function transitively via `pool.handle_default`; if an invoice's
-    /// `due_date` is reached less than `DEFAULT_MIN_LOCK_SECONDS` after it was
-    /// funded (i.e. after `locked_at`), this call panics with `NotAuthorized`
-    /// and the whole transaction (including the invoice's status change)
-    /// reverts. There is currently no mechanism for `invoice` to read or
-    /// respect this window ahead of time; callers of very-short-duration
-    /// invoices should expect `trigger_default` to revert until `locked_at +
-    /// DEFAULT_MIN_LOCK_SECONDS` has elapsed. See
-    /// `contracts/invoice/src/test.rs`'s
-    /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed` for
-    /// a pinned repro of this behavior.
+    /// Since issue #819 the funding path releases the principal to the issuer
+    /// at funding time, which removes the `Locked` record — a default on a
+    /// normally funded invoice therefore finds no record here, returns
+    /// `false`, and is accounted by the pool as an unrecoverable LP capital
+    /// loss (see `PoolContract::handle_default`). The grace period only gates
+    /// locks that are still live in escrow at default time (e.g. a lock not
+    /// (yet) paired with an issuer release). The still-open coupling noted in
+    /// `contracts/pool/src/test.rs`'s
+    /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed`
+    /// predates #819; that test was rewritten with the issuer payout.
     ///
     /// # Returns
     /// * `bool` - `true` if default handling completed, `false` if no lock exists.

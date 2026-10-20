@@ -88,12 +88,75 @@ Entries skipped as already-registered are never indexed twice, so
 ```
 Profile {
     address:      Address,          // Stellar address (also the key)
-    packed_flags: u32,              // Bit 0: role (0=Issuer, 1=Buyer)
-                                    // Bit 1: verified status
-                                    // Bit 2: revoked status
+    packed_flags: u32,              // Packed bit-field: see "Profile Flags" below
     registered_at: u64,             // Unix timestamp of registration
     metadata:     Map<String, String>, // Arbitrary key-value metadata
 }
+```
+
+#### Profile Flags
+
+`packed_flags` is a `u32` bitmask that encodes three boolean values. The bit
+layout is an internal implementation detail and is NOT a stable external
+contract; it may change without a corresponding change to this doc. Off-chain
+consumers must not decode it directly — use the decoded contract views
+`get_role`, `is_verified` and `get_verification_status` instead.
+
+| Bit | Value | Meaning |
+|-----|-------|---------|
+| 0   | 0     | `Role::Issuer` |
+| 0   | 1     | `Role::Buyer` |
+| 1   | 0     | Not verified (`verified == false`) |
+| 1   | 1     | Verified (`verified == true`) |
+| 2   | 0     | Not revoked (`revoked == false`) |
+| 2   | 1     | Revoked (`revoked == true`) |
+| 3–31| —     | Reserved (always 0 in current code) |
+
+##### Valid Flag Combinations
+
+The three meaningful bits yield eight theoretical combinations, but only three
+are valid in the protocol's state machine. The role bit (bit 0) is immutable
+after registration; the verified and revoked bits are mutually exclusive — a
+profile cannot be both verified and revoked simultaneously.
+
+| packed_flags (binary) | Role    | Verified | Revoked | `VerificationStatus` | Description |
+|-----------------------|---------|----------|---------|---------------------|-------------|
+| `0b000` (0)           | Issuer  | false    | false   | `Pending`           | Registered, awaiting admin verification |
+| `0b010` (2)           | Issuer  | true     | false   | `Verified`          | Active, eligible for invoice creation |
+| `0b100` (4)           | Issuer  | false    | true    | `Revoked`           | Revoked, cannot originate new invoices |
+| `0b001` (1)           | Buyer   | false    | false   | `Pending`           | Registered, awaiting admin verification |
+| `0b011` (3)           | Buyer   | true     | false   | `Verified`          | Active, eligible as invoice counterparty |
+| `0b101` (5)           | Buyer   | false    | true    | `Revoked`           | Revoked, cannot be counterparty on new invoices |
+
+All other bit patterns (e.g. `0b110`, `0b111`) are invalid and never produced by
+the contract. The `get_verification_status` view encodes this invariant:
+- `Unregistered` — no `Profile` entry exists
+- `Pending` — entry exists, `verified == false`, `revoked == false`
+- `Verified` — entry exists, `verified == true`
+- `Revoked` — entry exists, `revoked == true`
+
+##### Decoding Example (matches `Profile` accessors)
+
+```rust
+// Equivalent to Profile::role()
+let role = if (packed_flags & 1) != 0 { Role::Buyer } else { Role::Issuer };
+
+// Equivalent to Profile::verified()
+let verified = (packed_flags & 2) != 0;
+
+// Equivalent to Profile::revoked()
+let revoked = (packed_flags & 4) != 0;
+
+// Equivalent to Profile::get_verification_status()
+let status = if !profile_exists {
+    VerificationStatus::Unregistered
+} else if verified {
+    VerificationStatus::Verified
+} else if revoked {
+    VerificationStatus::Revoked
+} else {
+    VerificationStatus::Pending
+};
 ```
 
 #### Indexing Notes
@@ -239,6 +302,7 @@ Cancelled = 8   // issuer cancelled before listing
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID |
+| `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default` |
 
 ```
 EscrowRecord {
@@ -266,14 +330,19 @@ EscrowEvent {
 #### Lifecycle
 
 1. `lock()` creates an `EscrowRecord` and transfers USDC from pool → escrow.
-2. `release_to_issuer()` or `release_to_pool()` transfers USDC out and
-   **removes** the `Locked` key (caller must re-lock for a new funding cycle).
-3. `handle_default()` returns locked USDC to the pool and **removes** the key.
-4. On removal, the TTL-granted entries also expire organically.
+2. `release_to_issuer()` transfers USDC out, **removes** the `Locked` key and
+   writes the `IssuerReleased(invoice_id)` marker (issue #819 — the funding
+   path does `lock` then `release_to_issuer` in one call).
+3. `release_to_pool()` transfers USDC out and consumes whichever of `Locked`
+   or `IssuerReleased` exists; a second call finds neither and reverts with
+   `NotFound` (#2 guard).
+4. `handle_default()` returns locked USDC to the pool and **removes** the key.
+5. On removal, the TTL-granted entries also expire organically.
 
 ### Storage Key Count
 
-**Approximately 2 keys per funded invoice** — one `Locked` record and one
+**Approximately 3 keys per funded invoice** — a transient `Locked` record, an
+`IssuerReleased` marker (live between funding and repayment), and one
 `History` vector (which shares its TTL with the lock).
 
 ---

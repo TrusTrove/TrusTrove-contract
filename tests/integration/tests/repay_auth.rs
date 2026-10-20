@@ -384,6 +384,33 @@ fn test_release_to_pool_by_unrelated_caller_is_rejected() {
 
     let res = w.escrow.try_release_to_pool(&w.invoice_id, &FACE_VALUE);
     assert!(res.is_err(), "only the invoice contract may release");
-    // The lock is untouched — no funds moved, no desync was possible.
-    assert_eq!(w.escrow.get_locked(&w.invoice_id), 9_800_000_000);
+    // Post-#819 the funded principal already left escrow at funding time
+    // (`fund_invoice` → `release_to_issuer` consumed the Locked record and
+    // wrote the `IssuerReleased` marker), so the untouched state the rejected
+    // attacker call must not have perturbed is the *marker*, not the lock.
+    // Every below-line is the same "no funds moved, no desync was possible"
+    // invariant, restated for the payout-at-funding semantics #920 restores.
+    assert_eq!(
+        w.escrow.get_locked(&w.invoice_id),
+        0,
+        "the Locked record was consumed at funding and stays absent"
+    );
+    assert!(
+        w.escrow.was_released_to_issuer(&w.invoice_id),
+        "a rejected release_to_pool must not consume the IssuerReleased marker"
+    );
+    let token = MockTokenClient::new(&w.env, &w.usdc_id);
+    let inv = w.invoice.get(&w.invoice_id);
+    assert_eq!(
+        token.balance(&w.escrow_id),
+        0,
+        "escrow holds nothing after the payout and still holds nothing after the rejection"
+    );
+    assert_eq!(
+        token.balance(&inv.issuer),
+        inv.funded_amount as i128,
+        "the issuer's payout-at-funding must be intact after the rejected call"
+    );
+    // Pool received no attacker "release": still only 12e9 deposited − 9.8e9 funded.
+    assert_eq!(token.balance(&w.pool_id), 2_200_000_000i128);
 }
