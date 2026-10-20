@@ -1936,6 +1936,63 @@ fn test_mark_funded_succeeds_with_matching_asset() {
     assert_eq!(inv.funding_pool, Some(pool));
 }
 
+#[test]
+fn test_mark_funded_updates_counts_index_and_emits_one_event() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(1));
+    assert_eq!(counts.get(String::from_str(&env, "Funded")), Some(0));
+    let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.get(0).unwrap().id, invoice_id);
+    assert!(client
+        .get_by_status(&InvoiceStatus::Funded, &0, &MAX_PAGE_SIZE)
+        .is_empty());
+
+    assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT));
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(0));
+    assert_eq!(counts.get(String::from_str(&env, "Funded")), Some(1));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Funded);
+    assert!(client
+        .get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE)
+        .is_empty());
+    let funded = client.get_by_status(&InvoiceStatus::Funded, &0, &MAX_PAGE_SIZE);
+    assert_eq!(funded.len(), 1);
+    assert_eq!(funded.get(0).unwrap().id, invoice_id);
+    assert_eq!(funded.get(0).unwrap().status, InvoiceStatus::Funded);
+
+    let mut funded_event_count = 0;
+    for (contract, topics, data) in env.events().all().iter() {
+        if contract != client.address {
+            continue;
+        }
+        let name = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        if name == Symbol::new(&env, "invoice_funded") {
+            funded_event_count += 1;
+            assert_eq!(topics.len(), 2);
+            assert_eq!(
+                BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+                invoice_id
+            );
+            assert_eq!(
+                u128::try_from_val(&env, &data).unwrap(),
+                DEFAULT_FUNDED_AMOUNT
+            );
+        }
+    }
+    assert_eq!(funded_event_count, 1);
+}
+
 // #553: mark_funded must only accept the configured pool contract. An
 // address that self-authorizes but isn't the one set via set_pool_contract
 // must be rejected (NotAuthorized, Contract #3), preventing arbitrary pool
