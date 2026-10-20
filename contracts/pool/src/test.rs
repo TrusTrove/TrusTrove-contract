@@ -7775,3 +7775,252 @@ fn prop_pool_token_balance_always_covers_available_liquidity() {
         rejected_steps.get()
     );
 }
+
+// --------------- Configurable failing invoice (issue #964) ---------------
+//
+// Stand-in for the pool's invoice contract whose individual view methods
+// (`get_status`, `get_funding_asset`, `get_face_value`, `get_discount_bps`)
+// can be configured to fail in turn. `get_funding_context` — the single
+// batched read `fund_invoice` makes since #833 — delegates to those views, so
+// a failure in any one of them aborts the pool's funding path before it
+// writes any state. Used to prove a failing invoice view leaves the pool's
+// accounting untouched: no `FundedInvoice` entry, no token movement, and an
+// unchanged `TotalFunded`.
+//
+// Wrapped in its own module because `#[contractimpl]` generates per-method
+// dispatch symbols from the *method* name only: identical entrypoint names in
+// two mocks in one module would collide (same reason as `counting_invoice`).
+
+mod failing_invoice {
+    use crate::FundingContext;
+    use soroban_sdk::{contract, contractimpl, Address, BytesN, Env, Symbol};
+
+    #[contract]
+    pub struct MockFailingInvoice;
+
+    // Failure modes accepted by `set_failure_mode`.
+    pub const FAIL_NONE: u32 = 0;
+    pub const FAIL_GET_STATUS: u32 = 1;
+    pub const FAIL_GET_FUNDING_ASSET: u32 = 2;
+    pub const FAIL_GET_FACE_VALUE: u32 = 3;
+    pub const FAIL_GET_DISCOUNT_BPS: u32 = 4;
+
+    #[contractimpl]
+    impl MockFailingInvoice {
+        fn fail_mode(env: &Env) -> u32 {
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(env, "fail_mode")))
+                .unwrap_or(0)
+        }
+
+        fn maybe_fail(env: &Env, method: &str, mode: u32) {
+            if Self::fail_mode(env) == mode {
+                panic!("invoice view {method} failed");
+            }
+        }
+
+        pub fn configure(
+            env: Env,
+            issuer: Address,
+            buyer: Address,
+            funding_asset: Address,
+            face_value: u128,
+            discount_bps: u32,
+        ) {
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "issuer")), &issuer);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "buyer")), &buyer);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "asset")), &funding_asset);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "face")), &face_value);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "disc")), &discount_bps);
+        }
+
+        pub fn set_failure_mode(env: Env, mode: u32) {
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "fail_mode")), &mode);
+        }
+
+        pub fn get_status(env: Env, _invoice_id: BytesN<32>) -> u32 {
+            Self::maybe_fail(&env, "get_status", FAIL_GET_STATUS);
+            1 // Listed
+        }
+
+        pub fn get_funding_asset(env: Env, _invoice_id: BytesN<32>) -> Address {
+            Self::maybe_fail(&env, "get_funding_asset", FAIL_GET_FUNDING_ASSET);
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "asset")))
+                .unwrap()
+        }
+
+        pub fn get_face_value(env: Env, _invoice_id: BytesN<32>) -> u128 {
+            Self::maybe_fail(&env, "get_face_value", FAIL_GET_FACE_VALUE);
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "face")))
+                .unwrap()
+        }
+
+        pub fn get_discount_bps(env: Env, _invoice_id: BytesN<32>) -> u32 {
+            Self::maybe_fail(&env, "get_discount_bps", FAIL_GET_DISCOUNT_BPS);
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "disc")))
+                .unwrap()
+        }
+
+        pub fn get_issuer(env: Env, _invoice_id: BytesN<32>) -> Address {
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "issuer")))
+                .unwrap()
+        }
+
+        pub fn get_buyer(env: Env, _invoice_id: BytesN<32>) -> Address {
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "buyer")))
+                .unwrap()
+        }
+
+        pub fn get_funding_context(env: Env, invoice_id: BytesN<32>) -> FundingContext {
+            let status = Self::get_status(env.clone(), invoice_id.clone());
+            let face_value = Self::get_face_value(env.clone(), invoice_id.clone());
+            let discount_bps = Self::get_discount_bps(env.clone(), invoice_id.clone());
+            let funding_asset = Self::get_funding_asset(env.clone(), invoice_id.clone());
+            let issuer = Self::get_issuer(env.clone(), invoice_id.clone());
+            let buyer = Self::get_buyer(env.clone(), invoice_id.clone());
+            FundingContext {
+                status,
+                face_value,
+                discount_bps,
+                issuer,
+                buyer,
+                funding_asset,
+            }
+        }
+
+        pub fn mark_funded(
+            _env: Env,
+            _invoice_id: BytesN<32>,
+            _pool: Address,
+            _asset: Address,
+            _amount: u128,
+        ) -> bool {
+            true
+        }
+    }
+}
+
+/// #964: `fund_invoice` must preserve its accounting when any invoice view
+/// call fails. The configurable `MockFailingInvoice` stub fails
+/// `get_status`, `get_funding_asset`, `get_face_value`, and
+/// `get_discount_bps` in turn; because the pool's batched `get_funding_context`
+/// read delegates to those views, each failure aborts the funding path before
+/// it writes any state. After every failure the pool must show no
+/// `FundedInvoice` entry, no token movement (pool / escrow / issuer balances),
+/// and an unchanged `TotalFunded`.
+#[test]
+fn test_fund_invoice_view_failure_preserves_accounting() {
+    let te = setup();
+    let mock_id = te
+        .env
+        .register_contract(None, failing_invoice::MockFailingInvoice);
+    let mock = failing_invoice::MockFailingInvoiceClient::new(&te.env, &mock_id);
+    mock.configure(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &DEFAULT_FACE_VALUE,
+        &DEFAULT_DISCOUNT_BPS,
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_id);
+    });
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let invoice_id = BytesN::from_array(&te.env, &[7u8; 32]);
+
+    let failure_modes = [
+        (failing_invoice::FAIL_GET_STATUS, "get_status"),
+        (failing_invoice::FAIL_GET_FUNDING_ASSET, "get_funding_asset"),
+        (failing_invoice::FAIL_GET_FACE_VALUE, "get_face_value"),
+        (failing_invoice::FAIL_GET_DISCOUNT_BPS, "get_discount_bps"),
+    ];
+
+    for (mode, name) in failure_modes {
+        let stats_before = te.pool.get_stats();
+        let pool_bal_before = usdc.balance(&te.pool_id);
+        let escrow_bal_before = usdc.balance(&te.escrow_id);
+        let issuer_bal_before = usdc.balance(&te.issuer);
+
+        mock.set_failure_mode(&mode);
+        let result = te.pool.try_fund_invoice(&invoice_id);
+        assert!(
+            result.is_err(),
+            "fund_invoice must revert when the {name} view fails"
+        );
+
+        // No FundedInvoice state may be created.
+        let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+        assert!(
+            !te.env.as_contract(&te.pool_id, || {
+                te.env.storage().persistent().has(&funded_key)
+            }),
+            "no FundedInvoice state may exist after the {name} view fails"
+        );
+
+        // No tokens may move.
+        assert_eq!(
+            usdc.balance(&te.pool_id),
+            pool_bal_before,
+            "pool balance must not change when the {name} view fails"
+        );
+        assert_eq!(
+            usdc.balance(&te.escrow_id),
+            escrow_bal_before,
+            "escrow balance must not change when the {name} view fails"
+        );
+        assert_eq!(
+            usdc.balance(&te.issuer),
+            issuer_bal_before,
+            "issuer balance must not change when the {name} view fails"
+        );
+
+        // TotalFunded (and the active count) must be unchanged.
+        let stats_after = te.pool.get_stats();
+        assert_eq!(
+            stats_after.total_funded, stats_before.total_funded,
+            "total_funded must not change when the {name} view fails"
+        );
+        assert_eq!(
+            stats_after.active_invoice_count, stats_before.active_invoice_count,
+            "active_invoice_count must not change when the {name} view fails"
+        );
+
+        mock.set_failure_mode(&failing_invoice::FAIL_NONE);
+    }
+
+    // Sanity check: with every view healthy, the same stub funds cleanly,
+    // proving the reverts above came from the failing views and not from a
+    // misconfigured stub.
+    assert!(te.pool.fund_invoice(&invoice_id));
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(stats.active_invoice_count, 1);
+}
