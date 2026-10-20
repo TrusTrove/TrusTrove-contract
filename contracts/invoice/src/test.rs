@@ -4488,6 +4488,94 @@ fn test_repay_early_reads_stored_funded_amount() {
     assert_eq!(inv.remaining_balance, 0);
 }
 
+//  ISSUE #949: REPAY_EARLY REFUND BOUNDARIES
+//
+// `repay_early` prorates the discount from `funded_at`. These tests pin the
+// two ends of the window: at `funded_at` the buyer gets the entire discount
+// back and the pool books no yield; one second before `due_date` the buyer
+// gets the integer-division remainder and the pool books the complement.
+
+#[test]
+fn test_repay_early_at_funded_at_refunds_full_discount() {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let invoice = client.get(&invoice_id);
+    let funded_at = invoice.funded_at.expect("funded invoice has funded_at");
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert!(discount > 0);
+
+    // `setup_confirmed_invoice` funds and confirms at the current timestamp;
+    // pin the ledger to the recorded funding time explicitly.
+    env.ledger().set_timestamp(funded_at);
+    mint_tokens(
+        &env,
+        &client.get_funding_asset(&invoice_id),
+        &buyer,
+        invoice.face_value as i128,
+    );
+
+    assert!(client.repay_early(&invoice_id));
+
+    assert_eq!(
+        MockPoolClient::new(&env, &pool).get_last_refund(),
+        discount,
+        "at funded_at the buyer must receive the full discount back"
+    );
+    let settled = client.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(funded_at));
+    assert_eq!(settled.repaid_amount, invoice.face_value);
+    assert_eq!(settled.remaining_balance, 0);
+
+    let token = MockTokenClient::new(&env, &client.get_funding_asset(&invoice_id));
+    assert_eq!(token.balance(&buyer), 0);
+    assert_eq!(token.balance(&pool), invoice.face_value as i128);
+    assert_eq!(token.balance(&escrow), 0);
+
+    // Settlement is one-shot: a second repayment must not book the split again.
+    assert!(client.try_repay(&invoice_id).is_err());
+}
+
+#[test]
+fn test_repay_early_one_second_before_due_date_refunds_only_remainder() {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let invoice = client.get(&invoice_id);
+    let funded_at = invoice.funded_at.expect("funded invoice has funded_at");
+    let term = invoice.due_date - funded_at;
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert!(term > 0 && discount > 0);
+
+    let repaid_at = invoice.due_date - 1;
+    let earned_by_pool = discount * (term - 1) as u128 / term as u128;
+    let expected_refund = discount - earned_by_pool;
+    assert!(expected_refund > 0, "integer division leaves a remainder");
+
+    env.ledger().set_timestamp(repaid_at);
+    mint_tokens(
+        &env,
+        &client.get_funding_asset(&invoice_id),
+        &buyer,
+        invoice.face_value as i128,
+    );
+
+    assert!(client.repay_early(&invoice_id));
+
+    assert_eq!(
+        MockPoolClient::new(&env, &pool).get_last_refund(),
+        expected_refund
+    );
+    assert_eq!(expected_refund + earned_by_pool, discount);
+    let settled = client.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(repaid_at));
+
+    let token = MockTokenClient::new(&env, &client.get_funding_asset(&invoice_id));
+    assert_eq!(token.balance(&buyer), 0);
+    assert_eq!(token.balance(&pool), invoice.face_value as i128);
+    assert_eq!(token.balance(&escrow), 0);
+
+    assert!(client.try_repay_early(&invoice_id).is_err());
+}
+
 // ── Issue #872: expire_listing issuer path with explicit auth ────────────────
 //
 // The tests above run under `mock_all_auths()`, which masks the difference
