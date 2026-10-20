@@ -5,6 +5,7 @@ extern crate std;
 use crate::{
     DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus,
     TTL_EXTEND_TO, TTL_THRESHOLD,
+    MAX_METADATA_SIZE, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -480,6 +481,162 @@ fn test_update_metadata_wrong_auth_panics() {
         )
     ];
     client.update_metadata(&issuer, &updated_metadata);
+}
+
+// ============== ISSUE #992: update_metadata PRESERVES PACKED FLAGS ==============
+
+#[test]
+fn test_update_metadata_preserves_flags_on_verified_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+
+    let before = client.get_profile(&issuer);
+    assert!(before.verified());
+    assert!(!before.revoked());
+    assert_eq!(before.role(), Role::Issuer);
+    assert_eq!(before.packed_flags, 0b010); // Issuer | verified
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Updated Corp"),
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.metadata, updated_metadata);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(client.get_verification_status(&issuer), VerificationStatus::Verified);
+}
+
+#[test]
+fn test_update_metadata_preserves_flags_on_revoked_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    let before = client.get_profile(&issuer);
+    assert!(!before.verified());
+    assert!(before.revoked());
+    assert_eq!(before.role(), Role::Issuer);
+    assert_eq!(before.packed_flags, 0b100); // Issuer | revoked
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Revoked Corp"),
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.metadata, updated_metadata);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(client.get_verification_status(&issuer), VerificationStatus::Revoked);
+}
+
+#[test]
+fn test_update_metadata_preserves_flags_on_pending_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    let before = client.get_profile(&issuer);
+    assert!(!before.verified());
+    assert!(!before.revoked());
+    assert_eq!(before.role(), Role::Issuer);
+    assert_eq!(before.packed_flags, 0b000); // Issuer | pending
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Pending Corp"),
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.metadata, updated_metadata);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(client.get_verification_status(&issuer), VerificationStatus::Pending);
+}
+
+#[test]
+fn test_update_metadata_preserves_flags_on_buyer_roles() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Buyer: Verified
+    let buyer_verified = Address::generate(&env);
+    client.register_buyer(&buyer_verified, &map![&env]);
+    client.verify_profile(&admin, &buyer_verified, &true);
+    let before_v = client.get_profile(&buyer_verified);
+    assert_eq!(before_v.packed_flags, 0b011); // Buyer | verified
+
+    // Buyer: Revoked
+    let buyer_revoked = Address::generate(&env);
+    client.register_buyer(&buyer_revoked, &map![&env]);
+    client.verify_profile(&admin, &buyer_revoked, &true);
+    client.revoke(&buyer_revoked);
+    let before_r = client.get_profile(&buyer_revoked);
+    assert_eq!(before_r.packed_flags, 0b101); // Buyer | revoked
+
+    // Buyer: Pending
+    let buyer_pending = Address::generate(&env);
+    client.register_buyer(&buyer_pending, &map![&env]);
+    let before_p = client.get_profile(&buyer_pending);
+    assert_eq!(before_p.packed_flags, 0b001); // Buyer | pending
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer Updated"),
+        )
+    ];
+
+    for who in [&buyer_verified, &buyer_revoked, &buyer_pending] {
+        let before = client.get_profile(who);
+        let result = client.update_metadata(who, &updated_metadata);
+        assert!(result);
+        let after = client.get_profile(who);
+        assert_eq!(after.metadata, updated_metadata);
+        assert_eq!(after.packed_flags, before.packed_flags);
+        assert_eq!(after.role(), before.role());
+        assert_eq!(after.verified(), before.verified());
+        assert_eq!(after.revoked(), before.revoked());
+        assert_eq!(after.registered_at, before.registered_at);
+    }
 }
 
 #[test]
@@ -1082,6 +1239,481 @@ fn test_batch_register_buyers_exceeds_limit() {
         entries.push_back((address, map![&env]));
     }
     client.batch_register_buyers(&entries);
+}
+
+// ============== ISSUE #990: BATCH METADATA BOUNDS COVERAGE ==============
+
+#[test]
+fn test_batch_register_issuers_accepts_max_metadata_limits() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    // Max entries (20)
+    let mut max_entries = map![&env];
+    for i in 0..MAX_METADATA_SIZE {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        max_entries.set(key, value);
+    }
+    assert_eq!(max_entries.len(), 20);
+
+    // Max key length (64)
+    let max_key = "k".repeat(MAX_METADATA_KEY_LEN as usize);
+    let max_key_metadata = map![
+        &env,
+        (String::from_str(&env, &max_key), String::from_str(&env, "value"))
+    ];
+
+    // Max value length (512)
+    let max_value = "v".repeat(MAX_METADATA_VALUE_LEN as usize);
+    let max_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, &max_value))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), max_entries),
+        (issuer2.clone(), max_key_metadata),
+        (issuer3.clone(), max_value_metadata),
+    ];
+
+    let skipped = client.batch_register_issuers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    assert!(!client.is_verified(&issuer1));
+    assert!(!client.is_verified(&issuer2));
+    assert!(!client.is_verified(&issuer3));
+
+    assert_eq!(client.get_profile(&issuer1).metadata.len(), 20);
+    assert_eq!(client.get_profile(&issuer2).metadata.get(String::from_str(&env, &max_key)).unwrap(), String::from_str(&env, "value"));
+    assert_eq!(client.get_profile(&issuer3).metadata.get(String::from_str(&env, "key")).unwrap().len() as u32, MAX_METADATA_VALUE_LEN);
+}
+
+#[test]
+fn test_batch_register_buyers_accepts_max_metadata_limits() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    let buyer3 = Address::generate(&env);
+
+    // Max entries (20)
+    let mut max_entries = map![&env];
+    for i in 0..MAX_METADATA_SIZE {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        max_entries.set(key, value);
+    }
+
+    // Max key length (64)
+    let max_key = "k".repeat(MAX_METADATA_KEY_LEN as usize);
+    let max_key_metadata = map![
+        &env,
+        (String::from_str(&env, &max_key), String::from_str(&env, "value"))
+    ];
+
+    // Max value length (512)
+    let max_value = "v".repeat(MAX_METADATA_VALUE_LEN as usize);
+    let max_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, &max_value))
+    ];
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), max_entries),
+        (buyer2.clone(), max_key_metadata),
+        (buyer3.clone(), max_value_metadata),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    assert!(!client.is_verified(&buyer1));
+    assert!(!client.is_verified(&buyer2));
+    assert!(!client.is_verified(&buyer3));
+
+    assert_eq!(client.get_profile(&buyer1).metadata.len(), 20);
+    assert_eq!(client.get_profile(&buyer2).metadata.get(String::from_str(&env, &max_key)).unwrap(), String::from_str(&env, "value"));
+    assert_eq!(client.get_profile(&buyer3).metadata.get(String::from_str(&env, "key")).unwrap().len() as u32, MAX_METADATA_VALUE_LEN);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_oversized_entry_count() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    // Valid metadata for first two
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    // Third entry has 21 entries (exceeds MAX_METADATA_SIZE=20)
+    let mut oversized = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata.clone()),
+        (issuer2.clone(), valid_metadata),
+        (issuer3.clone(), oversized),
+    ];
+
+    // Should panic and reject entire batch
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_oversized_entry_count_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let mut oversized = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata.clone()),
+        (issuer2.clone(), valid_metadata),
+        (issuer3.clone(), oversized),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err(), "batch with oversized metadata should panic");
+
+    // Verify NO profiles were persisted (atomic rejection)
+    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&issuer3), VerificationStatus::Unregistered);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_oversized_key() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let long_key = "k".repeat((MAX_METADATA_KEY_LEN + 1) as usize);
+    let oversized_key_metadata = map![
+        &env,
+        (String::from_str(&env, &long_key), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_key_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_oversized_key_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let long_key = "k".repeat((MAX_METADATA_KEY_LEN + 1) as usize);
+    let oversized_key_metadata = map![
+        &env,
+        (String::from_str(&env, &long_key), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_key_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_oversized_value() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let long_value = "v".repeat((MAX_METADATA_VALUE_LEN + 1) as usize);
+    let oversized_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, &long_value))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_value_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_oversized_value_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let long_value = "v".repeat((MAX_METADATA_VALUE_LEN + 1) as usize);
+    let oversized_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, &long_value))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_value_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_empty_key() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let empty_key_metadata = map![
+        &env,
+        (String::from_str(&env, ""), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_key_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_empty_key_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let empty_key_metadata = map![
+        &env,
+        (String::from_str(&env, ""), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_key_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_empty_value() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let empty_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, ""))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_value_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_empty_value_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    let empty_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, ""))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_value_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered)
+}
+
+#[test]
+fn test_batch_register_buyers_metadata_bounds_mirror_issuers() {
+    // Buyers use the same validate_metadata path; spot-check the same boundaries.
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+    ];
+
+    // Oversized entry count
+    let mut oversized = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), valid_metadata),
+        (buyer2.clone(), oversized),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_buyers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(client.get_verification_status(&buyer1), VerificationStatus::Unregistered);
+    assert_eq!(client.get_verification_status(&buyer2), VerificationStatus::Unregistered);
 }
 
 #[test]
@@ -2373,12 +3005,9 @@ fn run_batch_register_prop_test(is_buyer: bool) {
                             client.get_verification_status(&addr),
                             VerificationStatus::Pending
                         );
-                        if is_buyer {
-                            let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
-                            prop_assert_eq!(profile.metadata, expected_metadata);
-                        } else {
-                            prop_assert_eq!(profile.metadata.len(), 0);
-                        }
+                        // Both issuers and buyers now preserve metadata in batch registration
+                        let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
+                        prop_assert_eq!(profile.metadata, expected_metadata);
                     }
                 }
 
