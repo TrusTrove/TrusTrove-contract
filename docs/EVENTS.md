@@ -408,6 +408,22 @@ Emitted when the pool handles a defaulted invoice.
 
 ---
 
+### `max_utilization_updated`
+
+Emitted after the admin successfully changes the pool's maximum utilization
+cap. Both values are expressed in basis points (`10_000` = 100%).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"max_utilization_updated"` |
+| **Data** | `(u32, u32)` | `(old_cap_bps, new_cap_bps)` |
+
+**Emitted by:** `set_max_utilization()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
 ### `protocol_fee_updated`
 
 Emitted when the admin changes the protocol fee and/or the treasury address. The
