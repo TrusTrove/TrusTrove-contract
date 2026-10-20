@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `invoice`: cap repayment yield at the full discount at maturity, including
+  late settlement through `repay` or `repay_partial`, without multiplying by
+  elapsed time after maturity (#948)
+
 ### Added
 
 - `registry`: `get_profile_count(role)` view, returning how many profiles are
@@ -46,6 +52,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and `share_decimals`
 
 ### Testing
+
+- `invoice`: cover attestation persistence and missing entries, all nine
+  lifecycle status counts against their indexes, and the issuer view's
+  stored address and typed missing-invoice error (#945, #946, #947)
+- `invoice`: verify repayment balances before, at, and after maturity through
+  the real pool and escrow, including installments and large-value overflow
+  regression coverage (#948)
 
 - `pool.deposit` gained regression coverage pinning the behaviour the
   internal `mint` helper refactor relies on: the `lp_deposited` event

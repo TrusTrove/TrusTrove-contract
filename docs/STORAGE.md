@@ -239,6 +239,7 @@ Cancelled = 8   // issuer cancelled before listing
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID |
+| `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default` |
 
 ```
 EscrowRecord {
@@ -266,14 +267,19 @@ EscrowEvent {
 #### Lifecycle
 
 1. `lock()` creates an `EscrowRecord` and transfers USDC from pool → escrow.
-2. `release_to_issuer()` or `release_to_pool()` transfers USDC out and
-   **removes** the `Locked` key (caller must re-lock for a new funding cycle).
-3. `handle_default()` returns locked USDC to the pool and **removes** the key.
-4. On removal, the TTL-granted entries also expire organically.
+2. `release_to_issuer()` transfers USDC out, **removes** the `Locked` key and
+   writes the `IssuerReleased(invoice_id)` marker (issue #819 — the funding
+   path does `lock` then `release_to_issuer` in one call).
+3. `release_to_pool()` transfers USDC out and consumes whichever of `Locked`
+   or `IssuerReleased` exists; a second call finds neither and reverts with
+   `NotFound` (#2 guard).
+4. `handle_default()` returns locked USDC to the pool and **removes** the key.
+5. On removal, the TTL-granted entries also expire organically.
 
 ### Storage Key Count
 
-**Approximately 2 keys per funded invoice** — one `Locked` record and one
+**Approximately 3 keys per funded invoice** — a transient `Locked` record, an
+`IssuerReleased` marker (live between funding and repayment), and one
 `History` vector (which shares its TTL with the lock).
 
 ---
