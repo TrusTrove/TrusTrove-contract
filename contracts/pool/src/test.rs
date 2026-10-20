@@ -179,6 +179,24 @@ mod failing_escrow {
     }
 }
 
+// --------------- Mock Escrow (handle_default failure) ---------------
+// Stands in for escrow to prove that handle_default rolls back pool state
+// when escrow.handle_default fails (issue #970).
+
+mod failing_escrow_default {
+    use soroban_sdk::{contract, contractimpl, Address, BytesN, Env};
+
+    #[contract]
+    pub struct MockFailingEscrowDefault;
+
+    #[contractimpl]
+    impl MockFailingEscrowDefault {
+        pub fn handle_default(_env: Env, _invoice_id: BytesN<32>, _pool: Address) -> bool {
+            panic!("escrow handle_default failed");
+        }
+    }
+}
+
 // --------------- Mock Invoice (unbounded face value) ---------------
 //
 // Stands in for the pool's configured invoice contract to prove that
@@ -1320,6 +1338,39 @@ fn test_get_stats_rejects_utilization_overflow() {
     });
 
     let _ = te.pool.get_stats();
+}
+
+/// Detect TotalFunded > TotalDeposits invariant violation in get_stats.
+///
+/// The invariant `TotalFunded <= TotalDeposits` must hold for a healthy pool.
+/// If corrupt storage (or a logic bug) makes TotalFunded exceed TotalDeposits,
+/// `get_stats` must fail with a typed `Overflow` error rather than
+/// underflowing on `available = total_deposits - total_funded` in a public
+/// read path. The underlying storage must not be modified by the read.
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_get_stats_rejects_total_funded_exceeds_deposits() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000u128);
+    let stats_before = te.pool.get_stats();
+    assert_eq!(stats_before.total_deposits, 100_000_000_000u128);
+    assert_eq!(stats_before.total_funded, 0u128);
+
+    // Corrupt storage: make TotalFunded > TotalDeposits
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(100_000_000_001u128));
+    });
+
+    // get_stats must panic with Overflow (#13) instead of underflowing
+    let _ = te.pool.get_stats();
+
+    // Storage must be unchanged by the read (no writes in get_stats)
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_funded, 100_000_000_001u128);
 }
 
 //  SHARE-PRICE OVERFLOW TESTS (issue #584) //
@@ -2873,6 +2924,94 @@ fn test_handle_default_rejects_when_escrow_reports_no_release() {
         te.env.storage().persistent().has(&funded_key)
     });
     assert!(still_funded);
+}
+
+/// Roll back handle_default when escrow default handling fails.
+///
+/// Uses an escrow stub that panics on `handle_default` for an existing
+/// funded invoice. Asserts that pool totals, FundedInvoice entry, active
+/// invoice count, and invoice status remain unchanged.
+#[test]
+fn test_handle_default_rolls_back_on_escrow_failure() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
+
+    let funded_amount = DEFAULT_FUNDED_AMOUNT;
+
+    // Swap in a failing escrow that panics on handle_default
+    let failing_escrow_id = te
+        .env
+        .register_contract(None, failing_escrow_default::MockFailingEscrowDefault);
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::EscrowContract, &failing_escrow_id);
+    });
+
+    let stats_before = te.pool.get_stats();
+    let invoice_status_before = te.invoice.get_status(&invoice_id);
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    let funded_entry_before = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().has(&funded_key)
+    });
+    assert!(funded_entry_before);
+
+    // Call handle_default — it must revert because escrow panics
+    let res = te.pool.try_handle_default(&invoice_id);
+    assert!(
+        res.is_err(),
+        "handle_default must revert when escrow.handle_default fails"
+    );
+
+    // Pool totals must be unchanged
+    let stats_after = te.pool.get_stats();
+    assert_eq!(
+        stats_after.total_deposits, stats_before.total_deposits,
+        "total_deposits must not change on escrow failure"
+    );
+    assert_eq!(
+        stats_after.total_funded, stats_before.total_funded,
+        "total_funded must not change on escrow failure"
+    );
+    assert_eq!(
+        stats_after.total_loss_realised, stats_before.total_loss_realised,
+        "total_loss_realised must not change on escrow failure"
+    );
+    assert_eq!(
+        stats_after.active_invoice_count, stats_before.active_invoice_count,
+        "active_invoice_count must not change on escrow failure"
+    );
+    assert_eq!(
+        stats_after.total_shares, stats_before.total_shares,
+        "total_shares must not change on escrow failure"
+    );
+
+    // FundedInvoice entry must still exist with the same amount
+    let funded_entry_after = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().has(&funded_key)
+    });
+    assert!(funded_entry_after, "FundedInvoice entry must persist");
+    let funded_amount_after: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get(&funded_key).unwrap()
+    });
+    assert_eq!(
+        funded_amount_after, funded_amount,
+        "FundedInvoice amount must be unchanged"
+    );
+
+    // Invoice status must remain Funded (2), not transitioned to Defaulted (6)
+    let invoice_status_after = te.invoice.get_status(&invoice_id);
+    assert_eq!(
+        invoice_status_after, invoice_status_before,
+        "invoice status must not change on escrow failure"
+    );
+    assert_eq!(invoice_status_after, 2, "invoice must stay Funded");
 }
 
 #[test]

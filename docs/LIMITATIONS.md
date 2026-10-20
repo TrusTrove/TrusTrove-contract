@@ -343,9 +343,41 @@ terms.
 | Buyer repays exactly on `due_date`                                     | `invoice.repay` succeeds with no refund; `trigger_default` panics with `DueDateNotPassed`           | Asymmetric: all repayment paths have no due-date upper bound; `trigger_default` requires `current_time > due_date` (strict)             |
 | `confirm_delivery` called after invoice is already confirmed           | Panics with `InvalidStatusTransition` because status is `Confirmed` not `Active`                    | Correct — prevents replay                                                                                                               |
 | `withdraw` when pool has funded invoices but no available liquidity    | Panics with `InsufficientLiquidity`                                                                 | Correct — prevents breaking the pool invariant                                                                                          |
-| Admin calls `set_max_utilization` to 0                                 | All `fund_invoice` calls will fail (utilization ≥ 0% ≥ cap of 0)                                    | This is a denial-of-service vector available to admin                                                                                   |
+| Admin calls `set_max_utilization` to 0                                 | All `fund_invoice` calls will fail (utilization ≥ 0% ≥ cap of 0)                                    | This is a denial-of-service vector available to admin. See [Max Utilization Cap](#max-utilization-cap) for full formula and zero-cap semantics. |
 | Calling `revoke` on an unregistered address                            | Panics with `NotFound`                                                                              | Per spec                                                                                                                                |
 | Calling `batch_register_issuers` with more than 50 entries             | Panics with `BatchSizeExceeded`                                                                     | Gas protection                                                                                                                          |
+
+### Max Utilization Cap
+
+The pool enforces a configurable utilization cap via `set_max_utilization` (admin-only). The cap is expressed in **basis points (bps)**, where `10_000 bps = 100%`. Valid range: `0..=10_000`.
+
+**Formula:**
+```
+utilization_bps = (TotalFunded * 10_000) / TotalDeposits
+```
+- When `TotalDeposits == 0`, utilization is defined as `0 bps`.
+- Before funding an invoice, the pool computes the post-funding utilization:
+  `new_total_funded = TotalFunded + funded_amount`
+  `utilization_after = (new_total_funded * 10_000) / TotalDeposits`
+- If `utilization_after > max_utilization_bps`, `fund_invoice` / `batch_fund_invoice` reject with `UtilizationCapExceeded` (error code 12).
+- **Exact-cap acceptance:** When `utilization_after == max_utilization_bps`, funding is **allowed** (the check is strictly greater-than).
+
+**Zero-cap behavior (`max_utilization_bps == 0`):**
+- Any positive `funded_amount` makes `utilization_after > 0`, so **all new funding is blocked**.
+- This is a valid administrative setting — an admin can set the cap to `0` to freeze new commitments while leaving existing funded invoices to run to repayment or default.
+- Reads (`get_stats`, `get_utilization_rate`, `deposit`, `withdraw`, `receive_repayment`, `handle_default`) are **unaffected** by a zero cap.
+
+**Examples (matching `get_utilization_rate` and `fund_invoice` tests):**
+
+| TotalDeposits | TotalFunded | max_utilization_bps | utilization_bps | New funded_amount | utilization_after | Result |
+|---|---|---|---|---|---|---|
+| 10_000_000_000 | 0 | 8_500 | 0 | 9_800_000_000 | 9_800 | Rejected (9800 > 8500) |
+| 10_000_000_000 | 0 | 10_000 | 0 | 9_800_000_000 | 9_800 | Allowed (9800 ≤ 10000) |
+| 100_000_000_000 | 9_800_000_000 | 8_500 | 980 | 9_800_000_000 | 1_960 | Allowed (1960 ≤ 8500) |
+| 10_000_000_000 | 9_800_000_000 | 8_500 | 9_800 | 9_800_000_000 | 19_600 | Rejected (19600 > 8500) |
+| 10_000_000_000 | 0 | 0 | 0 | 1 | 1 | Rejected (1 > 0) |
+
+**Default:** `8_500 bps` (85%) at `initialize()`.
 | A buyer repays _less_ than `face_value`                                | Supported via `invoice.repay_partial`; installments accumulate in escrow until the balance clears    | A full `repay` pulls only the outstanding `remaining_balance`; the buyer refund is computed once, when the final installment settles     |
 | An issuer creates an invoice with `due_date = current_time + 1` second | Invoice accepted                                                                                    | `create` requires `due_date > env.ledger().timestamp()` (strict); `now + 1` passes, `now` does not                                      |
 | The pool has exactly 0 USDC balance after funding all deposits         | `withdraw` succeeds for unfunded amounts, but funded invoices are locked                            | The issuer holds the funded USDC (paid out at funding, #819); escrow holds no balance for funded invoices and the pool holds only unfunded USDC  |

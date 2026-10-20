@@ -1806,7 +1806,9 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `NotInitialized` if the pool contract has not been initialized.
-    /// * `Overflow` if scaling `total_funded` into basis points would overflow.
+    /// * `Overflow` if scaling `total_funded` into basis points would overflow,
+    ///   or if the invariant `TotalFunded <= TotalDeposits` is violated
+    ///   (corrupt storage or logic bug).
     ///
     /// # Returns
     /// * `PoolStats` - The current pool statistics.
@@ -1822,6 +1824,13 @@ impl PoolContract {
         let totals = Self::totals(&env);
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
+        // Invariant: total_funded must never exceed total_deposits.
+        // If it does (corrupt storage or logic bug), fail with a typed error
+        // rather than underflowing on `available = total_deposits - total_funded`
+        // in a public read path.
+        if total_funded > total_deposits {
+            panic_with_error!(&env, PoolError::Overflow);
+        }
         let available = total_deposits - total_funded;
         let utilization = Self::utilization_bps_or_panic(&env, total_funded, total_deposits);
 
