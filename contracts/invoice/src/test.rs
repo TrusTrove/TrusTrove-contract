@@ -4203,13 +4203,12 @@ fn test_remove_supported_asset() {
 }
 
 #[test]
-fn test_set_escrow_contract() {
+fn test_set_escrow_contract_emits_initial_assignment_event() {
     let (env, client, _, _, _, _) = setup();
-    let new_escrow = Address::generate(&env);
+    let escrow = Address::generate(&env);
 
-    let old_escrow = client.get_escrow_contract();
-    client.set_escrow_contract(&new_escrow);
-    assert_eq!(client.get_escrow_contract(), Some(new_escrow.clone()));
+    client.set_escrow_contract(&escrow);
+    assert_eq!(client.get_escrow_contract(), Some(escrow.clone()));
 
     let events = env.events().all();
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
@@ -4218,8 +4217,36 @@ fn test_set_escrow_contract() {
         topics,
         (
             Symbol::new(&env, "escrow_contract_updated"),
-            old_escrow.unwrap_or(new_escrow.clone()),
-            new_escrow.clone()
+            escrow.clone(),
+            escrow.clone()
+        )
+            .into_val(&env)
+    );
+    <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
+fn test_set_escrow_contract_emits_replacement_event() {
+    let (env, client, _, _, _, _) = setup();
+    let initial_escrow = Address::generate(&env);
+    let replacement_escrow = Address::generate(&env);
+    client.set_escrow_contract(&initial_escrow);
+
+    client.set_escrow_contract(&replacement_escrow);
+    assert_eq!(
+        client.get_escrow_contract(),
+        Some(replacement_escrow.clone())
+    );
+
+    let events = env.events().all();
+    let (event_contract, topics, data) = events.last().expect("expected at least one event");
+    assert_eq!(event_contract, client.address);
+    assert_eq!(
+        topics,
+        (
+            Symbol::new(&env, "escrow_contract_updated"),
+            initial_escrow,
+            replacement_escrow
         )
             .into_val(&env)
     );
