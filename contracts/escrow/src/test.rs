@@ -179,9 +179,7 @@ mod reject {
             env.storage()
                 .persistent()
                 .set(&from_key, &(from_bal - amount));
-            env.storage()
-                .persistent()
-                .set(&to_key, &(to_bal + amount));
+            env.storage().persistent().set(&to_key, &(to_bal + amount));
         }
 
         pub fn balance(env: Env, addr: Address) -> i128 {
