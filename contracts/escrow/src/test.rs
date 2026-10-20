@@ -81,6 +81,37 @@ mod poolmock {
     }
 }
 
+mod invoicemock {
+    use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, Symbol};
+
+    #[contract]
+    pub struct MockInvoice;
+
+    #[contracttype]
+    pub struct IssuerKey(pub BytesN<32>);
+
+    #[contractimpl]
+    impl MockInvoice {
+        pub fn set_default_issuer(env: Env, issuer: Address) {
+            env.storage()
+                .persistent()
+                .set(&Symbol::new(&env, "default_issuer"), &issuer);
+        }
+
+        pub fn get_issuer(env: Env, invoice_id: BytesN<32>) -> Address {
+            env.storage()
+                .persistent()
+                .get(&IssuerKey(invoice_id))
+                .or_else(|| {
+                    env.storage()
+                        .persistent()
+                        .get(&Symbol::new(&env, "default_issuer"))
+                })
+                .unwrap()
+        }
+    }
+}
+
 #[contracttype]
 pub struct BalanceKey(Address);
 
@@ -208,9 +239,10 @@ fn setup() -> (
     // stand-in in `setup()` serves that read instead of being an inert
     // `MockCaller`.
     let pool = env.register_contract(None, poolmock::MockPool);
-    let invoice = env.register_contract(None, MockCaller);
-    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
     let issuer = env.register_contract(None, MockCaller);
+    let invoice = env.register_contract(None, invoicemock::MockInvoice);
+    invoicemock::MockInvoiceClient::new(&env, &invoice).set_default_issuer(&issuer);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
     let usdc_id = env.register_contract(None, MockToken);
     let _mock_token_client = MockTokenClient::new(&env, &usdc_id);
 
@@ -682,8 +714,11 @@ fn test_release_to_issuer_rolls_back_when_transfer_fails() {
     env.mock_all_auths();
 
     let admin = env.register_contract(None, MockCaller);
-    let pool = env.register_contract(None, MockCaller);
+    let pool = env.register_contract(None, poolmock::MockPool);
     let issuer = env.register_contract(None, MockCaller);
+    let invoice = env.register_contract(None, invoicemock::MockInvoice);
+    invoicemock::MockInvoiceClient::new(&env, &invoice).set_default_issuer(&issuer);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
     let token_id = env.register_contract(None, reject::RecipientRejectMockToken);
     let token = reject::RecipientRejectMockTokenClient::new(&env, &token_id);
 
@@ -766,11 +801,33 @@ fn test_release_to_issuer_mismatched_address_panics() {
 }
 
 #[test]
+fn test_release_to_issuer_matches_canonical_invoice_issuer_and_amount() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 80);
+    let amount = 1_234_567u128;
+    let wrong_recipient = Address::generate(&env);
+    let token = MockTokenClient::new(&env, &usdc_id);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    let issuer_before = token.balance(&issuer);
+    let wrong_before = token.balance(&wrong_recipient);
+
+    assert!(client
+        .try_release_to_issuer(&invoice_id, &wrong_recipient)
+        .is_err());
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(token.balance(&wrong_recipient), wrong_before);
+
+    assert!(client.release_to_issuer(&invoice_id, &issuer));
+    assert_eq!(token.balance(&issuer) - issuer_before, amount as i128);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_release_to_issuer_second_call_panics() {
-    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 8);
-    let issuer = Address::generate(&env);
     let amount: u128 = 1_000_000_000;
 
     // Lock funds and release once
@@ -801,8 +858,11 @@ fn test_release_to_issuer_rejects_stored_amount_above_i128_max() {
     env.mock_all_auths();
 
     let admin = env.register_contract(None, MockCaller);
-    let pool = env.register_contract(None, MockCaller);
     let issuer = env.register_contract(None, MockCaller);
+    let pool = env.register_contract(None, poolmock::MockPool);
+    let invoice = env.register_contract(None, invoicemock::MockInvoice);
+    invoicemock::MockInvoiceClient::new(&env, &invoice).set_default_issuer(&issuer);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
     let usdc_id = env.register_contract(None, MockToken);
     let contract_id = env.register_contract(None, EscrowContract);
     let client = EscrowContractClient::new(&env, &contract_id);
@@ -848,8 +908,11 @@ fn test_release_to_issuer_corrupted_amount_panics_with_invalid_amount() {
     env.mock_all_auths();
 
     let admin = env.register_contract(None, MockCaller);
-    let pool = env.register_contract(None, MockCaller);
     let issuer = env.register_contract(None, MockCaller);
+    let pool = env.register_contract(None, poolmock::MockPool);
+    let invoice = env.register_contract(None, invoicemock::MockInvoice);
+    invoicemock::MockInvoiceClient::new(&env, &invoice).set_default_issuer(&issuer);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
     let usdc_id = env.register_contract(None, MockToken);
     let contract_id = env.register_contract(None, EscrowContract);
     let client = EscrowContractClient::new(&env, &contract_id);
@@ -1447,10 +1510,9 @@ fn test_get_locked_at_returns_timestamp_when_locked() {
 
 #[test]
 fn test_get_locked_at_returns_zero_after_release() {
-    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
     env.ledger().set_timestamp(1_000_000);
     let invoice_id = generate_invoice_id(&env, 22);
-    let issuer = Address::generate(&env);
     let amount: u128 = 1_000_000_000;
 
     client.lock(&invoice_id, &amount, &issuer);
@@ -1496,10 +1558,9 @@ fn test_lock_fails_duplicate() {
 
 #[test]
 fn test_get_history_returns_action_log() {
-    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 16);
     let amount: u128 = 1_000_000_000;
-    let issuer = Address::generate(&env);
 
     client.lock(&invoice_id, &amount, &issuer);
     client.release_to_issuer(&invoice_id, &issuer);
