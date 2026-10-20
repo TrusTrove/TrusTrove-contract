@@ -4,8 +4,7 @@ extern crate std;
 
 use crate::{
     DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
-    MAX_METADATA_SIZE, MAX_METADATA_KEY_LEN, MAX_METADATA_VALUE_LEN,
+    MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -811,7 +810,10 @@ fn test_update_metadata_preserves_flags_on_verified_profile() {
     assert_eq!(after.verified(), before.verified());
     assert_eq!(after.revoked(), before.revoked());
     assert_eq!(after.registered_at, before.registered_at);
-    assert_eq!(client.get_verification_status(&issuer), VerificationStatus::Verified);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
 }
 
 #[test]
@@ -847,7 +849,10 @@ fn test_update_metadata_preserves_flags_on_revoked_profile() {
     assert_eq!(after.verified(), before.verified());
     assert_eq!(after.revoked(), before.revoked());
     assert_eq!(after.registered_at, before.registered_at);
-    assert_eq!(client.get_verification_status(&issuer), VerificationStatus::Revoked);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
 }
 
 #[test]
@@ -881,7 +886,10 @@ fn test_update_metadata_preserves_flags_on_pending_profile() {
     assert_eq!(after.verified(), before.verified());
     assert_eq!(after.revoked(), before.revoked());
     assert_eq!(after.registered_at, before.registered_at);
-    assert_eq!(client.get_verification_status(&issuer), VerificationStatus::Pending);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
 }
 
 #[test]
@@ -1560,14 +1568,20 @@ fn test_batch_register_issuers_accepts_max_metadata_limits() {
     let max_key = "k".repeat(MAX_METADATA_KEY_LEN as usize);
     let max_key_metadata = map![
         &env,
-        (String::from_str(&env, &max_key), String::from_str(&env, "value"))
+        (
+            String::from_str(&env, &max_key),
+            String::from_str(&env, "value")
+        )
     ];
 
     // Max value length (512)
     let max_value = "v".repeat(MAX_METADATA_VALUE_LEN as usize);
     let max_value_metadata = map![
         &env,
-        (String::from_str(&env, "key"), String::from_str(&env, &max_value))
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &max_value)
+        )
     ];
 
     let entries = vec![
@@ -1585,8 +1599,23 @@ fn test_batch_register_issuers_accepts_max_metadata_limits() {
     assert!(!client.is_verified(&issuer3));
 
     assert_eq!(client.get_profile(&issuer1).metadata.len(), 20);
-    assert_eq!(client.get_profile(&issuer2).metadata.get(String::from_str(&env, &max_key)).unwrap(), String::from_str(&env, "value"));
-    assert_eq!(client.get_profile(&issuer3).metadata.get(String::from_str(&env, "key")).unwrap().len() as u32, MAX_METADATA_VALUE_LEN);
+    assert_eq!(
+        client
+            .get_profile(&issuer2)
+            .metadata
+            .get(String::from_str(&env, &max_key))
+            .unwrap(),
+        String::from_str(&env, "value")
+    );
+    assert_eq!(
+        client
+            .get_profile(&issuer3)
+            .metadata
+            .get(String::from_str(&env, "key"))
+            .unwrap()
+            .len(),
+        MAX_METADATA_VALUE_LEN
+    );
 }
 
 #[test]
@@ -1611,14 +1640,20 @@ fn test_batch_register_buyers_accepts_max_metadata_limits() {
     let max_key = "k".repeat(MAX_METADATA_KEY_LEN as usize);
     let max_key_metadata = map![
         &env,
-        (String::from_str(&env, &max_key), String::from_str(&env, "value"))
+        (
+            String::from_str(&env, &max_key),
+            String::from_str(&env, "value")
+        )
     ];
 
     // Max value length (512)
     let max_value = "v".repeat(MAX_METADATA_VALUE_LEN as usize);
     let max_value_metadata = map![
         &env,
-        (String::from_str(&env, "key"), String::from_str(&env, &max_value))
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &max_value)
+        )
     ];
 
     let entries = vec![
@@ -1636,8 +1671,23 @@ fn test_batch_register_buyers_accepts_max_metadata_limits() {
     assert!(!client.is_verified(&buyer3));
 
     assert_eq!(client.get_profile(&buyer1).metadata.len(), 20);
-    assert_eq!(client.get_profile(&buyer2).metadata.get(String::from_str(&env, &max_key)).unwrap(), String::from_str(&env, "value"));
-    assert_eq!(client.get_profile(&buyer3).metadata.get(String::from_str(&env, "key")).unwrap().len() as u32, MAX_METADATA_VALUE_LEN);
+    assert_eq!(
+        client
+            .get_profile(&buyer2)
+            .metadata
+            .get(String::from_str(&env, &max_key))
+            .unwrap(),
+        String::from_str(&env, "value")
+    );
+    assert_eq!(
+        client
+            .get_profile(&buyer3)
+            .metadata
+            .get(String::from_str(&env, "key"))
+            .unwrap()
+            .len(),
+        MAX_METADATA_VALUE_LEN
+    );
 }
 
 #[test]
@@ -1654,7 +1704,10 @@ fn test_batch_register_issuers_rejects_oversized_entry_count() {
     // Valid metadata for first two
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     // Third entry has 21 entries (exceeds MAX_METADATA_SIZE=20)
@@ -1688,7 +1741,10 @@ fn test_batch_register_issuers_rejects_oversized_entry_count_leaves_state_clean(
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let mut oversized = map![&env];
@@ -1708,12 +1764,24 @@ fn test_batch_register_issuers_rejects_oversized_entry_count_leaves_state_clean(
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         client.batch_register_issuers(&entries);
     }));
-    assert!(result.is_err(), "batch with oversized metadata should panic");
+    assert!(
+        result.is_err(),
+        "batch with oversized metadata should panic"
+    );
 
     // Verify NO profiles were persisted (atomic rejection)
-    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&issuer3), VerificationStatus::Unregistered);
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer3),
+        VerificationStatus::Unregistered
+    );
 }
 
 #[test]
@@ -1728,13 +1796,19 @@ fn test_batch_register_issuers_rejects_oversized_key() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let long_key = "k".repeat((MAX_METADATA_KEY_LEN + 1) as usize);
     let oversized_key_metadata = map![
         &env,
-        (String::from_str(&env, &long_key), String::from_str(&env, "value"))
+        (
+            String::from_str(&env, &long_key),
+            String::from_str(&env, "value")
+        )
     ];
 
     let entries = vec![
@@ -1757,13 +1831,19 @@ fn test_batch_register_issuers_rejects_oversized_key_leaves_state_clean() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let long_key = "k".repeat((MAX_METADATA_KEY_LEN + 1) as usize);
     let oversized_key_metadata = map![
         &env,
-        (String::from_str(&env, &long_key), String::from_str(&env, "value"))
+        (
+            String::from_str(&env, &long_key),
+            String::from_str(&env, "value")
+        )
     ];
 
     let entries = vec![
@@ -1777,8 +1857,14 @@ fn test_batch_register_issuers_rejects_oversized_key_leaves_state_clean() {
     }));
     assert!(result.is_err());
 
-    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
 }
 
 #[test]
@@ -1793,13 +1879,19 @@ fn test_batch_register_issuers_rejects_oversized_value() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let long_value = "v".repeat((MAX_METADATA_VALUE_LEN + 1) as usize);
     let oversized_value_metadata = map![
         &env,
-        (String::from_str(&env, "key"), String::from_str(&env, &long_value))
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &long_value)
+        )
     ];
 
     let entries = vec![
@@ -1822,13 +1914,19 @@ fn test_batch_register_issuers_rejects_oversized_value_leaves_state_clean() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let long_value = "v".repeat((MAX_METADATA_VALUE_LEN + 1) as usize);
     let oversized_value_metadata = map![
         &env,
-        (String::from_str(&env, "key"), String::from_str(&env, &long_value))
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &long_value)
+        )
     ];
 
     let entries = vec![
@@ -1842,8 +1940,14 @@ fn test_batch_register_issuers_rejects_oversized_value_leaves_state_clean() {
     }));
     assert!(result.is_err());
 
-    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
 }
 
 #[test]
@@ -1858,7 +1962,10 @@ fn test_batch_register_issuers_rejects_empty_key() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let empty_key_metadata = map![
@@ -1886,7 +1993,10 @@ fn test_batch_register_issuers_rejects_empty_key_leaves_state_clean() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let empty_key_metadata = map![
@@ -1905,8 +2015,14 @@ fn test_batch_register_issuers_rejects_empty_key_leaves_state_clean() {
     }));
     assert!(result.is_err());
 
-    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered);
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
 }
 
 #[test]
@@ -1921,7 +2037,10 @@ fn test_batch_register_issuers_rejects_empty_value() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let empty_value_metadata = map![
@@ -1949,7 +2068,10 @@ fn test_batch_register_issuers_rejects_empty_value_leaves_state_clean() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     let empty_value_metadata = map![
@@ -1968,8 +2090,14 @@ fn test_batch_register_issuers_rejects_empty_value_leaves_state_clean() {
     }));
     assert!(result.is_err());
 
-    assert_eq!(client.get_verification_status(&issuer1), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&issuer2), VerificationStatus::Unregistered)
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    )
 }
 
 #[test]
@@ -1984,7 +2112,10 @@ fn test_batch_register_buyers_metadata_bounds_mirror_issuers() {
 
     let valid_metadata = map![
         &env,
-        (String::from_str(&env, "name"), String::from_str(&env, "Valid"))
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
     ];
 
     // Oversized entry count
@@ -2006,8 +2137,14 @@ fn test_batch_register_buyers_metadata_bounds_mirror_issuers() {
     }));
     assert!(result.is_err());
 
-    assert_eq!(client.get_verification_status(&buyer1), VerificationStatus::Unregistered);
-    assert_eq!(client.get_verification_status(&buyer2), VerificationStatus::Unregistered);
+    assert_eq!(
+        client.get_verification_status(&buyer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&buyer2),
+        VerificationStatus::Unregistered
+    );
 }
 
 #[test]
