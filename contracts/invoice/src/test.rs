@@ -3336,6 +3336,28 @@ fn test_add_supported_asset() {
     <()>::try_from_val(&env, &data).unwrap();
 }
 
+#[test]
+fn test_add_supported_asset_rejects_counter_overflow_without_writing_asset() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+
+    // Simulate corrupt/adversarial storage where the counter is exhausted.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&crate::DataKey::SupportedAssetCount, &u32::MAX);
+    });
+
+    assert_eq!(
+        client.try_add_supported_asset(&asset),
+        Err(Ok(InvoiceError::MathOverflow.into())),
+    );
+
+    // The failed call must not write the asset or move the counter.
+    assert!(!client.is_supported_asset(&asset));
+    assert_eq!(client.get_supported_asset_count(), u32::MAX);
+}
+
 // ============================== REPAY TESTS ==============================
 
 #[test]
