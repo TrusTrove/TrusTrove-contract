@@ -281,6 +281,8 @@ impl EscrowContract {
     /// * `NotFound` if no escrow record exists for the invoice.
     /// * `InvalidRecipient` if issuer is escrow or pool contract address.
     /// * `InvalidRecipient` if issuer does not match the stored issuer address.
+    /// * `InvalidAmount` if the stored amount exceeds `i128::MAX` (checked
+    ///   conversion fails before any transfer or record removal).
     ///
     /// # Returns
     /// * `bool` - `true` when funds are released.
@@ -309,14 +311,13 @@ impl EscrowContract {
         }
 
         let usdc = Self::usdc_client(&env);
-        if record.amount > i128::MAX as u128 {
-            panic_with_error!(&env, EscrowError::InvalidAmount);
-        }
-        usdc.transfer(
-            &env.current_contract_address(),
-            &issuer,
-            &(record.amount as i128),
-        );
+        // #1001: checked conversion — a corrupted record whose stored amount
+        // exceeds `i128::MAX` must surface the typed `InvalidAmount` error
+        // before any transfer or record removal, instead of wrapping into an
+        // invalid token amount.
+        let amount = i128::try_from(record.amount)
+            .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
+        usdc.transfer(&env.current_contract_address(), &issuer, &amount);
 
         Self::append_history(
             &env,
