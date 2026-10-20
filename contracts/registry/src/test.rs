@@ -405,6 +405,300 @@ fn test_reinstate_on_verified_profile_is_idempotent_noop() {
     assert_eq!(env.events().all().len(), events_before);
 }
 
+// ============== REINSTATE STATE CONSTRAINTS AND EVENT BEHAVIOR (#983) ==============
+
+/// Asserts that two profiles carry the same observable state.
+///
+/// `Profile` deliberately does not implement `PartialEq`: its `packed_flags`
+/// bit layout is a private implementation detail that must not become a
+/// stable external contract (#609). The decoded views and the remaining
+/// fields are compared individually instead, which is exactly the state an
+/// off-chain consumer can observe.
+#[track_caller]
+fn assert_profiles_equivalent(before: &Profile, after: &Profile) {
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(after.metadata, before.metadata);
+}
+
+/// Counts the events whose first topic symbol is `name`.
+///
+/// Used to assert how many times a specific event was published, which the
+/// "no event" and "exactly one event" assertions below need. The topic is
+/// decoded back into a `Symbol` because `Val` itself is not comparable.
+fn count_events_named(env: &Env, name: &str) -> u32 {
+    let expected = Symbol::new(env, name);
+    let all_events = env.events().all();
+    let mut count = 0u32;
+    for i in 0..all_events.len() {
+        let event = all_events.get(i).expect("event index in range");
+        let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if topics.is_empty() {
+            continue;
+        }
+        let topic_symbol: Symbol = match topics.get(0).unwrap().try_into_val(env) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if topic_symbol == expected {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// A `reinstate` call against a `Pending` profile is rejected as a state
+/// transition: the stored profile is left exactly as it was and no event is
+/// emitted (#983).
+///
+/// `Pending` is the state of a freshly registered profile. `reinstate` is the
+/// inverse of `revoke`, so it must never double as an alternate path to
+/// verify a profile that was never verified — `verify_profile` is the only
+/// way to move a profile out of `Pending`.
+#[test]
+fn test_reinstate_on_pending_profile_leaves_profile_unchanged() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+
+    let profile_before = client.get_profile(&issuer);
+    assert!(!profile_before.verified());
+    assert!(!profile_before.revoked());
+    let events_before = env.events().all();
+
+    // The no-op path returns before any storage work, so the profile entry's
+    // remaining TTL must not be renewed either. Read the TTL around the
+    // call — `get_profile` above extends it, so it cannot be sampled after
+    // the call.
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+    let ttl_before_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+
+    assert!(client.reinstate(&issuer));
+
+    let ttl_after_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert_eq!(
+        ttl_after_reinstate, ttl_before_reinstate,
+        "a no-op reinstate must not write to the profile entry"
+    );
+
+    // The whole profile record survives the call untouched: role, both
+    // flags, the registration timestamp and the metadata all stay the same.
+    let profile_after = client.get_profile(&issuer);
+    assert_profiles_equivalent(&profile_before, &profile_after);
+    assert!(!profile_after.verified());
+    assert!(!profile_after.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    // No event at all — in particular no `address_reinstated`.
+    assert_eq!(env.events().all(), events_before);
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
+}
+
+/// A `reinstate` call against an already `Verified` profile is rejected as a
+/// state transition: the stored profile is left exactly as it was and no
+/// event is emitted (#983).
+///
+/// This is the idempotency guard introduced with `revoke` (#606). Without it
+/// a second `reinstate` would re-emit `address_reinstated` and off-chain
+/// indexers would read it as a fresh un-revocation.
+#[test]
+fn test_reinstate_on_verified_profile_leaves_profile_unchanged() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+    client.verify_profile(&admin, &issuer, &true);
+
+    let profile_before = client.get_profile(&issuer);
+    assert!(profile_before.verified());
+    assert!(!profile_before.revoked());
+    let events_before = env.events().all();
+
+    // The no-op path returns before any storage work, so the profile entry's
+    // remaining TTL must not be renewed either. Read the TTL around the
+    // call — `get_profile` above extends it, so it cannot be sampled after
+    // the call.
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+    let ttl_before_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+
+    assert!(client.reinstate(&issuer));
+
+    let ttl_after_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert_eq!(
+        ttl_after_reinstate, ttl_before_reinstate,
+        "a no-op reinstate must not write to the profile entry"
+    );
+
+    // The whole profile record survives the call untouched.
+    let profile_after = client.get_profile(&issuer);
+    assert_profiles_equivalent(&profile_before, &profile_after);
+    assert!(profile_after.verified());
+    assert!(!profile_after.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    // No event at all — in particular no `address_reinstated`.
+    assert_eq!(env.events().all(), events_before);
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
+}
+
+/// Reinstating a `Revoked` profile clears the `revoked` flag and sets
+/// `verified`, and carries every other profile field over untouched (#983).
+///
+/// The cleared `revoked` flag is asserted directly on the profile rather
+/// than through `get_verification_status`: the status view checks `verified`
+/// first, so it reports `Verified` even if the `revoked` flag were still
+/// set. Reading the flag off the profile is the only way to pin it.
+#[test]
+fn test_reinstate_clears_revoked_flag_and_preserves_profile_fields() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    let profile_before = client.get_profile(&issuer);
+    assert!(!profile_before.verified());
+    assert!(profile_before.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    assert!(client.reinstate(&issuer));
+
+    let profile_after = client.get_profile(&issuer);
+    // `verified` is set and the `revoked` flag is cleared.
+    assert!(profile_after.verified());
+    assert!(!profile_after.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    // The transition flips the two flags and nothing else: role, registration
+    // timestamp and metadata are carried over untouched.
+    assert_eq!(profile_after.role(), profile_before.role());
+    assert_eq!(profile_after.registered_at, profile_before.registered_at);
+    assert_eq!(profile_after.metadata, profile_before.metadata);
+}
+
+/// Reinstating a `Revoked` profile extends the profile entry's TTL (#983).
+///
+/// A reinstatement is the moment an administrator brings a profile back
+/// into service, so the entry must be kept alive on the same schedule as
+/// every other write path in the registry.
+#[test]
+fn test_reinstate_extends_profile_ttl() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+
+    // Record the initial remaining TTL, then advance the ledger so the
+    // remaining TTL drops below the write-path threshold. The reinstatement
+    // is then the call that has to renew it.
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_before_reinstate < TTL_THRESHOLD,
+        "TTL should be below threshold before reinstate, got {ttl_before_reinstate}"
+    );
+
+    assert!(client.reinstate(&issuer));
+
+    let ttl_after_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after_reinstate > ttl_before_reinstate,
+        "reinstate should extend TTL: before={ttl_before_reinstate}, after={ttl_after_reinstate}"
+    );
+    assert!(
+        ttl_after_reinstate >= 1_999_000,
+        "TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_reinstate}"
+    );
+}
+
+/// A reinstatement emits exactly one `address_reinstated` event, and a
+/// follow-up call against the now-`Verified` profile emits none (#983).
+///
+/// `address_reinstated` is the only signal an indexer gets for an
+/// un-revocation, so it must be published exactly once per real transition.
+#[test]
+fn test_reinstate_emits_exactly_one_address_reinstated_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    // Revoking does not reinstate anything.
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
+
+    assert!(client.reinstate(&issuer));
+    assert_eq!(count_events_named(&env, "address_reinstated"), 1);
+
+    // The profile is `Verified` now, so the second call takes the no-op path
+    // and must not publish a second event.
+    assert!(client.reinstate(&issuer));
+    assert_eq!(count_events_named(&env, "address_reinstated"), 1);
+}
+
 #[test]
 fn test_update_metadata_self_succeeds() {
     let (env, client) = setup();
