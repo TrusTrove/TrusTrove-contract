@@ -615,29 +615,43 @@ fn test_deposit_rejects_dust_when_zero_shares_after_yield() {
     te.pool.deposit(&lp2, &1);
 }
 
-// A rejected dust deposit must not change pool accounting and must not take the
-// depositor's USDC: the whole transaction reverts. This proves no funds are lost.
+// A rejected dust deposit must not change pool accounting or move either the
+// depositor's USDC or LP shares: the whole transaction reverts.
 #[test]
-fn test_dust_deposit_rejection_preserves_state_and_funds() {
+fn test_zero_share_deposit_rejection_preserves_state_and_balances() {
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
     fund_and_repay_invoice(&te);
 
-    let before = te.pool.get_stats();
     let lp2 = create_lp_with_balance(&te, 10_000_000_000);
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&lp2);
+    let lp_usdc_before = usdc.balance(&lp2);
+    let pool_usdc_before = usdc.balance(&te.pool_id);
 
     // try_* returns Err on contract panic instead of unwinding the test.
     let res = te.pool.try_deposit(&lp2, &1);
-    assert!(res.is_err(), "dust deposit should be rejected");
+    let error = std::format!("{res:?}");
+    assert!(
+        error.contains("#14"),
+        "expected MinimumDeposit for a zero-share deposit: {error}"
+    );
 
-    // Pool deposits/shares are unchanged: the 1 unit was never absorbed.
-    let after = te.pool.get_stats();
-    assert_eq!(after.total_deposits, before.total_deposits);
-    assert_eq!(after.total_shares, before.total_shares);
+    // The failed call leaves aggregate accounting, LP shares, and both sides
+    // of the token transfer exactly as they were.
+    let stats_after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&lp2);
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(position_after.usdc_value, position_before.usdc_value);
+    assert_eq!(position_after.yield_earned, position_before.yield_earned);
+    assert_eq!(position_after.deposit_count, position_before.deposit_count);
+    assert_eq!(usdc.balance(&lp2), lp_usdc_before);
+    assert_eq!(usdc.balance(&te.pool_id), pool_usdc_before);
 
-    // The rejected depositor holds no shares.
-    let pos = te.pool.get_lp_position(&lp2);
-    assert_eq!(pos.shares, 0);
+    assert_eq!(position_after.shares, 0);
 }
 
 // The guard must not over-reject: a small deposit that still mints >= 1 share at
