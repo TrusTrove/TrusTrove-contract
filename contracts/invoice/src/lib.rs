@@ -428,16 +428,14 @@ impl InvoiceContract {
         );
 
         let old_escrow: Option<Address> = env.storage().instance().get(&DataKey::EscrowContract);
+        // Event topics cannot represent an absent address. For the first
+        // assignment, publish the configured address in both address slots.
+        let event_old_escrow = old_escrow.as_ref().unwrap_or(&escrow_contract);
         env.storage()
             .instance()
             .set(&DataKey::EscrowContract, &escrow_contract);
         Self::extend_instance_ttl(&env);
-
-        if let Some(old) = old_escrow {
-            events::escrow_contract_updated(&env, &old, &escrow_contract);
-        } else {
-            events::escrow_contract_updated(&env, &escrow_contract, &escrow_contract);
-        }
+        events::escrow_contract_updated(&env, event_old_escrow, &escrow_contract);
     }
 
     /// Returns the stored escrow contract address, or `None` if not configured.

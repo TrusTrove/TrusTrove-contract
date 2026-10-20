@@ -223,6 +223,11 @@ pub fn supported_asset_removed(env: &Env, asset: &Address) {
     );
 }
 
+/// Emitted after a successful `set_escrow_contract` update.
+///
+/// Topics are `(escrow_contract_updated, old_escrow, new_escrow)` and the
+/// payload is `()`. On the initial assignment, `old_escrow` is the same as
+/// `new_escrow` because event topics cannot encode the absent prior address.
 pub fn escrow_contract_updated(env: &Env, old: &Address, new: &Address) {
     env.events().publish(
         (

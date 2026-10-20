@@ -3141,3 +3141,217 @@ fn test_upgrade_before_initialize_panics() {
     let (env, client) = setup();
     client.upgrade(&BytesN::from_array(&env, &[0; 32]));
 }
+
+// ============== ISSUES #986, #987, #989, #991: REGISTRY INVARIANTS ==============
+
+/// Data payloads of every `profile_verified` event emitted for `address`, in
+/// emission order.
+fn profile_verified_payloads(env: &Env, address: &Address) -> std::vec::Vec<bool> {
+    let mut out = std::vec::Vec::new();
+    for event in env.events().all().iter() {
+        let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if topics.len() != 2 {
+            continue;
+        }
+        let name: Symbol = match topics.get(0).unwrap().try_into_val(env) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let who: Address = match topics.get(1).unwrap().try_into_val(env) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if name == Symbol::new(env, "profile_verified") && who == *address {
+            out.push(event.2.clone().try_into_val(env).expect("bool payload"));
+        }
+    }
+    out
+}
+
+// #986: verify_profile maintains BOTH flags in each direction.
+#[test]
+fn test_verify_profile_maintains_verified_and_revoked_flags() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    // Pending: neither flag set.
+    let pending = client.get_profile(&issuer);
+    assert!(!pending.verified());
+    assert!(!pending.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    // verify=true -> Verified, revoked cleared.
+    client.verify_profile(&admin, &issuer, &true);
+    let verified = client.get_profile(&issuer);
+    assert!(verified.verified());
+    assert!(!verified.revoked());
+    assert_eq!(verified.role(), Role::Issuer);
+    assert_eq!(verified.packed_flags, 0b010); // Issuer | verified
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+    assert_eq!(profile_verified_payloads(&env, &issuer), [true]);
+
+    // verify=false -> Revoked, verified cleared.
+    client.verify_profile(&admin, &issuer, &false);
+    let revoked = client.get_profile(&issuer);
+    assert!(!revoked.verified());
+    assert!(revoked.revoked());
+    assert_eq!(revoked.role(), Role::Issuer);
+    assert_eq!(revoked.packed_flags, 0b100); // Issuer | revoked
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(profile_verified_payloads(&env, &issuer), [true, false]);
+}
+
+// #987: repeated verify_profile calls are INTENTIONAL AUDIT EVENTS, not
+// idempotent no-ops. Storage ends in the same state; every call emits a
+// `profile_verified` event carrying the requested value, so an indexer can
+// count administrative decisions rather than only state changes.
+#[test]
+fn test_verify_profile_repeated_call_is_an_audit_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    client.verify_profile(&admin, &issuer, &true);
+    let after_first = client.get_profile(&issuer);
+    assert!(client.verify_profile(&admin, &issuer, &true));
+    let after_second = client.get_profile(&issuer);
+
+    // Storage: unchanged by the repeat.
+    assert_eq!(after_first.packed_flags, after_second.packed_flags);
+    assert_eq!(after_first.registered_at, after_second.registered_at);
+    assert_eq!(after_first.metadata, after_second.metadata);
+    // Events: one per call, not de-duplicated.
+    assert_eq!(profile_verified_payloads(&env, &issuer), [true, true]);
+
+    // Same rule in the un-verify direction.
+    client.verify_profile(&admin, &issuer, &false);
+    let revoked_first = client.get_profile(&issuer);
+    client.verify_profile(&admin, &issuer, &false);
+    assert_eq!(
+        client.get_profile(&issuer).packed_flags,
+        revoked_first.packed_flags
+    );
+    assert_eq!(
+        profile_verified_payloads(&env, &issuer),
+        [true, true, false, false]
+    );
+}
+
+// #989: a batch mixing an already-stored address, an in-batch duplicate and a
+// unique address is accounted for deterministically.
+#[test]
+fn test_batch_register_issuers_duplicate_accounting_and_event_counts() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let existing = Address::generate(&env);
+    let repeated = Address::generate(&env);
+    let unique = Address::generate(&env);
+    client.register_issuer(&existing, &map![&env]);
+    assert_eq!(client.get_profile_count(&Role::Issuer), 1);
+
+    let entries = vec![
+        &env,
+        (existing.clone(), map![&env]),
+        (repeated.clone(), map![&env]),
+        (repeated.clone(), map![&env]),
+        (unique.clone(), map![&env]),
+    ];
+    let skipped = client.batch_register_issuers(&entries);
+
+    // The stored address is skipped first; the repeated address registers on
+    // its first occurrence and is skipped on its second, so order follows the
+    // input order.
+    assert_eq!(skipped, vec![&env, existing.clone(), repeated.clone()]);
+    assert_batch_event_counts(&env, 2, 2);
+    assert_eq!(client.get_profile_count(&Role::Issuer), 3);
+    assert_eq!(
+        client.list_profiles(&Role::Issuer, &0, &10),
+        vec![&env, existing, repeated, unique]
+    );
+}
+
+// #991: update_profile replaces metadata only; every packed flag and
+// registered_at survive, for differing roles and verification states.
+#[test]
+fn test_update_profile_preserves_role_flags_and_registered_at() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let old_meta = |env: &Env| {
+        map![
+            env,
+            (
+                String::from_str(env, "name"),
+                String::from_str(env, "before")
+            )
+        ]
+    };
+    let new_meta = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "after")
+        ),
+        (
+            String::from_str(&env, "site"),
+            String::from_str(&env, "example.com")
+        )
+    ];
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &old_meta(&env));
+    client.verify_profile(&admin, &issuer, &true); // Issuer, Verified
+
+    env.ledger().with_mut(|l| l.timestamp = 2_000);
+    let buyer = Address::generate(&env);
+    client.register_buyer(&buyer, &old_meta(&env)); // Buyer, Pending
+
+    env.ledger().with_mut(|l| l.timestamp = 3_000);
+    let revoked_buyer = Address::generate(&env);
+    client.register_buyer(&revoked_buyer, &old_meta(&env));
+    client.verify_profile(&admin, &revoked_buyer, &false); // Buyer, Revoked
+
+    for who in [&issuer, &buyer, &revoked_buyer] {
+        let before = client.get_profile(who);
+        let role_before = client.get_role(who);
+        let status_before = client.get_verification_status(who);
+
+        assert!(client.update_profile(who, &new_meta));
+
+        let after = client.get_profile(who);
+        assert_eq!(after.metadata, new_meta);
+        assert_ne!(after.metadata, before.metadata);
+        assert_eq!(after.packed_flags, before.packed_flags);
+        assert_eq!(after.role(), before.role());
+        assert_eq!(after.verified(), before.verified());
+        assert_eq!(after.revoked(), before.revoked());
+        assert_eq!(after.registered_at, before.registered_at);
+        assert_eq!(client.get_role(who), role_before);
+        assert_eq!(client.get_verification_status(who), status_before);
+    }
+
+    assert_eq!(client.get_profile(&issuer).registered_at, 1_000);
+    assert_eq!(client.get_profile(&buyer).registered_at, 2_000);
+    assert_eq!(client.get_profile(&revoked_buyer).registered_at, 3_000);
+}

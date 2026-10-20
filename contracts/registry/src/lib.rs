@@ -863,6 +863,13 @@ impl RegistryContract {
     /// * `verify` - `true` to verify (also clears the revoked flag), `false`
     ///   to un-verify (also marks the profile revoked).
     ///
+    /// # Repeated calls
+    /// Calling with the value the profile already holds is NOT an idempotent
+    /// no-op: storage is rewritten to the same state and a `profile_verified`
+    /// event is emitted on every call. Each call is an intentional audit
+    /// event, so indexers can count administrative decisions and must not
+    /// treat the event stream as a list of state changes (#987).
+    ///
     /// # Auth
     /// * Requires `caller.require_auth()`, where `caller` is the admin or the
     ///   verifier (#732). This lets day-to-day KYC decisions be delegated to an
