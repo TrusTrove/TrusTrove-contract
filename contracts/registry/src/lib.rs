@@ -426,6 +426,14 @@ impl RegistryContract {
     /// the same threshold and target duration as the write path, and returns
     /// the stored value.
     ///
+    /// Note: the returned `Profile` encodes `role`/`verified`/`revoked` in a
+    /// single internal `packed_flags` bitmask. That bit layout is a private
+    /// implementation detail, not a stable external contract (#609). Clients
+    /// that only have RPC access should read the decoded views
+    /// [`get_role`](Self::get_role), [`is_verified`](Self::is_verified) and
+    /// [`get_verification_status`](Self::get_verification_status) instead of
+    /// reverse-engineering `packed_flags`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `address` - The address of the profile to retrieve.
@@ -505,6 +513,53 @@ impl RegistryContract {
             Some(p) if p.verified() => VerificationStatus::Verified,
             Some(p) if p.revoked() => VerificationStatus::Revoked,
             Some(_) => VerificationStatus::Pending,
+        }
+    }
+
+    /// Returns the decoded [`Role`] of a registered address, if any.
+    ///
+    /// Lightweight decoded accessor that sits alongside
+    /// [`is_verified`](Self::is_verified) and
+    /// [`get_verification_status`](Self::get_verification_status) (#609).
+    /// [`get_profile`](Self::get_profile) returns the raw `Profile` struct,
+    /// whose `role`/`verified`/`revoked` state is stored as an internal
+    /// `packed_flags` bitmask; this view decodes the role on-chain so
+    /// off-chain consumers (indexers, explorers, RPC clients) never have to
+    /// reverse-engineer that private layout to learn whether an address is
+    /// an `Issuer` or a `Buyer`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The address to look up.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * Does not panic — unregistered addresses are reported as `None`,
+    ///   mirroring how `get_verification_status` reports `Unregistered`.
+    ///
+    /// # Returns
+    /// * `Option<Role>` - `Some(role)` when a profile is stored for
+    ///   `address`, `None` otherwise. When the entry exists, its TTL is
+    ///   extended using the same threshold and target duration as the write
+    ///   path.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let role = client.get_role(&issuer); // Some(Role::Issuer)
+    /// ```
+    pub fn get_role(env: Env, address: Address) -> Option<Role> {
+        let key = DataKey::Profile(address);
+        match env.storage().persistent().get::<_, Profile>(&key) {
+            Some(profile) => {
+                let role = profile.role();
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some(role)
+            }
+            None => None,
         }
     }
 
@@ -687,6 +742,16 @@ impl RegistryContract {
     /// `address_reinstated` event so integrators can distinguish
     /// reinstatement from a generic verification toggle.
     ///
+    /// Like `revoke`, it is guarded by an idempotency check (#606): it only
+    /// operates on profiles whose `revoked` flag is set. Calling it on a
+    /// profile that was never revoked — a `Pending` profile or one that is
+    /// already `Verified` — is a no-op that returns `true` without writing
+    /// storage or emitting `address_reinstated`. This keeps `reinstate` from
+    /// being used as an undocumented alternate path to verify a `Pending`
+    /// profile (use `verify_profile` for that), and keeps the
+    /// `address_reinstated` event honest for off-chain indexers: it is only
+    /// ever emitted for an actual un-revocation.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `address` - The registered address whose verification should be
@@ -702,7 +767,9 @@ impl RegistryContract {
     /// * `RegistryError::NotFound` if no profile is stored for `address`.
     ///
     /// # Returns
-    /// * `bool` - `true` when the profile is successfully reinstated.
+    /// * `bool` - `true` when the profile is verified or the call required no
+    ///   action: a successful reinstatement, an already-verified profile, or
+    ///   a never-revoked (`Pending`) profile left untouched.
     ///
     /// # Example
     /// ```ignore
@@ -718,6 +785,9 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        if !profile.revoked() {
+            return true;
+        }
         profile.set_verified(true);
         profile.set_revoked(false);
         env.storage().persistent().set(&key, &profile);
@@ -739,6 +809,13 @@ impl RegistryContract {
     /// * `address` - The registered address whose verification changes.
     /// * `verify` - `true` to verify (also clears the revoked flag), `false`
     ///   to un-verify (also marks the profile revoked).
+    ///
+    /// # Repeated calls
+    /// Calling with the value the profile already holds is NOT an idempotent
+    /// no-op: storage is rewritten to the same state and a `profile_verified`
+    /// event is emitted on every call. Each call is an intentional audit
+    /// event, so indexers can count administrative decisions and must not
+    /// treat the event stream as a list of state changes (#987).
     ///
     /// # Auth
     /// * Requires `caller.require_auth()`, where `caller` is the admin or the
@@ -912,7 +989,8 @@ impl RegistryContract {
     /// While paused every state-changing entry point (registration, profile
     /// updates, revocation/reinstatement, verification, batch operations and
     /// admin transfers) reverts with `ContractPaused`, while read-only views
-    /// (`get_profile`, `is_verified`, `get_verification_status`, `get_admin`)
+    /// (`get_profile`, `is_verified`, `get_verification_status`, `get_role`,
+    /// `get_admin`)
     /// stay callable. Only the stored admin may pause, and [`Self::unpause`] is
     /// intentionally never guarded so a paused registry can always be
     /// resumed. Emits `paused`.

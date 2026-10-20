@@ -163,7 +163,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 
 ### escrow_contract
 
-Holds USDC between pool funding and issuer payout. Only callable by `pool_contract`.
+Mediates USDC between the pool, issuer, and buyer. `pool.fund_invoice` locks the funded amount here and immediately releases it to the issuer in the same call (issue #819); repayment settles through `release_to_pool`, which consumes either a live lock or the issuer-release marker. Only callable by `pool_contract`.
 
 ```
 lock(invoice_id, amount) → bool
@@ -265,26 +265,27 @@ Before listing, an Underwrite agent must sign an `AttestationPayload` (containin
 No fund movement. Invoice status: Created → Listed.
 ```
 
-#### Step 3 — Fund Invoice (Pool → Escrow)
-Anyone can call `pool.fund_invoice(invoice_id)`. The pool computes the funded amount, locks it in escrow, and marks the invoice as funded.
+#### Step 3 — Fund Invoice (Pool → Escrow → Issuer)
+Anyone can call `pool.fund_invoice(invoice_id)`. The pool computes the funded amount, locks it in escrow, marks the invoice as funded, and releases the principal to the issuer — all inside this single call (issue #819, restoring #56).
 
 ```
 funded_amount = face_value × (10000 − discount_bps) / 10000
 
 Pool ──[funded_amount USDC]──► Escrow  (locked per invoice_id)
+Escrow ──[funded_amount USDC]──► Issuer (released in the same call)
 Invoice status: Listed → Funded
 ```
 
 The pool retains `face_value − funded_amount` (the discount) as accrued yield, collectible when the buyer repays.
 
-#### Step 4 — Release to Issuer (Escrow → Issuer) ⚠️ Known Gap
-The pool contract is expected to call `escrow.release_to_issuer(invoice_id, issuer)` so that the locked USDC reaches the issuer who can then ship goods.
+#### Step 4 — Release to Issuer (part of Step 3)
+The payout is not a separate step anymore: `fund_invoice` calls `escrow.release_to_issuer(invoice_id, issuer)` immediately after `lock`, so the issuer holds the USDC in the same transaction and can ship goods.
 
 ```
 Escrow ──[funded_amount USDC]──► Issuer
 ```
 
-**⚠️ This call is not yet wired into `fund_invoice` (see [Issue #56](https://github.com/TrusTrove/TrusTrove-contract/issues/56)).** In the current deployment, issuers do not automatically receive USDC after an invoice is funded. This is the highest-priority gap before mainnet.
+The earlier gap (issue #56) was fixed in 5f6dc7c, silently regressed by a later refactor, and re-wired by [#819](https://github.com/TrusTrove/TrusTrove-contract/issues/819). Because the escrow `Locked` record is consumed at funding, escrow keeps a durable `IssuerReleased(invoice_id)` marker instead: `release_to_pool` accepts that marker so repayment still settles (each marker or lock is consumed exactly once), and `escrow.handle_default` reports `false` for already-funded invoices — see Step 7 for how the pool books that.
 
 #### Step 5 — Ship & Confirm (no funds move)
 The issuer calls `mark_shipped`. Then **both** the issuer and the buyer must independently call `confirm_delivery`. Only when both confirmations are recorded does the invoice advance to `Confirmed`.
@@ -308,18 +309,21 @@ Invoice status: Confirmed → Repaid
 
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
 
-Repayment does **not** flow through escrow. The escrow contract is only involved in funding (Step 3), the missing issuer release (Step 4), and default recovery (Step 7).
+Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
-#### Step 7 — Default (Escrow → Pool)
-If the invoice passes its `due_date` without reaching `Repaid`, any caller triggers `invoice.trigger_default`. The invoice contract calls `pool.handle_default`, which in turn calls `escrow.handle_default` — returning the still-locked `funded_amount` to the pool.
+#### Step 7 — Default
+If the invoice passes its `due_date` without reaching `Repaid`, any caller triggers `invoice.trigger_default`. The invoice contract calls `pool.handle_default`, which calls `escrow.handle_default`. For a normally funded invoice the principal was already paid to the issuer at funding (Step 3), so escrow has nothing to hand back; the pool verifies the `IssuerReleased` marker via `escrow.was_released_to_issuer` and books the unrecoverable principal as a real LP capital loss. If escrow *can* still return a live lock (out-of-band funding), the legacy path runs and deposits are preserved. A `false` from escrow with no marker means the release was skipped and reverts with `EscrowDefaultNotReleased` (#21).
 
 ```
 invoice.trigger_default()
   └─► pool.handle_default()
-        └─► escrow.handle_default()
-              └─► Escrow ──[funded_amount USDC]──► Pool
+        ├─► escrow.handle_default()      → false for funded invoices (already paid out)
+        ├─► escrow.was_released_to_issuer → true (marker present, #819)
+        └─► invoice.mark_defaulted()
 Invoice status: → Defaulted
-  TotalFunded -= funded_amount  (liquidity freed)
+  TotalFunded -= funded_amount
+  TotalLossRealised += funded_amount
+  TotalDeposits -= funded_amount   (LP capital loss; shares are never burned)
 ```
 
 ### Summary Table
@@ -328,10 +332,9 @@ Invoice status: → Defaulted
 |---|---|---|---|---|
 | LP deposit | LP wallet | Pool | `usdc_amount` | No |
 | LP withdraw | Pool | LP wallet | `shares × price` | No |
-| Fund invoice | Pool | Escrow | `face_value × (1 − discount)` | Yes — locks |
-| Release to issuer *(gap)* | Escrow | Issuer | `funded_amount` | Yes — releases |
-| Repay | Buyer wallet | Pool | `face_value` | No |
-| Default recovery | Escrow | Pool | `funded_amount` | Yes — releases |
+| Fund invoice | Pool → Escrow → Issuer | Issuer | `face_value × (1 − discount)` | Yes — locks then releases in one call |
+| Repay | Buyer wallet → Escrow → Pool | Pool | `face_value` | Yes — `release_to_pool` settles |
+| Default | Pool books LP loss *(principal already with issuer)* | Pool | `funded_amount` written off | Only if escrow still holds a live lock; otherwise marker-verified write-off (#819) |
 
 ### Security Invariants
 

@@ -497,6 +497,23 @@ Emitted when the admin disengages the emergency circuit breaker.
 **Contract:** `escrow_contract`  
 **Source:** `contracts/escrow/src/events.rs`
 
+### `contract_initialized`
+
+Emitted when the escrow contract is initialized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"contract_initialized"` |
+| `topic[1]` | `Address` | Admin address |
+| `topic[2]` | `Address` | Pool contract address |
+| `topic[3]` | `Address` | USDC asset address |
+| **Data** | `()` | None |
+
+**Emitted by:** `initialize()` in `contracts/escrow/src/lib.rs:49`
+
+---
+
 ### `funds_locked`
 
 Emitted when funds are locked in escrow for an invoice.

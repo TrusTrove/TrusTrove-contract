@@ -16,6 +16,13 @@ pub enum VerificationStatus {
     Revoked,
 }
 
+/// Registered profile, storage-packed via the optimization introduced in #142.
+///
+/// `role`, `verified` and `revoked` are encoded in `packed_flags`. The bit
+/// layout is an internal implementation detail and is NOT a stable external
+/// contract; it may change without a corresponding change to this doc.
+/// Off-chain consumers must not decode it directly — use the decoded contract
+/// views `get_role`, `is_verified` and `get_verification_status` (#609).
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct Profile {

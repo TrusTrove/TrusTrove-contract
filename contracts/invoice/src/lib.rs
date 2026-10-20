@@ -428,16 +428,14 @@ impl InvoiceContract {
         );
 
         let old_escrow: Option<Address> = env.storage().instance().get(&DataKey::EscrowContract);
+        // Event topics cannot represent an absent address. For the first
+        // assignment, publish the configured address in both address slots.
+        let event_old_escrow = old_escrow.as_ref().unwrap_or(&escrow_contract);
         env.storage()
             .instance()
             .set(&DataKey::EscrowContract, &escrow_contract);
         Self::extend_instance_ttl(&env);
-
-        if let Some(old) = old_escrow {
-            events::escrow_contract_updated(&env, &old, &escrow_contract);
-        } else {
-            events::escrow_contract_updated(&env, &escrow_contract, &escrow_contract);
-        }
+        events::escrow_contract_updated(&env, event_old_escrow, &escrow_contract);
     }
 
     /// Returns the stored escrow contract address, or `None` if not configured.
@@ -1553,6 +1551,12 @@ impl InvoiceContract {
     /// repayment accounting is updated, the invoice transitions to `Repaid`,
     /// and `invoice_repaid` is emitted.
     ///
+    /// Yield accrues linearly from `funded_at` to `due_date`, capped at the
+    /// full discount (`face_value - funded_amount`). At or after maturity
+    /// (including a zero-length term), the pool earns exactly that discount
+    /// and the buyer receives no refund; late repayment adds no extra yield.
+    /// Before maturity, the unearned discount is refunded to the buyer.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice being repaid.
@@ -1654,7 +1658,9 @@ impl InvoiceContract {
             let discount = face_value.saturating_sub(funded_amount);
             let term = invoice.due_date.saturating_sub(funded_at);
             let elapsed = now.saturating_sub(funded_at);
-            let earned_by_pool = if term == 0 {
+            // Stop accrual at maturity before multiplying: late repayment
+            // cannot earn more than the discount or overflow on elapsed time.
+            let earned_by_pool = if term == 0 || elapsed >= term {
                 discount
             } else {
                 discount
@@ -1662,7 +1668,7 @@ impl InvoiceContract {
                     .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow))
                     / (term as u128)
             };
-            let refund_to_buyer = discount.saturating_sub(earned_by_pool);
+            let refund_to_buyer = discount - earned_by_pool;
 
             // Step 2: escrow releases full face_value back to pool
             let mut escrow_args = Vec::new(&env);
@@ -1710,6 +1716,8 @@ impl InvoiceContract {
     /// delegating to [`Self::repay_partial`] with the invoice's full
     /// `remaining_balance`. An invoice that already received partial
     /// repayments therefore only pulls the remainder from the buyer.
+    /// Yield is capped at the full discount at `due_date`, as documented in
+    /// [`Self::repay_partial`]; later settlement does not increase it.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -2472,19 +2480,24 @@ impl InvoiceContract {
         page: u32,
         page_size: u32,
     ) -> Vec<Invoice> {
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StatusIndexCount(status as u32))
-            .unwrap_or(0);
+        let count_key = DataKey::StatusIndexCount(status as u32);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        // Issue #832: re-bump the count key on every read so it cannot outlive
+        // the entries it bounds (or be archived itself) between pushes.
+        bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in start..end {
+            let entry_key = DataKey::StatusIndexEntry(status as u32, i);
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::StatusIndexEntry(status as u32, i))
+                .get(&entry_key)
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            // Issue #832: index entries were only TTL-extended at write time,
+            // so entries older than TTL_EXTEND_TO could be archived while the
+            // count stayed alive and this read would hit a missing entry.
+            bump_persistent(&env, &entry_key);
             ids.push_back(id);
         }
         let invoices = hydrate_ids(&env, ids);
@@ -2527,19 +2540,20 @@ impl InvoiceContract {
     /// let invoices = client.get_by_issuer(&issuer, 0, 20);
     /// ```
     pub fn get_by_issuer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::IssuerIndexCount(address.clone()))
-            .unwrap_or(0);
+        let count_key = DataKey::IssuerIndexCount(address.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in start..end {
+            let entry_key = DataKey::IssuerIndexEntry(address.clone(), i);
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::IssuerIndexEntry(address.clone(), i))
+                .get(&entry_key)
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            // Issue #832: read-time TTL bump, see `get_by_status`.
+            bump_persistent(&env, &entry_key);
             ids.push_back(id);
         }
         hydrate_ids(&env, ids)
@@ -2572,19 +2586,20 @@ impl InvoiceContract {
     /// let invoices = client.get_by_buyer(&buyer, 0, 20);
     /// ```
     pub fn get_by_buyer(env: Env, address: Address, page: u32, page_size: u32) -> Vec<Invoice> {
-        let count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::BuyerIndexCount(address.clone()))
-            .unwrap_or(0);
+        let count_key = DataKey::BuyerIndexCount(address.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        bump_persistent(&env, &count_key);
         let (start, end) = page_range(&env, count, page, page_size);
         let mut ids: Vec<BytesN<32>> = Vec::new(&env);
         for i in start..end {
+            let entry_key = DataKey::BuyerIndexEntry(address.clone(), i);
             let id: BytesN<32> = env
                 .storage()
                 .persistent()
-                .get(&DataKey::BuyerIndexEntry(address.clone(), i))
+                .get(&entry_key)
                 .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            // Issue #832: read-time TTL bump, see `get_by_status`.
+            bump_persistent(&env, &entry_key);
             ids.push_back(id);
         }
         hydrate_ids(&env, ids)
@@ -2903,6 +2918,10 @@ fn require_verified(env: &Env, registry_id: &Address, addr: &Address, err: Invoi
 
 /// Adds an invoice ID to the issuer's index if not already present.
 ///
+/// Duplicate detection uses the O(1) [`DataKey::IssuerMembership`] marker
+/// instead of scanning every `IssuerIndexEntry` row of this issuer
+/// (issue #831).
+///
 /// # Arguments
 /// * `env` - The Soroban environment.
 /// * `issuer` - The issuer address.
@@ -2914,21 +2933,20 @@ fn require_verified(env: &Env, registry_id: &Address, addr: &Address, err: Invoi
 /// # Returns
 /// * `()` - No value is returned.
 fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
+    // O(1) membership check — the previous implementation looped over every
+    // `IssuerIndexEntry` of this issuer to find duplicates (issue #831).
+    let marker_key = DataKey::IssuerMembership(issuer.clone(), project_short_id(invoice_id));
+    if env
+        .storage()
+        .persistent()
+        .get::<_, bool>(&marker_key)
+        .unwrap_or(false)
+    {
+        return; // Already exists, skip duplicate
+    }
+
     let count_key = DataKey::IssuerIndexCount(issuer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Check if invoice_id already exists in this issuer index
-    for i in 0..count {
-        let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), i);
-        let existing_id: BytesN<32> = env
-            .storage()
-            .persistent()
-            .get(&entry_key)
-            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
-        if existing_id == *invoice_id {
-            return; // Already exists, skip duplicate
-        }
-    }
 
     let entry_key = DataKey::IssuerIndexEntry(issuer.clone(), count);
     env.storage().persistent().set(&entry_key, invoice_id);
@@ -2939,9 +2957,17 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
     env.storage()
         .persistent()
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    env.storage().persistent().set(&marker_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&marker_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 /// Adds an invoice ID to the buyer's index if not already present.
+///
+/// Duplicate detection uses the O(1) [`DataKey::BuyerMembership`] marker
+/// instead of scanning every `BuyerIndexEntry` row of this buyer
+/// (issue #831).
 ///
 /// # Arguments
 /// * `env` - The Soroban environment.
@@ -2954,21 +2980,20 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
 /// # Returns
 /// * `()` - No value is returned.
 fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
+    // O(1) membership check — the previous implementation looped over every
+    // `BuyerIndexEntry` of this buyer to find duplicates (issue #831).
+    let marker_key = DataKey::BuyerMembership(buyer.clone(), project_short_id(invoice_id));
+    if env
+        .storage()
+        .persistent()
+        .get::<_, bool>(&marker_key)
+        .unwrap_or(false)
+    {
+        return; // Already exists, skip duplicate
+    }
+
     let count_key = DataKey::BuyerIndexCount(buyer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Check if invoice_id already exists in this buyer index
-    for i in 0..count {
-        let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), i);
-        let existing_id: BytesN<32> = env
-            .storage()
-            .persistent()
-            .get(&entry_key)
-            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
-        if existing_id == *invoice_id {
-            return; // Already exists, skip duplicate
-        }
-    }
 
     let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), count);
     env.storage().persistent().set(&entry_key, invoice_id);
@@ -2979,6 +3004,10 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     env.storage()
         .persistent()
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    env.storage().persistent().set(&marker_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&marker_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 /// Adds an invoice ID to the status index if not already present.
@@ -3018,7 +3047,9 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
     env.storage()
         .persistent()
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
-    write_status_membership(env, status, invoice_id);
+    // The marker records the position the entry was appended at, so a later
+    // removal finds it in O(1) instead of scanning the array (issue #831).
+    write_status_membership(env, status, invoice_id, count);
 }
 
 /// Moves an invoice ID from one status index to another, with idempotency for replayed transitions.
@@ -3026,9 +3057,10 @@ fn extend_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>
 /// Both sides of the move are driven by the O(1) [`DataKey::StatusMembership`]
 /// marker: the target status is checked with a single storage read (the
 /// previous implementation scanned every `StatusIndexEntry` row of the target
-/// status), the marker for `from` is removed, and `extend_status_index` writes
-/// the marker for `to`. A replayed transition therefore returns early without
-/// modifying counts or indexes.
+/// status), `remove_from_status_index` finds the source row through the
+/// marker's stored position instead of scanning the array, and
+/// `extend_status_index` writes the marker for `to`. A replayed transition
+/// therefore returns early without modifying counts or indexes.
 ///
 /// # Arguments
 /// * `env` - The Soroban environment.
@@ -3050,7 +3082,8 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
 
     decrement_status_count(env, from);
     increment_status_count(env, to);
-    clear_status_membership(env, from, invoice_id);
+    // Also clears the `from` membership marker; a legacy invoice without a
+    // marker is a silent no-op, matching the pre-marker behavior.
     remove_from_status_index(env, from, invoice_id);
     extend_status_index(env, to, invoice_id);
 }
@@ -3060,37 +3093,37 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
 /// the last entry in the array, and the now-trailing key is deleted from
 /// storage. `StatusIndexCount` is decremented accordingly.
 ///
+/// The position of the row to remove is read from the invoice's
+/// [`DataKey::StatusMembership`] marker in O(1) — the previous implementation
+/// scanned every `StatusIndexEntry` row of the status to find it (issue #831)
+/// — and the marker of the entry swapped into that row is updated to its new
+/// position. The removed invoice's own marker is cleared as part of the
+/// removal.
+///
 /// This prevents the storage leak previously caused by `move_status_index`
 /// only clearing the membership marker and `StatusCount` without touching
 /// the underlying index array (issue #435).
 ///
-/// If `invoice_id` is not found in the index (e.g. legacy data written
-/// before compaction was added), the function is a silent no-op so that
-/// existing transitions don't panic.
+/// If `invoice_id` has no membership marker (e.g. legacy rows written
+/// before markers existed), the function is a silent no-op so that existing
+/// transitions don't panic.
 fn remove_from_status_index(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
     let status_u32 = status as u32;
+    let marker_key = status_membership_key(status, invoice_id);
+
+    // O(1) position lookup. No marker -> nothing to compact (legacy row).
+    let Some(i) = env.storage().persistent().get::<_, u32>(&marker_key) else {
+        return;
+    };
+
     let count_key = DataKey::StatusIndexCount(status_u32);
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
-
-    // Find the position of the invoice in the index.
-    let mut pos: Option<u32> = None;
-    for i in 0..count {
-        let entry_id: BytesN<32> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::StatusIndexEntry(status_u32, i))
-            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
-        if entry_id == *invoice_id {
-            pos = Some(i);
-            break;
-        }
+    if i >= count {
+        // Marker pointing past the end of the array — inconsistent legacy
+        // state; clear it and leave the index untouched.
+        env.storage().persistent().remove(&marker_key);
+        return;
     }
-
-    let i = match pos {
-        Some(i) => i,
-        // Invoice not found in the index — nothing to compact.
-        None => return,
-    };
 
     let last = count - 1;
     if i != last {
@@ -3105,6 +3138,14 @@ fn remove_from_status_index(env: &Env, status: InvoiceStatus, invoice_id: &Bytes
         env.storage()
             .persistent()
             .extend_ttl(&swap_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        // The swapped entry's marker must follow it into row `i`. (If two
+        // invoice IDs share the same 8-byte prefix their markers alias —
+        // the projection limitation documented in `status_membership_key`.)
+        let moved_key = status_membership_key(status, &last_id);
+        env.storage().persistent().set(&moved_key, &i);
+        env.storage()
+            .persistent()
+            .extend_ttl(&moved_key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
     // Remove the trailing entry and update the count.
@@ -3115,54 +3156,71 @@ fn remove_from_status_index(env: &Env, status: InvoiceStatus, invoice_id: &Bytes
     env.storage()
         .persistent()
         .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    // The invoice leaves this status: drop its membership marker.
+    env.storage().persistent().remove(&marker_key);
+}
+
+/// Projects the 32-byte invoice ID onto its first 8 bytes (big-endian) for
+/// use as the numeric component of a membership marker key.
+///
+/// The projection is pure and depends only on `invoice_id`, which lets every
+/// index helper derive its marker key directly from the invoice ID — no
+/// extra lookup required. Two IDs sharing an 8-byte prefix would alias;
+/// invoice IDs are SHA-256 outputs, so within any realistic deployment the
+/// collision probability is negligible.
+fn project_short_id(invoice_id: &BytesN<32>) -> u64 {
+    let id_bytes = invoice_id.to_array();
+    let mut short_id = [0u8; 8];
+    short_id.copy_from_slice(&id_bytes[..8]);
+    u64::from_be_bytes(short_id)
 }
 
 /// Storage key for a status-membership marker.
 ///
 /// `DataKey::StatusMembership` is declared as `(InvoiceStatus, u64)`, so the
-/// 32-byte invoice ID is projected onto its first 8 bytes (big-endian). The
-/// projection is pure and depends only on `invoice_id`, which lets every status
-/// transition derive the marker key directly — no extra lookup required.
+/// 32-byte invoice ID is projected onto its first 8 bytes (big-endian) via
+/// [`project_short_id`].
 fn status_membership_key(status: InvoiceStatus, invoice_id: &BytesN<32>) -> DataKey {
-    let id_bytes = invoice_id.to_array();
-    let mut short_id = [0u8; 8];
-    short_id.copy_from_slice(&id_bytes[..8]);
-    DataKey::StatusMembership(status, u64::from_be_bytes(short_id))
+    DataKey::StatusMembership(status, project_short_id(invoice_id))
 }
 
 /// O(1) membership probe: one persistent-storage read, independent of how many
-/// invoices share `status`.
+/// invoices share `status`. The marker's value is the invoice's row position
+/// in the `StatusIndexEntry` array; presence alone is what membership means
+/// here.
 fn read_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) -> bool {
     env.storage()
         .persistent()
-        .get::<_, bool>(&status_membership_key(status, invoice_id))
-        .unwrap_or(false)
+        .get::<_, u32>(&status_membership_key(status, invoice_id))
+        .is_some()
 }
 
-/// Marks `invoice_id` as a member of `status`, extending the entry's TTL with
-/// the same threshold/extension policy as the rest of invoice storage.
-fn write_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
+/// Marks `invoice_id` as a member of `status` at row `position` of the status
+/// index, extending the entry's TTL with the same threshold/extension policy
+/// as the rest of invoice storage.
+fn write_status_membership(
+    env: &Env,
+    status: InvoiceStatus,
+    invoice_id: &BytesN<32>,
+    position: u32,
+) {
     let key = status_membership_key(status, invoice_id);
-    env.storage().persistent().set(&key, &true);
+    env.storage().persistent().set(&key, &position);
     env.storage()
         .persistent()
         .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-}
-
-/// Removes the membership marker when an invoice leaves `status`.
-///
-/// Removing a marker that is already absent (e.g. legacy rows written before
-/// markers existed) is a silent no-op.
-fn clear_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<32>) {
-    env.storage()
-        .persistent()
-        .remove(&status_membership_key(status, invoice_id));
 }
 
 fn increment_status_count(env: &Env, status: InvoiceStatus) {
     let key = DataKey::StatusCount(status as u32);
     let current: u64 = env.storage().persistent().get(&key).unwrap_or(0u64);
     env.storage().persistent().set(&key, &(current + 1));
+    // Issue #830: bump the counter with the same TTL policy as every other
+    // persistent invoice entry, otherwise it archives and every later
+    // `create` / transition that touches it fails.
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 fn decrement_status_count(env: &Env, status: InvoiceStatus) {
@@ -3172,6 +3230,11 @@ fn decrement_status_count(env: &Env, status: InvoiceStatus) {
         .checked_sub(1)
         .unwrap_or_else(|| panic_with_error!(env, InvoiceError::InvalidStatusTransition));
     env.storage().persistent().set(&key, &next);
+    // Issue #830: see `increment_status_count` — the counter must stay live
+    // for `read_status_count`/`get_counts` and for later transitions.
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {
@@ -3206,17 +3269,40 @@ fn page_range(env: &Env, count: u32, page: u32, page_size: u32) -> (u32, u32) {
     (start, end)
 }
 
+/// Re-bumps the TTL of a persistent-storage entry that has just been read,
+/// using the shared `TTL_THRESHOLD`/`TTL_EXTEND_TO` policy.
+///
+/// Secondary index entries (`IssuerIndexEntry`, `BuyerIndexEntry`,
+/// `StatusIndexEntry`), their `*IndexCount` keys and `Invoice` records of
+/// terminal invoices were previously only extended at write time. Reads
+/// through `get_by_issuer`/`get_by_buyer`/`get_by_status` therefore did not
+/// affect liveness, and entries could be archived between queries (issue #832).
+/// Bumping on the read path keeps every entry that is still actually being
+/// queried alive. Extending an entry that is not (or no longer) in storage
+/// would fail with `MissingValue`, so the bump is guarded by a presence check.
+fn bump_persistent(env: &Env, key: &DataKey) {
+    let store = env.storage().persistent();
+    if store.has(key) {
+        store.extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+}
+
 fn hydrate_ids(env: &Env, ids: Vec<BytesN<32>>) -> Vec<Invoice> {
     let mut result: Vec<Invoice> = Vec::new(env);
     for i in 0..ids.len() {
         let id = ids
             .get(i)
             .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let inv_key = DataKey::Invoice(id);
         let invoice: Invoice = env
             .storage()
             .persistent()
-            .get(&DataKey::Invoice(id))
+            .get(&inv_key)
             .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        // Issue #832: terminal invoices (Repaid/Cancelled/Defaulted/Expired)
+        // receive no further state transitions, so without this read-time bump
+        // their records could archive while the index still references them.
+        bump_persistent(env, &inv_key);
         result.push_back(invoice);
     }
     result

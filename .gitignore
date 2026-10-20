@@ -38,3 +38,10 @@ contracts/*/test_snapshots/
 
 # Personal local-agent runner state (not repo configuration)
 .gemini/
+
+# Seed-issue tooling lives only in scripts/maintainer/ (issues #301, #615).
+# These root-level duplicates shipped without the rate-limit/dedup guards and
+# must never be committed or staged at the repo root again.
+/create_issues.sh
+/create_issues.py
+/create_issues.ps1

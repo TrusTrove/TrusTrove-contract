@@ -1,7 +1,39 @@
 import subprocess
 import sys
+import time
 
 REPO = "TrusTrove/TrusTrove-contract"
+
+# Error fragments that mean GitHub is rate-limiting us (secondary limits,
+# abuse detection).  Mirrors the gh_req() backoff wrapper in
+# create-contract-issues.sh (issue #312); see issue #615.
+_RATE_LIMIT_MARKERS = ("rate limit", "secondary rate limit",
+                       "abuse detection", "too many requests")
+
+
+def gh_run(cmd, check=False, max_attempts=5):
+    """Run a gh command, retrying with exponential backoff on rate limits.
+
+    Every gh call in this seeder goes through here so the surviving
+    maintainer scripts keep a single rate-limit guard (issue #615).
+    """
+    wait = 2
+    res = None
+    for attempt in range(1, max_attempts + 1):
+        res = subprocess.run(cmd, capture_output=True, text=True)
+        if res.returncode == 0:
+            return res
+        err = ((res.stderr or "") + (res.stdout or "")).lower()
+        if any(marker in err for marker in _RATE_LIMIT_MARKERS) and attempt < max_attempts:
+            print(f"WARN: gh rate limited (attempt {attempt}/{max_attempts}); "
+                  f"retrying in {wait}s...")
+            time.sleep(wait)
+            wait *= 2
+        else:
+            break
+    if check:
+        res.check_returncode()
+    return res
 
 issues = [
     # ── REGISTRY CONTRACT ─────────────────────────────────────────────────────────
@@ -293,11 +325,11 @@ Bash · Stellar CLI"""
 print(f"Ensuring required labels exist for {REPO}...")
 for label, color in [("testing", "fbca04"), ("devops", "006b75")]:
     cmd = ["gh", "label", "create", label, "--color", color, "--repo", REPO]
-    subprocess.run(cmd, capture_output=True)
+    gh_run(cmd)
 
 print(f"Fetching existing issues from {REPO}...")
 existing_titles = set()
-res = subprocess.run(["gh", "issue", "list", "--repo", REPO, "--limit", "100", "--json", "title"], capture_output=True, text=True)
+res = gh_run(["gh", "issue", "list", "--repo", REPO, "--limit", "500", "--json", "title"])
 if res.returncode == 0:
     import json
     try:
@@ -321,7 +353,7 @@ for idx, issue in enumerate(issues, start=1):
         "--body", issue["body"]
     ]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        res = gh_run(cmd, check=True)
         print(f"OK: Issue {idx} created: {issue['title']}")
     except subprocess.CalledProcessError as e:
         print(f"ERROR creating Issue {idx}: {e.stderr.strip()}", file=sys.stderr)
