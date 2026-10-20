@@ -424,6 +424,107 @@ fn test_fee_bearing_early_repayment_with_lp_withdrawal() {
 }
 
 #[test]
+fn test_repay_early_at_funded_at_refunds_full_discount() {
+    let lifecycle = setup_fee_lifecycle();
+    let deposit = 12_000_000_000u128;
+    let shares = lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+    let fee_bps = 1000u32;
+    lifecycle
+        .pool
+        .set_protocol_fee(&fee_bps, &lifecycle.treasury);
+    let (invoice_id, _) = create_fee_lifecycle_invoice(&lifecycle);
+
+    let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+    let buyer_before = token.balance(&lifecycle.buyer);
+    let treasury_before = token.balance(&lifecycle.treasury);
+    let invoice = lifecycle.invoice.get(&invoice_id);
+    let funded_at = invoice.funded_at.unwrap();
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert_eq!(discount, 200_000_000);
+
+    // Nothing has elapsed: the pool must earn nothing and refund the full
+    // discount to the buyer.
+    lifecycle.env.ledger().set_timestamp(funded_at);
+    assert_eq!(lifecycle.env.ledger().timestamp(), funded_at);
+    assert!(lifecycle.invoice.repay_early(&invoice_id));
+
+    let settled = lifecycle.invoice.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(funded_at));
+    assert_eq!(settled.repaid_amount, invoice.face_value);
+    assert_eq!(lifecycle.pool.get_stats().total_yield_distributed, 0);
+    // A replay must not book the split a second time.
+    assert!(lifecycle.invoice.try_repay(&invoice_id).is_err());
+    assert_eq!(lifecycle.pool.get_stats().total_yield_distributed, 0);
+
+    assert_fee_settlement(
+        &lifecycle,
+        FeeSettlementExpectation {
+            shares,
+            deposit,
+            face_value: invoice.face_value,
+            refund: discount,
+            protocol_cut: 0,
+            lp_yield: 0,
+            buyer_before,
+            treasury_before,
+        },
+    );
+}
+
+#[test]
+fn test_repay_early_one_second_before_due_date_refunds_remainder_once() {
+    let lifecycle = setup_fee_lifecycle();
+    let deposit = 12_000_000_000u128;
+    let shares = lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+    let fee_bps = 1000u32;
+    lifecycle
+        .pool
+        .set_protocol_fee(&fee_bps, &lifecycle.treasury);
+    let (invoice_id, _) = create_fee_lifecycle_invoice(&lifecycle);
+
+    let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+    let buyer_before = token.balance(&lifecycle.buyer);
+    let treasury_before = token.balance(&lifecycle.treasury);
+    let invoice = lifecycle.invoice.get(&invoice_id);
+    let discount = invoice.face_value - invoice.funded_amount;
+    let repaid_at = invoice.due_date - 1;
+    let (gross_yield, refund) = expected_repayment_split(&invoice, repaid_at);
+    assert!(refund > 0);
+    assert_eq!(gross_yield + refund, discount);
+
+    lifecycle.env.ledger().set_timestamp(repaid_at);
+    assert!(lifecycle.invoice.repay_early(&invoice_id));
+
+    let protocol_cut = gross_yield * fee_bps as u128 / 10_000;
+    let lp_yield = gross_yield - protocol_cut;
+    let settled = lifecycle.invoice.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(repaid_at));
+    assert_eq!(
+        lifecycle.pool.get_stats().total_yield_distributed,
+        lp_yield,
+        "the pool must book the complement of the refund exactly once"
+    );
+    assert!(lifecycle.invoice.try_repay_early(&invoice_id).is_err());
+    assert_eq!(lifecycle.pool.get_stats().total_yield_distributed, lp_yield);
+
+    assert_fee_settlement(
+        &lifecycle,
+        FeeSettlementExpectation {
+            shares,
+            deposit,
+            face_value: invoice.face_value,
+            refund,
+            protocol_cut,
+            lp_yield,
+            buyer_before,
+            treasury_before,
+        },
+    );
+}
+
+#[test]
 fn test_repay_conserves_face_value_before_at_and_after_maturity() {
     let term = 30 * 86400;
     // Independent expectations for the invoice's 200_000_000 discount.

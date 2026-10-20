@@ -1795,6 +1795,22 @@ fn test_fund_invoice_rejects_funded_amount_overflow_without_state_changes() {
     assert!(escrow.get_history(&invoice_id).is_empty());
 }
 #[test]
+fn test_fund_invoice_succeeds_at_exact_utilization_cap() {
+    let te = setup();
+    let exact_cap_bps = 9_800;
+    te.pool.set_max_utilization(&te.admin, &exact_cap_bps);
+    te.pool.deposit(&te.lp, &DEFAULT_FACE_VALUE);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    assert!(te.pool.fund_invoice(&invoice_id));
+
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(stats.utilization_rate_bps, exact_cap_bps);
+    assert_eq!(stats.max_utilization_bps, exact_cap_bps);
+    assert!(stats.utilization_rate_bps <= stats.max_utilization_bps);
+}
+#[test]
 #[should_panic(expected = "Error(Contract, #12)")]
 fn test_fund_invoice_rejects_above_cap() {
     let te = setup();
