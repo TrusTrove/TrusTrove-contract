@@ -1,6 +1,6 @@
 # Limitations
 
-> **Updated:** 2026-09-30
+> **Updated:** 2026-10-20
 > **Applies to:** TrusTrove protocol on Stellar testnet
 
 This document captures known limitations, testnet-specific constraints,
@@ -13,6 +13,7 @@ yet handled.
 
 - [Testnet Limitations](#testnet-limitations)
 - [Gas & Budget](#gas--budget)
+- [Repayment Timing and Refund Math](#repayment-timing-and-refund-math)
 - [Known Gaps](#known-gaps)
 - [Unhandled Edge Cases](#unhandled-edge-cases)
 - [Planned But Not Implemented](#planned-but-not-implemented)
@@ -225,6 +226,70 @@ to exceed the per-entry size limit (~100 KB in practice).
 
 ---
 
+## Repayment Timing and Refund Math
+
+This is the authoritative description of when each repayment entry point may
+run and how the buyer/LP split is calculated. The invoice contract computes
+the split; the pool only enforces bounds (see
+`receive_repayment_with_refund`'s trust-boundary note).
+
+### Terms
+
+`funded_amount` is recorded by `mark_funded`; `discount =
+face_value - funded_amount`; `term = due_date - funded_at`; and `elapsed =
+now - funded_at`. The arithmetic is integer division (it floors
+`earned_by_pool`), so any remaining discount of at least one stroop produces a
+refund of at least one stroop:
+
+```text
+earned_by_pool =
+  discount                          if term == 0 or elapsed >= term
+  discount * elapsed / term         otherwise
+
+refund_to_buyer = discount - earned_by_pool
+```
+
+### Allowed Statuses and Timing
+
+| Entry point | Allowed status | Timing | Amount pulled from buyer | Refund |
+| --- | --- | --- | --- | --- |
+| `repay` | `Funded`, `Active`, `Confirmed` | Any time; `due_date` does not block it | `remaining_balance` (delegates to `repay_partial`) | Prorated before `due_date`; zero at/after `due_date` |
+| `repay_partial` | `Funded`, `Active`, `Confirmed` | Any time | `amount` | Split is computed only when the final installment clears the balance |
+| `repay_early` | `Confirmed` only | Strictly before `due_date`; at/after reverts with `InvalidStatusTransition` | `face_value` | Prorated from `funded_at` |
+
+### Fund Movements
+
+The buyer transfers the full `face_value` to escrow; escrow releases it to the
+pool through `release_to_pool`; the pool books `earned_by_pool` as yield and
+transfers `refund_to_buyer` back to the buyer. Of the earned yield, the protocol
+fee (`protocol_cut`) goes to treasury and the remainder to LPs. Partial
+repayments accumulate in escrow and only settle at the pool when the final
+installment arrives. Settlement consumes the funded entry and moves the invoice
+to `Repaid`, so a second repayment (whether through `repay` or any other entry
+point) fails with `InvalidStatusTransition` — the yield is booked exactly once.
+Note that `repay` before maturity also refunds the unearned discount;
+`repay_early` is not the only path with a rebate.
+
+### Worked Example
+
+This matches `tests/integration/tests/lifecycle.rs`. Face value
+`10_000_000_000`, 200 bps discount (`200_000_000`), 30-day term
+(`2_592_000` seconds):
+
+| Repaid at | `earned_by_pool` | `refund_to_buyer` | Buyer net cost |
+| --- | --- | --- | --- |
+| `funded_at` | 0 | 200,000,000 | 9,800,000,000 |
+| `funded_at + term / 2` | 100,000,000 | 100,000,000 | 9,900,000,000 |
+| `due_date - 1` | 199,999,922 | 78 | 9,999,999,922 |
+| `due_date` or later | 200,000,000 | 0 | 10,000,000,000 |
+
+At `funded_at` the pool books no yield (`total_yield_distributed` is
+unchanged), while at `due_date - 1` the pool receives the complement of the
+78-stroop refund exactly once. `repay_early` at `due_date` and later is
+rejected; use `repay` for mature invoices.
+
+---
+
 ## Known Gaps
 
 ### LP Withdrawal Yield Uses Aggregate Principal
@@ -257,13 +322,6 @@ off-chain bot is required. Repayment (`escrow.release_to_pool`) and default
 (`pool.handle_default`) were adapted to the lock record being consumed at
 funding time.
 
-### No Early Repayment Incentive Logic
-
-The protocol does not apply dynamic discount rates based on how early
-repayment occurs. The buyer pays the full `face_value` regardless of how
-early they repay, so there is no on-chain rebate proportional to the time
-remaining on the invoice.
-
 ### No Duplicate Invoice Detection
 
 The `create` function generates an invoice ID from a SHA-256 hash of
@@ -282,13 +340,13 @@ terms.
 | ---------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | LP deposits in a pool with 0 shares and 0 deposits                     | 1:1 share minting                                                                                   | Correct                                                                                                                                 |
 | LP deposits when `total_shares > 0` but `total_deposits = 0`           | Division by zero would panic                                                                        | Cannot happen in practice (shares only minted alongside deposits)                                                                       |
-| Buyer repays exactly on `due_date`                                     | `invoice.repay` succeeds; `trigger_default` panics with `DueDateNotPassed`                          | Asymmetric: `repay` has no time gate beyond `status == Confirmed`; `trigger_default` requires `current_time > due_date` (strict)        |
+| Buyer repays exactly on `due_date`                                     | `invoice.repay` succeeds with no refund; `trigger_default` panics with `DueDateNotPassed`           | Asymmetric: all repayment paths have no due-date upper bound; `trigger_default` requires `current_time > due_date` (strict)             |
 | `confirm_delivery` called after invoice is already confirmed           | Panics with `InvalidStatusTransition` because status is `Confirmed` not `Active`                    | Correct — prevents replay                                                                                                               |
 | `withdraw` when pool has funded invoices but no available liquidity    | Panics with `InsufficientLiquidity`                                                                 | Correct — prevents breaking the pool invariant                                                                                          |
 | Admin calls `set_max_utilization` to 0                                 | All `fund_invoice` calls will fail (utilization ≥ 0% ≥ cap of 0)                                    | This is a denial-of-service vector available to admin                                                                                   |
 | Calling `revoke` on an unregistered address                            | Panics with `NotFound`                                                                              | Per spec                                                                                                                                |
 | Calling `batch_register_issuers` with more than 50 entries             | Panics with `BatchSizeExceeded`                                                                     | Gas protection                                                                                                                          |
-| A buyer repays _less_ than `face_value`                                | Not possible on the buyer path — `invoice.repay` transfers the full `face_value` from buyer to pool | Partial amounts are only possible through `escrow::release_to_pool` during default / partial-repayment flows; see [Resolved](#resolved) |
+| A buyer repays _less_ than `face_value`                                | Supported via `invoice.repay_partial`; installments accumulate in escrow until the balance clears    | A full `repay` pulls only the outstanding `remaining_balance`; the buyer refund is computed once, when the final installment settles     |
 | An issuer creates an invoice with `due_date = current_time + 1` second | Invoice accepted                                                                                    | `create` requires `due_date > env.ledger().timestamp()` (strict); `now + 1` passes, `now` does not                                      |
 | The pool has exactly 0 USDC balance after funding all deposits         | `withdraw` succeeds for unfunded amounts, but funded invoices are locked                            | The issuer holds the funded USDC (paid out at funding, #819); escrow holds no balance for funded invoices and the pool holds only unfunded USDC  |
 | `trigger_default` while status is exactly at `due_date` (timestamp)    | Panics with `DueDateNotPassed`                                                                      | The guard is `if current_time <= due_date`, so one full second must elapse past `due_date` before default can fire                      |

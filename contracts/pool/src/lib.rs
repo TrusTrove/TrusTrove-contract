@@ -264,7 +264,8 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// * Panics if the contract has not been initialized (missing `FundingAsset`).
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `FundingAsset`).
     ///
     /// # Returns
     /// * `Address` - The funding asset address.
@@ -280,6 +281,24 @@ impl PoolContract {
     /// Deprecated alias for [`Self::get_funding_asset`], kept so integrators
     /// built against the pre-factory USDC-only naming keep working. New
     /// callers should use `get_funding_asset` instead.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `FundingAsset`), matching [`Self::get_funding_asset`].
+    ///
+    /// # Returns
+    /// * `Address` - The funding asset address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let asset = client.get_usdc_asset();
+    /// ```
     pub fn get_usdc_asset(env: Env) -> Address {
         Self::funding_asset(&env)
     }
