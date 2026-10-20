@@ -360,8 +360,11 @@ fn test_reinstate_unregistered_panics() {
     client.reinstate(&unknown);
 }
 
+// ============== ISSUE #982: reinstate ONLY ALLOWS Revoked -> Verified ==============
+
 #[test]
-fn test_reinstate_on_pending_profile_does_not_verify() {
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_reinstate_on_pending_profile_rejects_with_invalid_state() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
@@ -369,22 +372,41 @@ fn test_reinstate_on_pending_profile_does_not_verify() {
     client.register_issuer(&issuer, &map![&env]);
 
     // The profile is Pending: never verified, never revoked. `reinstate` is
-    // the inverse of `revoke` and must not act as an undocumented alternate
-    // path to verify a Pending profile (#606).
+    // the inverse of `revoke` and must reject — with the typed
+    // `InvalidProfileState` (#10) error — any attempt to use it as an
+    // undocumented alternate path to verify a Pending profile (#982).
+    client.reinstate(&issuer);
+}
+
+#[test]
+fn test_reinstate_on_pending_profile_rejection_leaves_state_unchanged() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
     let events_before = env.events().all().len();
-    let result = client.reinstate(&issuer);
-    assert!(result);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.reinstate(&issuer);
+    }));
+    assert!(
+        result.is_err(),
+        "reinstate must fail for a Pending profile with InvalidProfileState"
+    );
+
+    // The profile must remain Pending with no state mutation and no events.
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
         VerificationStatus::Pending
     );
-    // No `address_reinstated` event and no other emission: the call is a no-op.
     assert_eq!(env.events().all().len(), events_before);
 }
 
 #[test]
-fn test_reinstate_on_verified_profile_is_idempotent_noop() {
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_reinstate_on_verified_profile_rejects_with_invalid_state() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
@@ -392,10 +414,30 @@ fn test_reinstate_on_verified_profile_is_idempotent_noop() {
     client.register_issuer(&issuer, &map![&env]);
     client.verify_profile(&admin, &issuer, &true);
 
-    // Already Verified (never revoked): reinstate must not rewrite storage or
-    // re-emit `address_reinstated`, mirroring `revoke`'s idempotency guard (#606).
+    // Already Verified (never revoked): reinstate must not act as a second
+    // verification operation — reject with `InvalidProfileState` (#10) (#982).
+    client.reinstate(&issuer);
+}
+
+#[test]
+fn test_reinstate_on_verified_profile_rejection_leaves_state_unchanged() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+
     let events_before = env.events().all().len();
-    assert!(client.reinstate(&issuer));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.reinstate(&issuer);
+    }));
+    assert!(
+        result.is_err(),
+        "reinstate must fail for a Verified profile with InvalidProfileState"
+    );
+
+    // The profile must remain Verified with no state mutation and no events.
     assert!(client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
@@ -947,6 +989,67 @@ fn test_batch_register_issuers_invalid_metadata_leaves_state_clean() {
     assert_eq!(
         client.get_verification_status(&issuer1),
         VerificationStatus::Unregistered
+    );
+}
+
+// ============== ISSUE #978: PRESERVE SUPPLIED METADATA ==============
+
+#[test]
+fn test_batch_register_issuers_preserves_supplied_metadata_per_entry() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    // Distinct, non-empty metadata maps so any cross-entry mix-up or
+    // empty-map substitution is detectable.
+    let metadata1 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Issuer One")
+        ),
+        (
+            String::from_str(&env, "jurisdiction"),
+            String::from_str(&env, "US")
+        )
+    ];
+    let metadata2 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Issuer Two")
+        ),
+        (
+            String::from_str(&env, "jurisdiction"),
+            String::from_str(&env, "DE")
+        )
+    ];
+    // An entry with explicitly empty metadata must stay empty (#978: preserve
+    // supplied metadata — including the supply of nothing).
+    let metadata3 = map![&env];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), metadata1.clone()),
+        (issuer2.clone(), metadata2.clone()),
+        (issuer3.clone(), metadata3.clone()),
+    ];
+
+    let skipped = client.batch_register_issuers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    // Every stored profile must carry exactly the metadata supplied for its
+    // entry — no dropped maps, no mixing between entries.
+    assert_eq!(client.get_profile(&issuer1).metadata, metadata1);
+    assert_eq!(client.get_profile(&issuer2).metadata, metadata2);
+    assert_eq!(
+        client.get_profile(&issuer3).metadata,
+        map![&env],
+        "an explicitly empty metadata map must be stored empty"
     );
 }
 
@@ -2009,6 +2112,145 @@ fn test_is_verified_does_not_extend_ttl_for_unknown() {
     assert!(client.is_verified(&issuer));
 }
 
+// ============== ISSUE #984: get_verification_status TTL EXTENSION ==============
+
+/// Drives the profile entry's TTL below the extension threshold and asserts
+/// that a `get_verification_status` read extends it back toward `EXTEND_TO`.
+/// Shared by the Pending / Verified / Revoked coverage below so all three
+/// states exercise the identical drain-then-extend sequence.
+fn assert_verification_status_read_extends_ttl(
+    env: &Env,
+    client: &RegistryContractClient<'static>,
+    issuer: &Address,
+    expected: VerificationStatus,
+) {
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+
+    // Record the initial remaining TTL, then advance the ledger so the
+    // remaining TTL drops below the write-path threshold.
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_before_read < TTL_THRESHOLD,
+        "TTL should be below threshold before read, got {ttl_before_read}"
+    );
+
+    // The read must both report the right status and extend the entry TTL.
+    assert_eq!(client.get_verification_status(issuer), expected);
+
+    let ttl_after_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after_read > ttl_before_read,
+        "get_verification_status should extend TTL: before={ttl_before_read}, after={ttl_after_read}"
+    );
+    assert!(
+        ttl_after_read >= 1_999_000,
+        "TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_read}"
+    );
+}
+
+#[test]
+fn test_get_verification_status_extends_ttl_for_pending_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    // New profiles start Pending: registered but never verified (#130).
+    client.register_issuer(&issuer, &map![&env]);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    assert_verification_status_read_extends_ttl(
+        &env,
+        &client,
+        &issuer,
+        VerificationStatus::Pending,
+    );
+}
+
+#[test]
+fn test_get_verification_status_extends_ttl_for_verified_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    assert_verification_status_read_extends_ttl(
+        &env,
+        &client,
+        &issuer,
+        VerificationStatus::Verified,
+    );
+}
+
+#[test]
+fn test_get_verification_status_extends_ttl_for_revoked_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    assert_verification_status_read_extends_ttl(
+        &env,
+        &client,
+        &issuer,
+        VerificationStatus::Revoked,
+    );
+}
+
+#[test]
+fn test_get_verification_status_unregistered_does_not_create_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let unknown = Address::generate(&env);
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(unknown.clone());
+
+    // An Unregistered lookup must not panic, must report Unregistered, must
+    // not create a Profile entry, and must not attempt to extend the TTL of
+    // a nonexistent entry.
+    assert_eq!(
+        client.get_verification_status(&unknown),
+        VerificationStatus::Unregistered
+    );
+    let has_profile = env.as_contract(&contract_id, || env.storage().persistent().has(&key));
+    assert!(
+        !has_profile,
+        "get_verification_status must not create a Profile entry for an unregistered address"
+    );
+
+    // Repeated calls keep the same semantics.
+    assert_eq!(
+        client.get_verification_status(&unknown),
+        VerificationStatus::Unregistered
+    );
+    let has_profile = env.as_contract(&contract_id, || env.storage().persistent().has(&key));
+    assert!(!has_profile);
+}
+
 #[test]
 fn test_get_admin_extends_instance_ttl() {
     let (env, client) = setup();
@@ -2373,12 +2615,11 @@ fn run_batch_register_prop_test(is_buyer: bool) {
                             client.get_verification_status(&addr),
                             VerificationStatus::Pending
                         );
-                        if is_buyer {
-                            let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
-                            prop_assert_eq!(profile.metadata, expected_metadata);
-                        } else {
-                            prop_assert_eq!(profile.metadata.len(), 0);
-                        }
+                        // Both roles store the supplied metadata exactly as
+                        // given, including explicitly empty maps (#978: the
+                        // issuer batch path previously discarded it).
+                        let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
+                        prop_assert_eq!(profile.metadata, expected_metadata);
                     }
                 }
 
