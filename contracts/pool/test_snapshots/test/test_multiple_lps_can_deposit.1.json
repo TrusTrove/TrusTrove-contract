@@ -1664,6 +1664,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "FeeBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "FundingAsset"
                             }
                           ]

@@ -16,14 +16,17 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.85.0
           targets: wasm32v1-none
           components: clippy, rustfmt
+
+      - name: Ensure wasm32v1-none target
+        run: rustup target add wasm32v1-none --toolchain 1.85.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
@@ -87,10 +90,10 @@ jobs:
       # secrets context is not available in a step-level `if`.
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.85.0
           components: llvm-tools-preview
@@ -115,7 +118,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@v4
         with:
           name: coverage-report
           path: coverage/
@@ -124,7 +127,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: env.CODECOV_TOKEN != ''
-        uses: codecov/codecov-action@v7
+        uses: codecov/codecov-action@v4
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/cobertura.xml
@@ -134,14 +137,17 @@ jobs:
     name: integration-test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@master
+        uses: dtolnay/rust-toolchain@v1
         with:
           toolchain: 1.85.0
           targets: wasm32v1-none
           components: clippy, rustfmt
+
+      - name: Ensure wasm32v1-none target
+        run: rustup target add wasm32v1-none --toolchain 1.85.0
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2

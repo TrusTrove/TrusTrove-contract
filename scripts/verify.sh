@@ -9,13 +9,17 @@ if [ ! -f "$STELLAR" ]; then
   STELLAR="stellar"
 fi
 
-# Load environment configuration
+# Load environment configuration. `source .env` executed the file as shell
+# code; use the shared safe KEY=VALUE parser instead (see issue #612, same
+# CVE-class fix as deploy.sh / issue #455).
 if [ ! -f .env ]; then
   echo "Error: .env file not found." >&2
   echo "Run ./scripts/deploy.sh first to create the .env file with contract IDs." >&2
   exit 1
 fi
-source .env
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/load_env.sh"
+load_env .env
 
 # Tracking execution status
 FAILED=0

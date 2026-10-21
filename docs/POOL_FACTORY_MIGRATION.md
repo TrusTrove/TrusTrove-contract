@@ -1,5 +1,7 @@
 # Pool Factory Migration Guide
 
+> Design rationale and storage layout: [POOL_FACTORY_DESIGN.md](./POOL_FACTORY_DESIGN.md).
+
 This document describes the migration path for the existing deployed testnet pool contract to become "instance #1" under the new pool_factory, avoiding a disruptive redeploy that would orphan existing LP positions.
 
 ## Background

@@ -36,7 +36,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "___yjZh18A"
+                      },
+                      "val": {
+                        "string": "MP_8__LSm_"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "_v_9D"
+                      },
+                      "val": {
+                        "string": "imCK7Oi_31Ils73_"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "w_4pm92_I"
+                      },
+                      "val": {
+                        "string": "qKiQTMwT6s_"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -252,7 +277,32 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "___yjZh18A"
+                            },
+                            "val": {
+                              "string": "MP_8__LSm_"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "_v_9D"
+                            },
+                            "val": {
+                              "string": "imCK7Oi_31Ils73_"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "w_4pm92_I"
+                            },
+                            "val": {
+                              "string": "qKiQTMwT6s_"
+                            }
+                          }
+                        ]
                       }
                     },
                     {
@@ -738,7 +788,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "___yjZh18A"
+                      },
+                      "val": {
+                        "string": "MP_8__LSm_"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "_v_9D"
+                      },
+                      "val": {
+                        "string": "imCK7Oi_31Ils73_"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "w_4pm92_I"
+                      },
+                      "val": {
+                        "string": "qKiQTMwT6s_"
+                      }
+                    }
+                  ]
                 }
               ]
             }

@@ -68,21 +68,110 @@ All contracts follow a consistent TTL extension pattern:
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
 
+#### Profile Enumeration Index
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `ProfileIndex(Role, u32)` | `Address` | The `index`-th registered address for `Role::Issuer` / `Role::Buyer`, in registration order |
+| `ProfileCount(Role)` | `u32` | Number of populated `ProfileIndex` slots for that role |
+
+Both keys are written by **every** registration path (`register_issuer`,
+`register_buyer`, `batch_register_issuers`, `batch_register_buyers`) and are
+TTL-extended with the same threshold/target as a profile entry
+(`persistent().extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO)`), on write and on read.
+Entries skipped as already-registered are never indexed twice, so
+`ProfileCount(role)` always equals the number of addresses reachable through
+`list_profiles(role, …)`.
+
 #### Profile Structure
 
 ```
 Profile {
     address:      Address,          // Stellar address (also the key)
-    packed_flags: u32,              // Bit 0: role (0=Issuer, 1=Buyer)
-                                    // Bit 1: verified status
+    packed_flags: u32,              // Packed bit-field: see "Profile Flags" below
     registered_at: u64,             // Unix timestamp of registration
     metadata:     Map<String, String>, // Arbitrary key-value metadata
 }
 ```
 
+#### Profile Flags
+
+`packed_flags` is a `u32` bitmask that encodes three boolean values. The bit
+layout is an internal implementation detail and is NOT a stable external
+contract; it may change without a corresponding change to this doc. Off-chain
+consumers must not decode it directly — use the decoded contract views
+`get_role`, `is_verified` and `get_verification_status` instead.
+
+| Bit | Value | Meaning |
+|-----|-------|---------|
+| 0   | 0     | `Role::Issuer` |
+| 0   | 1     | `Role::Buyer` |
+| 1   | 0     | Not verified (`verified == false`) |
+| 1   | 1     | Verified (`verified == true`) |
+| 2   | 0     | Not revoked (`revoked == false`) |
+| 2   | 1     | Revoked (`revoked == true`) |
+| 3–31| —     | Reserved (always 0 in current code) |
+
+##### Valid Flag Combinations
+
+The three meaningful bits yield eight theoretical combinations, but only three
+are valid in the protocol's state machine. The role bit (bit 0) is immutable
+after registration; the verified and revoked bits are mutually exclusive — a
+profile cannot be both verified and revoked simultaneously.
+
+| packed_flags (binary) | Role    | Verified | Revoked | `VerificationStatus` | Description |
+|-----------------------|---------|----------|---------|---------------------|-------------|
+| `0b000` (0)           | Issuer  | false    | false   | `Pending`           | Registered, awaiting admin verification |
+| `0b010` (2)           | Issuer  | true     | false   | `Verified`          | Active, eligible for invoice creation |
+| `0b100` (4)           | Issuer  | false    | true    | `Revoked`           | Revoked, cannot originate new invoices |
+| `0b001` (1)           | Buyer   | false    | false   | `Pending`           | Registered, awaiting admin verification |
+| `0b011` (3)           | Buyer   | true     | false   | `Verified`          | Active, eligible as invoice counterparty |
+| `0b101` (5)           | Buyer   | false    | true    | `Revoked`           | Revoked, cannot be counterparty on new invoices |
+
+All other bit patterns (e.g. `0b110`, `0b111`) are invalid and never produced by
+the contract. The `get_verification_status` view encodes this invariant:
+- `Unregistered` — no `Profile` entry exists
+- `Pending` — entry exists, `verified == false`, `revoked == false`
+- `Verified` — entry exists, `verified == true`
+- `Revoked` — entry exists, `revoked == true`
+
+##### Decoding Example (matches `Profile` accessors)
+
+```rust
+// Equivalent to Profile::role()
+let role = if (packed_flags & 1) != 0 { Role::Buyer } else { Role::Issuer };
+
+// Equivalent to Profile::verified()
+let verified = (packed_flags & 2) != 0;
+
+// Equivalent to Profile::revoked()
+let revoked = (packed_flags & 4) != 0;
+
+// Equivalent to Profile::get_verification_status()
+let status = if !profile_exists {
+    VerificationStatus::Unregistered
+} else if verified {
+    VerificationStatus::Verified
+} else if revoked {
+    VerificationStatus::Revoked
+} else {
+    VerificationStatus::Pending
+};
+```
+
 #### Indexing Notes
 
-- Profiles are looked up by `is_verified(address)` — no secondary index exists.
+- Profiles are looked up by `is_verified(address)`; the per-role
+  `ProfileIndex` / `ProfileCount` keys back the enumeration views
+  `get_profile_count(role)` and `list_profiles(role, start, limit)`.
+- `list_profiles` returns pages of at most 50 addresses (the same cap as the
+  batch registration entry points) and panics with `PageSizeExceeded` (`#8`)
+  above it, so a single call can never walk the whole index. Pages are
+  contiguous and non-overlapping: page `n` is
+  `list_profiles(role, n * limit, limit)`.
+- The index is append-only. The registry has no deregistration path —
+  `revoke` only flips the profile's verification flags — so a slot is never
+  rewritten or freed, and revoked profiles stay enumerated.
 - `get_profile(address)` returns the full `Profile` struct or panics with
   `NotFound` if absent.
 - `get_verification_status(address)` returns a three-valued enum
@@ -90,7 +179,9 @@ Profile {
 
 ### Storage Key Count
 
-**Approximately 1 key per registered address.**
+**Approximately 2 keys per registered address** — one `Profile` record and one
+`ProfileIndex(role, n)` slot — **plus 2 constant `ProfileCount(role)` keys**
+(one per role) that exist once the first profile of that role is registered.
 
 ---
 
@@ -152,19 +243,20 @@ Confirmed = 4   // dual delivery confirmation
 Repaid    = 5   // buyer has repaid
 Defaulted = 6   // past due without repayment
 Expired   = 7   // listing expired before funding
+Cancelled = 8   // issuer cancelled before listing
 ```
 
 #### Index Entries
 
-| DataKey | Type | Description |
-|---------|------|-------------|
-| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer |
-| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index |
-| `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer |
-| `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index |
-| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status |
-| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index |
-| `StatusCount(u32)` | `u64` | Count of invoices in each status |
+| DataKey | Type | Description | TTL extended |
+|---------|------|-------------|--------------|
+| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
+| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
+| `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
+| `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
+| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
+| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
+| `StatusCount(u32)` | `u64` | Count of invoices in each status | On write (`increment_status_count` / `decrement_status_count`, issue #830) |
 
 #### Indexing Notes
 
@@ -172,8 +264,12 @@ Expired   = 7   // listing expired before funding
   maintain a count key and an ordered list of entries.
 - Index entries are appended — no compaction on status transitions (entries
   are added to the new status but not removed from the old).
-- `get_by_status()` reads all entries for a status and only returns those
-  whose current `invoice.status` matches (to handle stale index entries).
+- `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
+  (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
+  `page_size` index entries, so cost is bounded regardless of index size.
+- `get_by_status()` still filters each page to entries whose current
+  `invoice.status` matches (to handle stale index entries), so a page may
+  contain fewer than `page_size` results.
 
 ### Storage Key Count
 
@@ -196,6 +292,8 @@ Expired   = 7   // listing expired before funding
 | `PoolContract` | `Address` | Authorised pool contract | `initialize()` |
 | `InvoiceContract` | `Address` | Invoice contract address | `initialize()` |
 | `UsdcAsset` | `Address` | USDC token contract address | `initialize()` |
+| `Paused` | `bool` | Emergency circuit-breaker flag, via `trusttrove_pause::PauseState::Paused` (issue #716). Absent means not paused. | `pause()` / `unpause()` |
+| `TimeoutWindow` | `u64` | Seconds after `locked_at` before `release_after_timeout` may permissionlessly return a lock to the pool. Absent means the 30-day default; capped at 365 days. | `set_timeout_window()` |
 
 ### Persistent Storage
 
@@ -204,6 +302,7 @@ Expired   = 7   // listing expired before funding
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID |
+| `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default` |
 
 ```
 EscrowRecord {
@@ -231,14 +330,19 @@ EscrowEvent {
 #### Lifecycle
 
 1. `lock()` creates an `EscrowRecord` and transfers USDC from pool → escrow.
-2. `release_to_issuer()` or `release_to_pool()` transfers USDC out and
-   **removes** the `Locked` key (caller must re-lock for a new funding cycle).
-3. `handle_default()` returns locked USDC to the pool and **removes** the key.
-4. On removal, the TTL-granted entries also expire organically.
+2. `release_to_issuer()` transfers USDC out, **removes** the `Locked` key and
+   writes the `IssuerReleased(invoice_id)` marker (issue #819 — the funding
+   path does `lock` then `release_to_issuer` in one call).
+3. `release_to_pool()` transfers USDC out and consumes whichever of `Locked`
+   or `IssuerReleased` exists; a second call finds neither and reverts with
+   `NotFound` (#2 guard).
+4. `handle_default()` returns locked USDC to the pool and **removes** the key.
+5. On removal, the TTL-granted entries also expire organically.
 
 ### Storage Key Count
 
-**Approximately 2 keys per funded invoice** — one `Locked` record and one
+**Approximately 3 keys per funded invoice** — a transient `Locked` record, an
+`IssuerReleased` marker (live between funding and repayment), and one
 `History` vector (which shares its TTL with the lock).
 
 ---
@@ -276,6 +380,26 @@ EscrowEvent {
 | `LPDepositCount(Address)` | `u32` | Number of deposits made by this LP |
 | `LPYieldEarned(Address)` | `u128` | Cumulative yield earned (updated on withdraw) |
 | `LPInitialDeposit(Address)` | `u128` | Total principal deposited by LP (tracked for yield calculation) |
+
+#### SEP-41 Share Transfers
+
+LP shares move between addresses through two public entry points that share
+one balance-movement path (`move_shares`) and emit the same standard
+`transfer(from, to, amount)` event:
+
+- `transfer(from, to, amount)` — the standard SEP-41 entry point. Generic
+  `soroban_sdk::token::Client` consumers call this directly against the pool
+  address.
+- `transfer_from(spender, from, to, amount)` — moves shares against an
+  `approve` grant, debiting the allowance.
+- `transfer_shares(from, to, amount)` — **non-standard** legacy alias of
+  `transfer`, kept for integrators that predate the SEP-41 surface. New code
+  must use `transfer`.
+
+Transfers only move balances: `TotalShares`, `TotalDeposits`, `TotalFunded`,
+yield accounting, and share price are untouched. Self-transfers are no-ops.
+The recipient's `LPShares` entry is created on first credit, exactly as a
+deposit would create it.
 
 #### SEP-41 Allowance Keys
 
@@ -351,7 +475,12 @@ See [LIMITATIONS.md](./LIMITATIONS.md) for current testnet budget constraints.
 
 ## Upgrade Path
 
-The contracts do **not** currently implement the Stellar
-`__constructor`/`__upgrade` pattern. An upgrade requires deploying a new
-contract and wiring the frontend to the new address. See
-[DEPLOYMENT.md](../DEPLOYMENT.md) for the rollback procedure.
+The invoice, escrow, pool, and registry contracts expose an admin-gated
+`upgrade(new_wasm_hash: BytesN<32>)` entry point backed by Soroban's
+`env.deployer().update_current_contract_wasm`. First install the new Wasm on the
+network, then call `upgrade` with its hash from the contract's stored admin
+address. The contract is updated in place, so its address and storage remain
+unchanged, and an `upgraded` event carrying the new Wasm hash is emitted. Calls
+from any address other than the stored admin fail authorization. Protect the admin
+with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
+document for the redeployment rollback procedure.

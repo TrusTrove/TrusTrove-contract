@@ -74,10 +74,25 @@ Tracks verified SME issuers and buyers.
 initialize(admin)
 register_issuer(address, metadata) → bool
 register_buyer(address, metadata) → bool
+batch_register_issuers(entries) → Vec<Address>   ← admin only, max 50, returns skipped
+batch_register_buyers(entries) → Vec<Address>    ← admin only, max 50, returns skipped
 is_verified(address) → bool
 get_profile(address) → Profile
+get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
+list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
 ```
+
+**The registry is enumerable without replaying events.** Every registration
+path — single and batch, issuer and buyer — appends the new address to a
+per-role index (`ProfileIndex(role, n)`) and bumps a per-role counter
+(`ProfileCount(role)`), both TTL-extended like a profile entry. So an indexer
+or admin dashboard can call `get_profile_count(role)` to size its last page and
+then page through `list_profiles(role, start, limit)` with `limit ≤ 50`
+(`PageSizeExceeded` above the cap). Skipped/already-registered batch entries
+are never indexed twice, pages are contiguous and non-overlapping, and revoked
+profiles remain enumerated (revocation flips verification, it does not
+deregister the profile).
 
 **Revocation is prospective, not retroactive.** `is_verified()` is re-checked
 at every point where new business gets committed — `invoice.create()`,
@@ -105,8 +120,10 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 
 ```
 create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
+batch_create(issuer, entries) → Vec<invoice_id>   ← atomic, max 50 entries
 submit_attestation(invoice_id, payload, signature) → bool
 list_for_financing(invoice_id, discount_bps) → bool
+batch_list_for_financing(entries) → Vec<invoice_id>  ← tolerant, max 50 entries
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
 confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
@@ -116,8 +133,9 @@ repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
-get_by_status(status) → Vec<Invoice>
-get_by_issuer(address) → Vec<Invoice>
+get_by_status(status, page, page_size) → Vec<Invoice>
+get_by_issuer(address, page, page_size) → Vec<Invoice>
+get_by_buyer(address, page, page_size) → Vec<Invoice>
 get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
@@ -132,27 +150,43 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - Requires invoice to be in `Created` status.
 - Requires an active risk attestation from an authorized Underwrite agent.
 
+#### `batch_create(issuer, entries) → Vec<invoice_id>`
+- `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
+- **Atomic**: one invalid entry reverts the entire batch, including invoices already created by earlier entries. Callers fix the bad entry and resubmit the whole batch.
+- `issuer` authorizes **once** for the whole batch, not once per entry.
+- Panics with `BatchSizeExceeded` (`#28`) above 50 entries.
+
+#### `batch_list_for_financing(entries) → Vec<invoice_id>`
+- `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
+- **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
+- Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
 
 ### escrow_contract
 
-Holds USDC between pool funding and issuer payout. Only callable by `pool_contract`.
+Mediates USDC between the pool, issuer, and buyer. `pool.fund_invoice` locks the funded amount here and immediately releases it to the issuer in the same call (issue #819); repayment settles through `release_to_pool`, which consumes either a live lock or the issuer-release marker. Only callable by `pool_contract`.
 
 ```
 lock(invoice_id, amount) → bool
 release_to_issuer(invoice_id, issuer) → bool
 release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
+pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 ```
 
+When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
+`release_to_pool`, and `handle_default` all revert with `ContractPaused`.
+Read-only views (`get_locked`) stay callable.
+
 ### pool_contract
 
-USDC liquidity pool with share-based LP accounting. Share price grows as invoices repay.
+USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
 ```
 deposit(lp, usdc_amount) → shares
 withdraw(lp, shares) → usdc_amount
 fund_invoice(invoice_id) → bool         ← re-verifies issuer & buyer against registry_contract
+batch_fund_invoice(invoice_ids) → Vec<invoice_id>  ← permissionless, max 50 entries
 receive_repayment(invoice_id, amount) → bool  ← invoice_contract only
 receive_repayment_with_refund(invoice_id, amount, refund, buyer) → bool ← invoice_contract only
 handle_default(invoice_id) → bool
@@ -161,7 +195,8 @@ get_protocol_fee_bps() → u32
 get_treasury() → Address
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
-transfer(from, to, amount) → ()             ← SEP-41 share transfer
+transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
+transfer_shares(from, to, amount) → ()      ← non-standard legacy alias of transfer
 approve(from, spender, amount, expiration_ledger) → ()   ← SEP-41 grant
 allowance(from, spender) → i128                          ← 0 when spent/expired
 transfer_from(spender, from, to, amount) → ()            ← spender auth, spends grant
@@ -176,7 +211,7 @@ symbol() → String                    ← set at initialize()
 
 The protocol employs a `pool_factory` + per-asset pool instance model. The `pool_factory` handles deploying and tracking an independent `pool_contract` instance for each supported funding asset (e.g., USDC, XLM). This design isolates risk, ensuring that a shortfall in one asset pool cannot cross-contaminate another. 
 
-**Note**: This architecture explicitly supersedes closed issue #17's Option A/B question, resolved as Option B (parallel single-asset pools instead of a commingled multi-asset pool).
+**Note**: This architecture explicitly supersedes closed issue #17's Option A/B question, resolved as Option B (parallel single-asset pools instead of a commingled multi-asset pool). The full rationale, storage layout, deploy flow and the remaining single-asset checklist are in [Pool Factory Design](./docs/POOL_FACTORY_DESIGN.md).
 
 ### Contract Interaction Map
 
@@ -224,32 +259,33 @@ Pool ──[shares]──► LP
 The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
 
 
-Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice.
+Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
 
 ```
 No fund movement. Invoice status: Created → Listed.
 ```
 
-#### Step 3 — Fund Invoice (Pool → Escrow)
-Anyone can call `pool.fund_invoice(invoice_id)`. The pool computes the funded amount, locks it in escrow, and marks the invoice as funded.
+#### Step 3 — Fund Invoice (Pool → Escrow → Issuer)
+Anyone can call `pool.fund_invoice(invoice_id)`. The pool computes the funded amount, locks it in escrow, marks the invoice as funded, and releases the principal to the issuer — all inside this single call (issue #819, restoring #56).
 
 ```
 funded_amount = face_value × (10000 − discount_bps) / 10000
 
 Pool ──[funded_amount USDC]──► Escrow  (locked per invoice_id)
+Escrow ──[funded_amount USDC]──► Issuer (released in the same call)
 Invoice status: Listed → Funded
 ```
 
 The pool retains `face_value − funded_amount` (the discount) as accrued yield, collectible when the buyer repays.
 
-#### Step 4 — Release to Issuer (Escrow → Issuer) ⚠️ Known Gap
-The pool contract is expected to call `escrow.release_to_issuer(invoice_id, issuer)` so that the locked USDC reaches the issuer who can then ship goods.
+#### Step 4 — Release to Issuer (part of Step 3)
+The payout is not a separate step anymore: `fund_invoice` calls `escrow.release_to_issuer(invoice_id, issuer)` immediately after `lock`, so the issuer holds the USDC in the same transaction and can ship goods.
 
 ```
 Escrow ──[funded_amount USDC]──► Issuer
 ```
 
-**⚠️ This call is not yet wired into `fund_invoice` (see [Issue #56](https://github.com/TrusTrove/TrusTrove-contract/issues/56)).** In the current deployment, issuers do not automatically receive USDC after an invoice is funded. This is the highest-priority gap before mainnet.
+The earlier gap (issue #56) was fixed in 5f6dc7c, silently regressed by a later refactor, and re-wired by [#819](https://github.com/TrusTrove/TrusTrove-contract/issues/819). Because the escrow `Locked` record is consumed at funding, escrow keeps a durable `IssuerReleased(invoice_id)` marker instead: `release_to_pool` accepts that marker so repayment still settles (each marker or lock is consumed exactly once), and `escrow.handle_default` reports `false` for already-funded invoices — see Step 7 for how the pool books that.
 
 #### Step 5 — Ship & Confirm (no funds move)
 The issuer calls `mark_shipped`. Then **both** the issuer and the buyer must independently call `confirm_delivery`. Only when both confirmations are recorded does the invoice advance to `Confirmed`.
@@ -258,33 +294,40 @@ The issuer calls `mark_shipped`. Then **both** the issuer and the buyer must ind
 No fund movement. Invoice status: Funded → Active → Confirmed.
 ```
 
-#### Step 6 — Repay (Buyer → Pool, bypassing Escrow)
-The buyer calls `invoice.repay(invoice_id)`, which transfers `face_value` USDC **directly from the buyer to the pool**, then calls `pool.receive_repayment` to account for the yield.
+#### Step 6 — Repay (Buyer → Escrow → Pool)
+The buyer calls `invoice.repay(invoice_id)` (or `repay_partial` / `repay_early`), which transfers USDC from the buyer into escrow; escrow releases it to the pool via `release_to_pool`, and the pool records the yield split.
 
 ```
-Buyer ──[face_value USDC]──► Pool
-  Pool books yield: face_value − funded_amount = gross yield
-  Protocol fee cut: protocol_cut = gross_yield × fee_bps / 10000 ──► Treasury
-  LP yield: lp_yield = gross_yield − protocol_cut
+Buyer ──[face_value USDC]──► Escrow ──[face_value USDC]──► Pool
+  earned_by_pool = discount × elapsed / term   (capped at the full discount
+                                                at/after due_date)
+  refund_to_buyer = discount − earned_by_pool ──► Buyer
+  Protocol fee cut: protocol_cut = earned_by_pool × fee_bps / 10000 ──► Treasury
+  LP yield: lp_yield = earned_by_pool − protocol_cut
   TotalDeposits += lp_yield  (share price rises for all LPs)
   TotalYieldDistributed += lp_yield
-Invoice status: Confirmed → Repaid
+Invoice status: → Repaid
 ```
+
+`repay_early` is restricted to `Confirmed` invoices strictly before `due_date`; `repay` accepts `Funded`, `Active`, or `Confirmed` at any time and also refunds the unearned discount before maturity. Partial installments accumulate in escrow and settle at the pool only when the final one clears the balance. See [Repayment Timing and Refund Math](./docs/LIMITATIONS.md#repayment-timing-and-refund-math) for the allowed statuses, formulas, and worked examples.
 
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
 
-Repayment does **not** flow through escrow. The escrow contract is only involved in funding (Step 3), the missing issuer release (Step 4), and default recovery (Step 7).
+Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
-#### Step 7 — Default (Escrow → Pool)
-If the invoice passes its `due_date` without reaching `Repaid`, any caller triggers `invoice.trigger_default`. The invoice contract calls `pool.handle_default`, which in turn calls `escrow.handle_default` — returning the still-locked `funded_amount` to the pool.
+#### Step 7 — Default
+If the invoice passes its `due_date` without reaching `Repaid`, any caller triggers `invoice.trigger_default`. The invoice contract calls `pool.handle_default`, which calls `escrow.handle_default`. For a normally funded invoice the principal was already paid to the issuer at funding (Step 3), so escrow has nothing to hand back; the pool verifies the `IssuerReleased` marker via `escrow.was_released_to_issuer` and books the unrecoverable principal as a real LP capital loss. If escrow *can* still return a live lock (out-of-band funding), the legacy path runs and deposits are preserved. A `false` from escrow with no marker means the release was skipped and reverts with `EscrowDefaultNotReleased` (#21).
 
 ```
 invoice.trigger_default()
   └─► pool.handle_default()
-        └─► escrow.handle_default()
-              └─► Escrow ──[funded_amount USDC]──► Pool
+        ├─► escrow.handle_default()      → false for funded invoices (already paid out)
+        ├─► escrow.was_released_to_issuer → true (marker present, #819)
+        └─► invoice.mark_defaulted()
 Invoice status: → Defaulted
-  TotalFunded -= funded_amount  (liquidity freed)
+  TotalFunded -= funded_amount
+  TotalLossRealised += funded_amount
+  TotalDeposits -= funded_amount   (LP capital loss; shares are never burned)
 ```
 
 ### Summary Table
@@ -293,10 +336,9 @@ Invoice status: → Defaulted
 |---|---|---|---|---|
 | LP deposit | LP wallet | Pool | `usdc_amount` | No |
 | LP withdraw | Pool | LP wallet | `shares × price` | No |
-| Fund invoice | Pool | Escrow | `face_value × (1 − discount)` | Yes — locks |
-| Release to issuer *(gap)* | Escrow | Issuer | `funded_amount` | Yes — releases |
-| Repay | Buyer wallet | Pool | `face_value` | No |
-| Default recovery | Escrow | Pool | `funded_amount` | Yes — releases |
+| Fund invoice | Pool → Escrow → Issuer | Issuer | `face_value × (1 − discount)` | Yes — locks then releases in one call |
+| Repay | Buyer wallet → Escrow → Pool | Pool | `face_value` (or the outstanding balance for partial flow) | Yes — `release_to_pool` settles |
+| Default | Pool books LP loss *(principal already with issuer)* | Pool | `funded_amount` written off | Only if escrow still holds a live lock; otherwise marker-verified write-off (#819) |
 
 ### Security Invariants
 
@@ -405,12 +447,14 @@ TrusTrove is in active development on Stellar testnet. Several centralization tr
 The deployer wallet that calls `initialize()` on each contract becomes its `admin`. That single key currently controls:
 
 - Registering and revoking verified issuers/buyers (`registry_contract`)
-- Emergency pausing (not yet implemented — see roadmap below)
+- Emergency pausing of all four contracts (the escrow circuit breaker landed in issue #716)
 - Triggering `handle_default` as a fallback recovery path (`escrow_contract`)
 
 **Risk:** Loss or compromise of the admin key has a high blast radius. A single actor also introduces censorship risk for issuer onboarding.
 
-**Roadmap:** Migrate admin to a multi-sig (e.g., 3-of-5 Stellar signers) before any mainnet deployment.
+**Mitigation:** Configure the admin as a Stellar account with signer thresholds
+(for example, 3-of-5) before mainnet deployment. No contract change is needed;
+see [DEPLOYMENT.md](DEPLOYMENT.md#multi-sig-admin) for setup instructions.
 
 ### `fund_invoice` was previously admin-gated
 
@@ -438,11 +482,13 @@ If you want to contribute to governance design, open an issue tagged `complexity
 
 `invoice::trigger_default` is permissionless and requires no authorization (`admin.require_auth()` was removed). Anyone can trigger default processing once `now >= due_date`. This removes the single point of failure of an admin-gated default mechanism and ensures timely loss recognition and escrow fund recovery for liquidity pools without relying on admin intervention.
 
-### No emergency pause mechanism
+### Emergency pause mechanism (complete rollout)
 
-There is currently no circuit breaker. If a critical bug is found post-deployment the only recourse is to stop directing traffic to the affected contracts via the frontend.
+All four contracts — `pool`, `invoice`, `registry`, and `escrow` — expose admin-gated `pause() / unpause()` entry points backed by the shared [`trusttrove-pause`](contracts/pause) crate (issues #713, #714, #715, #716). While paused, every state-changing call reverts with `ContractPaused` while read-only views remain live.
 
-**Roadmap:** Add an `admin_pause() / admin_unpause()` function pair to each contract, guarded behind multi-sig, that blocks state-changing calls while reads remain live.
+The escrow covers `initialize`, `lock`, `release_to_issuer`, `release_to_pool`, and `handle_default`, so a compromised escrow admin or a stuck release path can be frozen without touching funds already locked — `get_locked` stays readable throughout.
+
+**Roadmap:** Back the admin key with a multi-sig.
 
 ---
 
@@ -465,6 +511,8 @@ Detailed references for contributors and integrators:
 - [Storage Schema](./docs/STORAGE.md) — on-chain data layout, TTL patterns, gas estimates
 - [Limitations](./docs/LIMITATIONS.md) — testnet constraints, known gaps, unhandled edge cases
 - [Event Catalog](./docs/EVENTS.md) — every emitted event, topics, data schema, and emitting contract
+- [Pool Factory Design](./docs/POOL_FACTORY_DESIGN.md) — per-asset pool factory (Option B), storage layout, deploy flow, single-asset checklist
+- [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md) — `get_agent` / `Agent` spec and attestation signature scheme consumed by `submit_attestation`
 
 ### Key conventions
 
@@ -514,6 +562,21 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 23 | `VerificationRequired` | Listing requires a valid underwriting attestation |
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
+| 26 | `InvalidConfiguration` | Configuration value is invalid |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
+| 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
+
+#### Pool Contract (`PoolError`)
+
+| Code | Variant | Description |
+|:---:|---|---|
+| 5 | `InsufficientLiquidity` | Pool does not have enough available liquidity to fund the invoice |
+| 8 | `InvoiceNotListed` | Invoice is not in `Listed` status |
+| 11 | `AssetMismatch` | Invoice funding asset does not match the pool's asset |
+| 12 | `UtilizationCapExceeded` | Funding would breach the pool's utilization cap |
+| 26 | `BatchSizeExceeded` | `batch_fund_invoice` was given more than `MAX_BATCH_SIZE` (50) entries |
+
+See [`contracts/pool/src/errors.rs`](contracts/pool/src/errors.rs) for the full list.
 
 ---
 

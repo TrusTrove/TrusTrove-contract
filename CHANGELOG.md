@@ -7,8 +7,27 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `invoice`: cap repayment yield at the full discount at maturity, including
+  late settlement through `repay` or `repay_partial`, without multiplying by
+  elapsed time after maturity (#948)
+
 ### Added
 
+- `registry`: `get_profile_count(role)` view, returning how many profiles are
+  registered for `Role::Issuer` / `Role::Buyer` in O(1) from a single stored
+  counter (#841)
+- `registry`: `list_profiles(role, start, limit)` view, returning a page of
+  registered addresses for a role in registration order, so indexers and admin
+  dashboards no longer have to replay `issuer_registered` / `buyer_registered`
+  events from genesis. `limit` is capped at 50 (mirroring the batch cap) and a
+  larger page panics with the new `RegistryError::PageSizeExceeded` (#8) (#841)
+- `registry`: per-role enumeration index, written by every registration path
+  (`register_issuer`, `register_buyer`, `batch_register_issuers`,
+  `batch_register_buyers`) as `DataKey::ProfileIndex(Role, u32)` plus
+  `DataKey::ProfileCount(Role)`, TTL-extended like a profile entry. Skipped
+  (already-registered) batch entries are never indexed twice (#841)
 - `pool`: SEP-41 `approve`, `allowance` and `transfer_from`, so third
   parties can move a share holder's allowance under the spender's own
   auth (#756)
@@ -18,6 +37,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (#757)
 - `pool`: `allowance_approved` event emitted on every successful
   `approve` (#756)
+- `pool`: `get_funded_amount(invoice_id)` read-only view returning
+  `Option<u128>` for the pool's active funding of an invoice: `Some(amount)`
+  while funded, `None` before funding and after repayment/default (#839)
 - `pool`: `protocol_fee_updated` event assertion coverage for
   `set_protocol_fee` (#767)
 - Deployment scripts now pass the full `pool.initialize` argument list
@@ -30,6 +52,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   and `share_decimals`
 
 ### Testing
+
+- `invoice`: cover attestation persistence and missing entries, all nine
+  lifecycle status counts against their indexes, and the issuer view's
+  stored address and typed missing-invoice error (#945, #946, #947)
+- `invoice`: verify repayment balances before, at, and after maturity through
+  the real pool and escrow, including installments and large-value overflow
+  regression coverage (#948)
 
 - `pool.deposit` gained regression coverage pinning the behaviour the
   internal `mint` helper refactor relies on: the `lp_deposited` event
