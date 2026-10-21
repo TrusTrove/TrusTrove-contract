@@ -532,7 +532,10 @@ impl EscrowContract {
         }
 
         let now = env.ledger().timestamp();
-        if now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
+        // A timestamp rollback (or a malformed record seeded with a future
+        // `locked_at`) must fail the grace-period check as a typed
+        // authorization error, not underflow `now - locked_at`.
+        if now < record.locked_at || now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
