@@ -383,7 +383,7 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if neither a lock record nor an issuer-release marker
     ///   exists for the invoice (unknown invoice or replayed release).
-    /// * `InvalidAmount` if `repayment_amount` is zero.
+    /// * `InvalidAmount` if `repayment_amount` is zero or exceeds `i128::MAX`.
     ///
     /// # Returns
     /// * `bool` - `true` when funds are returned.
