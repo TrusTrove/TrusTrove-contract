@@ -1688,6 +1688,9 @@ fn prop_escrow_balance_equals_sum_of_locked_records() {
     runner
         .run(&escrow_operations(), |operations| {
             let (env, client, _admin, pool, issuer, usdc_id) = setup();
+            // Coverage instrumentation increases host CPU cost for long property sequences.
+            // Keep all generated operations and invariants, without the default test budget.
+            env.budget().reset_unlimited();
             let invoice_ids = [
                 generate_invoice_id(&env, 200),
                 generate_invoice_id(&env, 201),

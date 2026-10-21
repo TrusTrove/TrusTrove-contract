@@ -7958,6 +7958,9 @@ fn prop_pool_token_balance_always_covers_available_liquidity() {
             ),
             |(fee_bps, steps)| {
                 let te = setup();
+                // Tarpaulin instrumentation can exhaust the default Soroban host budget.
+                // Preserve the full property sequence and its solvency assertions.
+                te.env.budget().reset_unlimited();
                 let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
 
                 // One random fee configuration per sequence (the issue's
