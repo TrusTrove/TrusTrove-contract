@@ -821,10 +821,15 @@ impl EscrowContract {
     /// ```
     pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
         let key = DataKey::History(invoice_id);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
+        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
+            Some(history) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                history
+            }
+            None => Vec::new(&env),
+        }
     }
 
     fn append_history(

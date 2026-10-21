@@ -13,13 +13,14 @@ use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
+    testutils::storage::Persistent,
     testutils::{Address as _, Events as _, Ledger},
     Address, BytesN, Env, IntoVal, Symbol, TryFromVal, Vec,
 };
 
 use crate::{
     DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent, EscrowRecord,
-    DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
+    DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 #[contract]
@@ -1525,6 +1526,52 @@ fn test_lock_fails_duplicate() {
     let invoice_id = generate_invoice_id(&env, 15);
     client.lock(&invoice_id, &1_000_000_000, &issuer);
     client.lock(&invoice_id, &500_000_000, &issuer);
+}
+
+#[test]
+fn test_get_history_extends_ttl() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 101);
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    let contract_id = client.address.clone();
+    let key = DataKey::History(invoice_id.clone());
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_before_read < TTL_THRESHOLD,
+        "history TTL should be below threshold before read, got {ttl_before_read}"
+    );
+
+    assert!(!client.get_history(&invoice_id).is_empty());
+
+    let ttl_after_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after_read > ttl_before_read,
+        "get_history should extend TTL: before={ttl_before_read}, after={ttl_after_read}"
+    );
+    assert!(
+        ttl_after_read >= TTL_EXTEND_TO - 1_000,
+        "history TTL should be extended close to EXTEND_TO, got {ttl_after_read}"
+    );
+}
+
+#[test]
+fn test_get_history_does_not_create_missing_entry() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 102);
+    let contract_id = client.address.clone();
+    let key = DataKey::History(invoice_id.clone());
+
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+    assert!(client.get_history(&invoice_id).is_empty());
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
 }
 
 #[test]

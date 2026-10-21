@@ -1,0 +1,5 @@
+# Exact, path-scoped exceptions only. Format: path|kind|exact-expression|rationale
+# This host-only test utility uses a fixed 32-byte test seed. The exception is
+# deliberately limited to this one conversion and becomes stale/fails closed if
+# the source expression is changed or removed.
+contracts/test-utils/src/lib.rs|unwrap|k256::ecdsa::SigningKey::from_slice(&TEST_AGENT_SEED).unwrap()|Host-only test signing key conversion from the fixed TEST_AGENT_SEED constant; not part of deployed contract Wasm.
