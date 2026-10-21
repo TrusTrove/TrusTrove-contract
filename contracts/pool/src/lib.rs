@@ -1863,6 +1863,17 @@ impl PoolContract {
     /// All storage reads default to `0` when the LP has no recorded position,
     /// so an LP without a position simply reports zeros.
     ///
+    /// # Overflow behaviour
+    /// The share price is computed as `lp_shares * total_deposits /
+    /// total_shares` in `u128` arithmetic, and the multiplication is
+    /// **checked**: when the product would exceed `u128::MAX` the view fails
+    /// with the typed `PoolError::Overflow` (`#13`) instead of returning a
+    /// wrapped-around position value. A corrupted pool state therefore fails
+    /// loudly rather than reporting a plausible-looking but wrong USDC value
+    /// to an integrator reading the position. This mirrors the write paths
+    /// (`withdraw` / `preview_withdraw`), which raise the same typed error
+    /// for the same product.
+    ///
     /// # TTL maintenance
     /// `get_lp_position` is a read that keeps a live position alive: every
     /// surviving LP-scoped persistent entry it reads (`LPShares`,
