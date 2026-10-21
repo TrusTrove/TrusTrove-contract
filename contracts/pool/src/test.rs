@@ -20,8 +20,8 @@ use crate::{
         MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SUGGESTED_DISCOUNT_CEILING_BPS,
         SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
-    DataKey, PoolContract, PoolContractClient, DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    DataKey, PoolContract, PoolContractClient, PoolError, DEFAULT_MIN_INITIAL_DEPOSIT,
+    DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -193,6 +193,71 @@ mod failing_escrow_default {
     impl MockFailingEscrowDefault {
         pub fn handle_default(_env: Env, _invoice_id: BytesN<32>, _pool: Address) -> bool {
             panic!("escrow handle_default failed");
+        }
+    }
+}
+
+// --------------- Mock Token (refund transfer failure) ---------------
+//
+// Stands in for the pool's funding asset to prove that a failing refund
+// transfer cannot leave the pool partially settled.
+//
+// `receive_repayment_with_refund` runs the pool's settlement accounting
+// (`settle_repayment`: LP yield credited, `TotalFunded` and
+// `ActiveInvoiceCount` decremented, `FundedInvoice` entry removed) *before*
+// it transfers the buyer's refund. This stub's `transfer` applies the
+// balance moves first and only then fails, so the test can prove that the
+// failed transfer rolls back both the stub's own writes and the pool's
+// settlement accounting in one atomic revert.
+
+mod failing_token {
+    use core::sync::atomic::{AtomicU32, Ordering};
+    use soroban_sdk::{
+        contract, contracterror, contractimpl, contracttype, panic_with_error, Address, Env,
+    };
+
+    /// Number of `transfer` calls the stub has seen.
+    ///
+    /// The stub's storage writes are rolled back together with the failed
+    /// call, so the attempt counter cannot live in the contract's storage:
+    /// it has to be kept outside the rollback boundary to prove that the
+    /// refund transfer was actually reached.
+    pub static TRANSFER_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+
+    #[contracterror]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum MockTokenError {
+        TransferFailed = 1,
+    }
+
+    #[contracttype]
+    pub struct TKey(pub Address);
+
+    #[contract]
+    pub struct MockFailingToken;
+
+    #[contractimpl]
+    impl MockFailingToken {
+        pub fn transfer(env: Env, from: Address, to: Address, amount: i128) {
+            TRANSFER_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+
+            // Move the balances *before* failing: a token that fails after
+            // applying its effects must still leave no trace, and neither
+            // must the pool's accounting.
+            let from_key = TKey(from);
+            let to_key = TKey(to);
+            let from_bal: i128 = env.storage().persistent().get(&from_key).unwrap_or(0);
+            let to_bal: i128 = env.storage().persistent().get(&to_key).unwrap_or(0);
+            env.storage()
+                .persistent()
+                .set(&from_key, &(from_bal - amount));
+            env.storage().persistent().set(&to_key, &(to_bal + amount));
+
+            panic_with_error!(&env, MockTokenError::TransferFailed);
+        }
+
+        pub fn balance(env: Env, addr: Address) -> i128 {
+            env.storage().persistent().get(&TKey(addr)).unwrap_or(0)
         }
     }
 }
@@ -1457,6 +1522,63 @@ fn test_get_lp_position_rejects_share_price_overflow() {
     let _ = te.pool.get_lp_position(&te.lp);
 }
 
+// Regression test for the public view boundary: a corrupted pool state that
+// pushes `lp_shares * total_deposits` past `u128::MAX` must fail with the
+// typed `PoolError::Overflow` (#13), not with a wrapped-around position value.
+//
+// Unlike the test above (which inflates only `TotalDeposits` on top of a real
+// deposit), this one seeds total shares, total deposits and the LP's own share
+// balance explicitly, so the multiplication overflows purely from the seeded
+// state. It also checks that the failed read leaves the pool state untouched:
+// `get_lp_position` is a view, so an overflow must not corrupt anything.
+#[test]
+fn test_get_lp_position_seeded_overflow_returns_typed_error() {
+    let te = setup();
+
+    // lp_shares * total_deposits = u128::MAX * u128::MAX overflows u128.
+    let lp_shares: u128 = u128::MAX;
+    let total_shares: u128 = u128::MAX;
+    let total_deposits: u128 = u128::MAX;
+
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&DataKey::LPShares(te.lp.clone()), &lp_shares);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &total_shares);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &total_deposits);
+    });
+
+    // The view must fail with the typed overflow error.
+    match te.pool.try_get_lp_position(&te.lp) {
+        Err(Ok(err)) => assert_eq!(
+            err,
+            soroban_sdk::Error::from(PoolError::Overflow),
+            "get_lp_position must fail with the typed Overflow error"
+        ),
+        _ => panic!("get_lp_position must fail with the typed Overflow error"),
+    }
+
+    // The failed read must not have changed any state.
+    let shares_after: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPShares(te.lp.clone()))
+            .unwrap()
+    });
+    assert_eq!(shares_after, lp_shares);
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.total_shares, total_shares);
+    assert_eq!(stats.total_deposits, total_deposits);
+}
+
 //  LP POSITION TESTS
 #[test]
 fn test_lp_position_empty() {
@@ -2495,6 +2617,134 @@ fn test_receive_repayment_with_refund_zero_refund_matches_receive_repayment() {
     assert_eq!(
         <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
         (amount, DEFAULT_YIELD_AMOUNT, 0)
+    );
+}
+
+// A failing refund transfer must not leave the pool partially settled.
+//
+// `receive_repayment_with_refund` settles the invoice first (LP yield
+// credited to `TotalDeposits` / `TotalYieldDistributed`, `TotalFunded` and
+// `ActiveInvoiceCount` decremented, `FundedInvoice` entry removed) and only
+// then transfers the buyer's refund out of the pool. If that transfer fails,
+// the whole call must revert: an invoice whose accounting was settled while
+// the buyer was never refunded would leave the pool's totals inconsistent
+// with its token balance and would silently drop the buyer's money.
+//
+// The token stub fails *after* applying its own balance moves, so the test
+// proves the revert is atomic for both the pool's settlement accounting and
+// the token's writes.
+#[test]
+fn test_receive_repayment_with_refund_rolls_back_when_refund_transfer_fails() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    // Swap the pool's funding asset for the failing token stub. Funding
+    // already happened against the real USDC mock, so only the refund
+    // transfer is affected.
+    let failing_token_id = te
+        .env
+        .register_contract(None, failing_token::MockFailingToken);
+    let failing_usdc = failing_token::MockFailingTokenClient::new(&te.env, &failing_token_id);
+    te.env.as_contract(&failing_token_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&failing_token::TKey(te.pool_id.clone()), &1_000_000_000i128);
+        te.env
+            .storage()
+            .persistent()
+            .set(&failing_token::TKey(te.buyer.clone()), &500i128);
+    });
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::FundingAsset, &failing_token_id);
+    });
+
+    let before = te.pool.get_stats();
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    let funded_amount_before: Option<u128> = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get(&funded_key)
+    });
+    assert_eq!(
+        funded_amount_before,
+        Some(DEFAULT_FUNDED_AMOUNT),
+        "invoice must be funded before the failing repayment"
+    );
+    let buyer_balance_before = failing_usdc.balance(&te.buyer);
+    let pool_balance_before = failing_usdc.balance(&te.pool_id);
+    failing_token::TRANSFER_ATTEMPTS.store(0, core::sync::atomic::Ordering::SeqCst);
+
+    // face_value=10_000_000_000, discount_bps=200 → funded=9_800_000_000.
+    // The surplus is split between the buyer's refund and the LP yield.
+    let amount = DEFAULT_FACE_VALUE;
+    let refund = 120_000_000u128;
+
+    let result =
+        te.pool
+            .try_receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(
+        result.is_err(),
+        "receive_repayment_with_refund must revert when the refund transfer fails"
+    );
+    assert_eq!(
+        failing_token::TRANSFER_ATTEMPTS.load(core::sync::atomic::Ordering::SeqCst),
+        1,
+        "the refund transfer must be the call that fails"
+    );
+
+    // The settlement accounting must be rolled back with the failed transfer.
+    let after = te.pool.get_stats();
+    assert_eq!(
+        after.total_deposits, before.total_deposits,
+        "total deposits must not change when the refund transfer fails"
+    );
+    assert_eq!(
+        after.total_funded, before.total_funded,
+        "total funded must not change when the refund transfer fails"
+    );
+    assert_eq!(
+        after.active_invoice_count, before.active_invoice_count,
+        "active invoice count must not change when the refund transfer fails"
+    );
+    assert_eq!(
+        after.total_yield_distributed, before.total_yield_distributed,
+        "total yield distributed must not change when the refund transfer fails"
+    );
+    assert_eq!(
+        after.total_shares, before.total_shares,
+        "total shares must not change when the refund transfer fails"
+    );
+    assert_eq!(
+        after.available_liquidity, before.available_liquidity,
+        "available liquidity must not change when the refund transfer fails"
+    );
+
+    // The funded entry must survive the failed settlement, with the same
+    // amount: the invoice is still outstanding and can be repaid again.
+    let funded_amount_after: Option<u128> = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get(&funded_key)
+    });
+    assert_eq!(
+        funded_amount_after,
+        Some(DEFAULT_FUNDED_AMOUNT),
+        "funded invoice entry must persist when the refund transfer fails"
+    );
+
+    // The buyer must not receive the refund, and the token's own balance
+    // moves must be rolled back with the failed transfer.
+    assert_eq!(
+        failing_usdc.balance(&te.buyer),
+        buyer_balance_before,
+        "buyer balance must not change when the refund transfer fails"
+    );
+    assert_eq!(
+        failing_usdc.balance(&te.pool_id),
+        pool_balance_before,
+        "pool token balance must not change when the refund transfer fails"
     );
 }
 
