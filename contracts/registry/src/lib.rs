@@ -183,10 +183,6 @@ impl RegistryContract {
             }
 
             // #130: new profiles start unverified; admin must verify via verify_profile.
-            // #978: store the metadata validated for this specific entry rather
-            // than an empty map, matching `register_issuer` / the buyer batch
-            // path. `metadata` is bound per iteration, so one entry's map can
-            // never leak into another entry's profile.
             let profile = Profile::new(Role::Issuer, false, env.ledger().timestamp(), metadata);
 
             env.storage().persistent().set(&key, &profile);
@@ -539,23 +535,18 @@ impl RegistryContract {
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
         let key = DataKey::Profile(address);
         match env.storage().persistent().get::<_, Profile>(&key) {
-            // No entry: return `Unregistered` without creating a profile or
-            // attempting to extend the TTL of a nonexistent entry.
             None => VerificationStatus::Unregistered,
             Some(profile) => {
-                let status = if profile.verified() {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                if profile.verified() {
                     VerificationStatus::Verified
                 } else if profile.revoked() {
                     VerificationStatus::Revoked
                 } else {
                     VerificationStatus::Pending
-                };
-                // Existing profile: extend its TTL with the same shared
-                // constants the write path and other profile reads use (#984).
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                status
+                }
             }
         }
     }
@@ -733,9 +724,10 @@ impl RegistryContract {
 
     /// Revokes a registered profile by setting its verification status to `false`.
     ///
-    /// This function is idempotent: calling it on an already-revoked profile
+    /// This function is idempotent: calling it on an already-unverified profile
     /// returns `true` without re-emitting the `address_revoked` event or
-    /// rewriting storage.
+    /// rewriting storage. The instance and profile TTLs are still extended so
+    /// repeated administrative reads cannot let the registry singleton age out.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -765,7 +757,13 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        if !profile.verified() {
+        if profile.revoked() {
+            // Only an already revoked profile is idempotent; Pending must transition.
+            // Extend TTLs so repeated admin reads don't let storage age out.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::extend_instance_ttl(&env);
             return true;
         }
         profile.set_verified(false);

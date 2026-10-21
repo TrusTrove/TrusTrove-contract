@@ -281,6 +281,8 @@ impl EscrowContract {
     /// * `NotFound` if no escrow record exists for the invoice.
     /// * `InvalidRecipient` if issuer is escrow or pool contract address.
     /// * `InvalidRecipient` if issuer does not match the stored issuer address.
+    /// * `InvalidAmount` if the stored amount exceeds `i128::MAX` (checked
+    ///   conversion fails before any transfer or record removal).
     ///
     /// # Returns
     /// * `bool` - `true` when funds are released.
@@ -309,14 +311,13 @@ impl EscrowContract {
         }
 
         let usdc = Self::usdc_client(&env);
-        if record.amount > i128::MAX as u128 {
-            panic_with_error!(&env, EscrowError::InvalidAmount);
-        }
-        usdc.transfer(
-            &env.current_contract_address(),
-            &issuer,
-            &(record.amount as i128),
-        );
+        // #1001: checked conversion — a corrupted record whose stored amount
+        // exceeds `i128::MAX` must surface the typed `InvalidAmount` error
+        // before any transfer or record removal, instead of wrapping into an
+        // invalid token amount.
+        let amount = i128::try_from(record.amount)
+            .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
+        usdc.transfer(&env.current_contract_address(), &issuer, &amount);
 
         Self::append_history(
             &env,
@@ -355,8 +356,14 @@ impl EscrowContract {
     /// the live `Locked` record (principal still in escrow) or the
     /// [`DataKey::IssuerReleased`] marker written by
     /// [`Self::release_to_issuer`] (principal already paid out). Whichever
-    /// exists is consumed, so `release_to_pool` can succeed at most once per
+    /// exists is consumed, so a full settlement can succeed at most once per
     /// funded invoice.
+    ///
+    /// Repayment may be partial: when a live lock holds more than
+    /// `repayment_amount`, the record is kept with its `amount` reduced by the
+    /// repaid portion and its original `locked_at` unchanged, so the escrow
+    /// still custodies the outstanding principal. Repaying the remainder (or
+    /// any amount at least equal to the residual) removes the record.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -411,8 +418,11 @@ impl EscrowContract {
 
         let key = DataKey::Locked(invoice_id.clone());
         let released_key = DataKey::IssuerReleased(invoice_id.clone());
-        let locked = env.storage().persistent().has(&key);
-        if !locked && !env.storage().persistent().has(&released_key) {
+        // Repayment can be partial: when a live lock covers more than this
+        // repayment, the residual stays locked (with its original
+        // `locked_at`) so custody keeps matching the outstanding principal.
+        let mut record: Option<EscrowRecord> = env.storage().persistent().get(&key);
+        if record.is_none() && !env.storage().persistent().has(&released_key) {
             panic_with_error!(&env, EscrowError::NotFound);
         }
 
@@ -430,8 +440,16 @@ impl EscrowContract {
             repayment_amount,
             None,
         );
-        if locked {
-            env.storage().persistent().remove(&key);
+        if let Some(mut record) = record.take() {
+            if repayment_amount < record.amount {
+                record.amount -= repayment_amount;
+                env.storage().persistent().set(&key, &record);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            } else {
+                env.storage().persistent().remove(&key);
+            }
         } else {
             env.storage().persistent().remove(&released_key);
         }

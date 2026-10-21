@@ -601,6 +601,7 @@ impl InvoiceContract {
     }
 
     /// Checks whether an asset is currently on the funding allow-list.
+    /// Successful reads renew the asset entry's TTL using the shared policy.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -620,9 +621,14 @@ impl InvoiceContract {
     /// let supported = client.is_supported_asset(&usdc);
     /// ```
     pub fn is_supported_asset(env: Env, asset: Address) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::SupportedAsset(asset))
+        let key = DataKey::SupportedAsset(asset);
+        let store = env.storage().persistent();
+        if store.has(&key) {
+            store.extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            true
+        } else {
+            false
+        }
     }
 
     /// Returns the number of assets currently on the funding allow-list.

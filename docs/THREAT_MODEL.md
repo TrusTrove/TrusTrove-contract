@@ -1,6 +1,6 @@
 # Threat Model
 
-> **Updated:** 2026-09-29
+> **Updated:** 2026-10-21
 > **Applies to:** All four Soroban smart contracts (registry, invoice, escrow, pool)
 
 This document describes the trust assumptions, authentication gates, and
@@ -14,6 +14,7 @@ profile.
 
 - [Trust Model](#trust-model)
 - [Authentication Gates](#authentication-gates)
+- [Registry Profile States and Transitions](#registry-profile-states-and-transitions)
 - [Attack Vectors](#attack-vectors)
 - [Centralization Risks](#centralization-risks)
 - [Defence-in-Depth](#defence-in-depth)
@@ -146,6 +147,59 @@ Any account can call these.
 | `get_locked`, `get_history` | Escrow | Read-only views |
 | `get_stats`, `get_lp_position`, `get_utilization_rate`, `get_usdc_asset` | Pool | Read-only views |
 | `trigger_default` | Invoice | Callable by any account once `now >= due_date` |
+
+---
+
+## Registry Profile States and Transitions
+
+Every registry profile managed by [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs)
+is in exactly one verification state. The `get_verification_status` view
+decodes it; an address with no profile at all reports `Unregistered`, which
+is the pre-registration state rather than a profile state.
+
+| State | Storage flags | `is_verified()` |
+|-------|---------------|-----------------|
+| `Pending` | `verified = false`, `revoked = false` | `false` |
+| `Verified` | `verified = true`, `revoked = false` | `true` |
+| `Revoked` | `verified = false`, `revoked = true` | `false` |
+
+### Transition table
+
+| From | Entry point | To | Authorization |
+|------|-------------|----|---------------|
+| `Unregistered` | [`register_issuer`](../contracts/registry/src/lib.rs) / [`register_buyer`](../contracts/registry/src/lib.rs) | `Pending` | The registered address itself (self-auth) |
+| `Unregistered` | `batch_register_issuers` / `batch_register_buyers` | `Pending` | Admin only |
+| `Pending` | `verify_profile(caller, address, true)` | `Verified` | Admin or verifier (#732) |
+| `Pending` | `verify_profile(caller, address, false)` | `Revoked` | Admin or verifier (#732) |
+| `Pending` | `revoke` | `Pending` (no-op — a never-verified profile is untouched) | Admin only |
+| `Pending` | `reinstate` | `Pending` (no-op — only operates on `Revoked` profiles, #606) | Admin only |
+| `Verified` | `revoke` | `Revoked` | Admin only |
+| `Verified` | `verify_profile(caller, address, false)` | `Revoked` | Admin or verifier (#732) |
+| `Verified` | `verify_profile(caller, address, true)` | `Verified` (no state change, but a `profile_verified` event is re-emitted per call, #987) | Admin or verifier (#732) |
+| `Revoked` | `reinstate` | `Verified` | Admin only |
+| `Revoked` | `verify_profile(caller, address, true)` | `Verified` | Admin or verifier (#732) |
+| `Revoked` | `revoke` | `Revoked` (idempotent no-op, no event re-emitted) | Admin only |
+
+Notes:
+
+- There is **no deregistration**: a revoked profile stays registered and
+  enumerated by `list_profiles`; revocation only flips the verification
+  flags.
+- `revoke` only acts on a `Verified` profile; to un-verify any registered
+  profile (including a `Pending` one) the verifier path
+  `verify_profile(caller, address, false)` is the general mechanism.
+- Re-registering an existing address panics with `AlreadyRegistered`, so a
+  profile can never return to `Pending` after its first registration.
+
+### Caller authorization for verification and admin entry points
+
+| Function | Who may call | Exact authorization | Source |
+|----------|--------------|---------------------|--------|
+| [`verify_profile`](../contracts/registry/src/lib.rs) | Stored admin **or** stored verifier (#732) | `caller.require_auth()` after a role check; any other caller panics with `Unauthorized` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`revoke`](../contracts/registry/src/lib.rs) | Stored admin only | `admin.require_auth()` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`reinstate`](../contracts/registry/src/lib.rs) | Stored admin only | `admin.require_auth()` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`transfer_ownership`](../contracts/registry/src/lib.rs) | Current admin **and** incoming admin | Dual auth: `admin.require_auth()` + `new_admin.require_auth()`, so ownership cannot be transferred to a non-consenting address | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`transfer_admin`](../contracts/registry/src/lib.rs) | Current admin only | `admin.require_auth()`; the incoming admin does **not** sign — a deliberate key-rotation escape hatch that is strictly weaker than `transfer_ownership` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
 
 ---
 

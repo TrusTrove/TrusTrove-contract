@@ -4,7 +4,7 @@ extern crate std;
 
 use crate::{
     DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -171,13 +171,13 @@ fn test_revoke_already_revoked_returns_true_no_reemit() {
     client.register_issuer(&issuer, &map![&env]);
     assert!(!client.is_verified(&issuer));
 
-    // First revoke — should be a no-op (already unverified) and return true.
+    // First revoke transitions Pending to Revoked.
     let result = client.revoke(&issuer);
     assert!(result);
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
-        VerificationStatus::Pending
+        VerificationStatus::Revoked
     );
 
     // Second revoke on already-unverified profile — should succeed
@@ -187,8 +187,9 @@ fn test_revoke_already_revoked_returns_true_no_reemit() {
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
-        VerificationStatus::Pending
+        VerificationStatus::Revoked
     );
+    assert_eq!(count_events_named(&env, "address_revoked"), 1);
 }
 
 #[test]
@@ -446,6 +447,300 @@ fn test_reinstate_on_verified_profile_rejection_leaves_state_unchanged() {
     assert_eq!(env.events().all().len(), events_before);
 }
 
+// ============== REINSTATE STATE CONSTRAINTS AND EVENT BEHAVIOR (#983) ==============
+
+/// Asserts that two profiles carry the same observable state.
+///
+/// `Profile` deliberately does not implement `PartialEq`: its `packed_flags`
+/// bit layout is a private implementation detail that must not become a
+/// stable external contract (#609). The decoded views and the remaining
+/// fields are compared individually instead, which is exactly the state an
+/// off-chain consumer can observe.
+#[track_caller]
+fn assert_profiles_equivalent(before: &Profile, after: &Profile) {
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(after.metadata, before.metadata);
+}
+
+/// Counts the events whose first topic symbol is `name`.
+///
+/// Used to assert how many times a specific event was published, which the
+/// "no event" and "exactly one event" assertions below need. The topic is
+/// decoded back into a `Symbol` because `Val` itself is not comparable.
+fn count_events_named(env: &Env, name: &str) -> u32 {
+    let expected = Symbol::new(env, name);
+    let all_events = env.events().all();
+    let mut count = 0u32;
+    for i in 0..all_events.len() {
+        let event = all_events.get(i).expect("event index in range");
+        let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if topics.is_empty() {
+            continue;
+        }
+        let topic_symbol: Symbol = match topics.get(0).unwrap().try_into_val(env) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        if topic_symbol == expected {
+            count += 1;
+        }
+    }
+    count
+}
+
+/// A `reinstate` call against a `Pending` profile is rejected as a state
+/// transition: the stored profile is left exactly as it was and no event is
+/// emitted (#983).
+///
+/// `Pending` is the state of a freshly registered profile. `reinstate` is the
+/// inverse of `revoke`, so it must never double as an alternate path to
+/// verify a profile that was never verified — `verify_profile` is the only
+/// way to move a profile out of `Pending`.
+#[test]
+fn test_reinstate_on_pending_profile_leaves_profile_unchanged() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+
+    let profile_before = client.get_profile(&issuer);
+    assert!(!profile_before.verified());
+    assert!(!profile_before.revoked());
+    let events_before = env.events().all();
+
+    // The no-op path returns before any storage work, so the profile entry's
+    // remaining TTL must not be renewed either. Read the TTL around the
+    // call — `get_profile` above extends it, so it cannot be sampled after
+    // the call.
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+    let ttl_before_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+
+    assert!(client.reinstate(&issuer));
+
+    let ttl_after_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert_eq!(
+        ttl_after_reinstate, ttl_before_reinstate,
+        "a no-op reinstate must not write to the profile entry"
+    );
+
+    // The whole profile record survives the call untouched: role, both
+    // flags, the registration timestamp and the metadata all stay the same.
+    let profile_after = client.get_profile(&issuer);
+    assert_profiles_equivalent(&profile_before, &profile_after);
+    assert!(!profile_after.verified());
+    assert!(!profile_after.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    // No event at all — in particular no `address_reinstated`.
+    assert_eq!(env.events().all(), events_before);
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
+}
+
+/// A `reinstate` call against an already `Verified` profile is rejected as a
+/// state transition: the stored profile is left exactly as it was and no
+/// event is emitted (#983).
+///
+/// This is the idempotency guard introduced with `revoke` (#606). Without it
+/// a second `reinstate` would re-emit `address_reinstated` and off-chain
+/// indexers would read it as a fresh un-revocation.
+#[test]
+fn test_reinstate_on_verified_profile_leaves_profile_unchanged() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+    client.verify_profile(&admin, &issuer, &true);
+
+    let profile_before = client.get_profile(&issuer);
+    assert!(profile_before.verified());
+    assert!(!profile_before.revoked());
+    let events_before = env.events().all();
+
+    // The no-op path returns before any storage work, so the profile entry's
+    // remaining TTL must not be renewed either. Read the TTL around the
+    // call — `get_profile` above extends it, so it cannot be sampled after
+    // the call.
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+    let ttl_before_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+
+    assert!(client.reinstate(&issuer));
+
+    let ttl_after_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert_eq!(
+        ttl_after_reinstate, ttl_before_reinstate,
+        "a no-op reinstate must not write to the profile entry"
+    );
+
+    // The whole profile record survives the call untouched.
+    let profile_after = client.get_profile(&issuer);
+    assert_profiles_equivalent(&profile_before, &profile_after);
+    assert!(profile_after.verified());
+    assert!(!profile_after.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    // No event at all — in particular no `address_reinstated`.
+    assert_eq!(env.events().all(), events_before);
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
+}
+
+/// Reinstating a `Revoked` profile clears the `revoked` flag and sets
+/// `verified`, and carries every other profile field over untouched (#983).
+///
+/// The cleared `revoked` flag is asserted directly on the profile rather
+/// than through `get_verification_status`: the status view checks `verified`
+/// first, so it reports `Verified` even if the `revoked` flag were still
+/// set. Reading the flag off the profile is the only way to pin it.
+#[test]
+fn test_reinstate_clears_revoked_flag_and_preserves_profile_fields() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    let profile_before = client.get_profile(&issuer);
+    assert!(!profile_before.verified());
+    assert!(profile_before.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    assert!(client.reinstate(&issuer));
+
+    let profile_after = client.get_profile(&issuer);
+    // `verified` is set and the `revoked` flag is cleared.
+    assert!(profile_after.verified());
+    assert!(!profile_after.revoked());
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    // The transition flips the two flags and nothing else: role, registration
+    // timestamp and metadata are carried over untouched.
+    assert_eq!(profile_after.role(), profile_before.role());
+    assert_eq!(profile_after.registered_at, profile_before.registered_at);
+    assert_eq!(profile_after.metadata, profile_before.metadata);
+}
+
+/// Reinstating a `Revoked` profile extends the profile entry's TTL (#983).
+///
+/// A reinstatement is the moment an administrator brings a profile back
+/// into service, so the entry must be kept alive on the same schedule as
+/// every other write path in the registry.
+#[test]
+fn test_reinstate_extends_profile_ttl() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+
+    // Record the initial remaining TTL, then advance the ledger so the
+    // remaining TTL drops below the write-path threshold. The reinstatement
+    // is then the call that has to renew it.
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_before_reinstate < TTL_THRESHOLD,
+        "TTL should be below threshold before reinstate, got {ttl_before_reinstate}"
+    );
+
+    assert!(client.reinstate(&issuer));
+
+    let ttl_after_reinstate: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after_reinstate > ttl_before_reinstate,
+        "reinstate should extend TTL: before={ttl_before_reinstate}, after={ttl_after_reinstate}"
+    );
+    assert!(
+        ttl_after_reinstate >= 1_999_000,
+        "TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_reinstate}"
+    );
+}
+
+/// A reinstatement emits exactly one `address_reinstated` event, and a
+/// follow-up call against the now-`Verified` profile emits none (#983).
+///
+/// `address_reinstated` is the only signal an indexer gets for an
+/// un-revocation, so it must be published exactly once per real transition.
+#[test]
+fn test_reinstate_emits_exactly_one_address_reinstated_event() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    // Revoking does not reinstate anything.
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
+
+    assert!(client.reinstate(&issuer));
+    assert_eq!(count_events_named(&env, "address_reinstated"), 1);
+
+    // The profile is `Verified` now, so the second call takes the no-op path
+    // and must not publish a second event.
+    assert!(client.reinstate(&issuer));
+    assert_eq!(count_events_named(&env, "address_reinstated"), 1);
+}
+
 #[test]
 fn test_update_metadata_self_succeeds() {
     let (env, client) = setup();
@@ -522,6 +817,171 @@ fn test_update_metadata_wrong_auth_panics() {
         )
     ];
     client.update_metadata(&issuer, &updated_metadata);
+}
+
+// ============== ISSUE #992: update_metadata PRESERVES PACKED FLAGS ==============
+
+#[test]
+fn test_update_metadata_preserves_flags_on_verified_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+
+    let before = client.get_profile(&issuer);
+    assert!(before.verified());
+    assert!(!before.revoked());
+    assert_eq!(before.role(), Role::Issuer);
+    assert_eq!(before.packed_flags, 0b010); // Issuer | verified
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Updated Corp"),
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.metadata, updated_metadata);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+fn test_update_metadata_preserves_flags_on_revoked_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+
+    let before = client.get_profile(&issuer);
+    assert!(!before.verified());
+    assert!(before.revoked());
+    assert_eq!(before.role(), Role::Issuer);
+    assert_eq!(before.packed_flags, 0b100); // Issuer | revoked
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Revoked Corp"),
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.metadata, updated_metadata);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+}
+
+#[test]
+fn test_update_metadata_preserves_flags_on_pending_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    let before = client.get_profile(&issuer);
+    assert!(!before.verified());
+    assert!(!before.revoked());
+    assert_eq!(before.role(), Role::Issuer);
+    assert_eq!(before.packed_flags, 0b000); // Issuer | pending
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Pending Corp"),
+        )
+    ];
+    let result = client.update_metadata(&issuer, &updated_metadata);
+    assert!(result);
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.metadata, updated_metadata);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.role(), before.role());
+    assert_eq!(after.verified(), before.verified());
+    assert_eq!(after.revoked(), before.revoked());
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+}
+
+#[test]
+fn test_update_metadata_preserves_flags_on_buyer_roles() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    // Buyer: Verified
+    let buyer_verified = Address::generate(&env);
+    client.register_buyer(&buyer_verified, &map![&env]);
+    client.verify_profile(&admin, &buyer_verified, &true);
+    let before_v = client.get_profile(&buyer_verified);
+    assert_eq!(before_v.packed_flags, 0b011); // Buyer | verified
+
+    // Buyer: Revoked
+    let buyer_revoked = Address::generate(&env);
+    client.register_buyer(&buyer_revoked, &map![&env]);
+    client.verify_profile(&admin, &buyer_revoked, &true);
+    client.revoke(&buyer_revoked);
+    let before_r = client.get_profile(&buyer_revoked);
+    assert_eq!(before_r.packed_flags, 0b101); // Buyer | revoked
+
+    // Buyer: Pending
+    let buyer_pending = Address::generate(&env);
+    client.register_buyer(&buyer_pending, &map![&env]);
+    let before_p = client.get_profile(&buyer_pending);
+    assert_eq!(before_p.packed_flags, 0b001); // Buyer | pending
+
+    let updated_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer Updated"),
+        )
+    ];
+
+    for who in [&buyer_verified, &buyer_revoked, &buyer_pending] {
+        let before = client.get_profile(who);
+        let result = client.update_metadata(who, &updated_metadata);
+        assert!(result);
+        let after = client.get_profile(who);
+        assert_eq!(after.metadata, updated_metadata);
+        assert_eq!(after.packed_flags, before.packed_flags);
+        assert_eq!(after.role(), before.role());
+        assert_eq!(after.verified(), before.verified());
+        assert_eq!(after.revoked(), before.revoked());
+        assert_eq!(after.registered_at, before.registered_at);
+    }
 }
 
 #[test]
@@ -992,67 +1452,6 @@ fn test_batch_register_issuers_invalid_metadata_leaves_state_clean() {
     );
 }
 
-// ============== ISSUE #978: PRESERVE SUPPLIED METADATA ==============
-
-#[test]
-fn test_batch_register_issuers_preserves_supplied_metadata_per_entry() {
-    let (env, client) = setup();
-    let admin = Address::generate(&env);
-    client.initialize(&admin);
-
-    let issuer1 = Address::generate(&env);
-    let issuer2 = Address::generate(&env);
-    let issuer3 = Address::generate(&env);
-
-    // Distinct, non-empty metadata maps so any cross-entry mix-up or
-    // empty-map substitution is detectable.
-    let metadata1 = map![
-        &env,
-        (
-            String::from_str(&env, "name"),
-            String::from_str(&env, "Issuer One")
-        ),
-        (
-            String::from_str(&env, "jurisdiction"),
-            String::from_str(&env, "US")
-        )
-    ];
-    let metadata2 = map![
-        &env,
-        (
-            String::from_str(&env, "name"),
-            String::from_str(&env, "Issuer Two")
-        ),
-        (
-            String::from_str(&env, "jurisdiction"),
-            String::from_str(&env, "DE")
-        )
-    ];
-    // An entry with explicitly empty metadata must stay empty (#978: preserve
-    // supplied metadata — including the supply of nothing).
-    let metadata3 = map![&env];
-
-    let entries = vec![
-        &env,
-        (issuer1.clone(), metadata1.clone()),
-        (issuer2.clone(), metadata2.clone()),
-        (issuer3.clone(), metadata3.clone()),
-    ];
-
-    let skipped = client.batch_register_issuers(&entries);
-    assert_eq!(skipped.len(), 0);
-
-    // Every stored profile must carry exactly the metadata supplied for its
-    // entry — no dropped maps, no mixing between entries.
-    assert_eq!(client.get_profile(&issuer1).metadata, metadata1);
-    assert_eq!(client.get_profile(&issuer2).metadata, metadata2);
-    assert_eq!(
-        client.get_profile(&issuer3).metadata,
-        map![&env],
-        "an explicitly empty metadata map must be stored empty"
-    );
-}
-
 // ============== BATCH REGISTER BUYERS (#448) ==============
 
 #[test]
@@ -1187,6 +1586,610 @@ fn test_batch_register_buyers_exceeds_limit() {
     client.batch_register_buyers(&entries);
 }
 
+// ============== ISSUE #990: BATCH METADATA BOUNDS COVERAGE ==============
+
+#[test]
+fn test_batch_register_issuers_accepts_max_metadata_limits() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    // Max entries (20)
+    let mut max_entries = map![&env];
+    for i in 0..MAX_METADATA_SIZE {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        max_entries.set(key, value);
+    }
+    assert_eq!(max_entries.len(), 20);
+
+    // Max key length (64)
+    let max_key = "k".repeat(MAX_METADATA_KEY_LEN as usize);
+    let max_key_metadata = map![
+        &env,
+        (
+            String::from_str(&env, &max_key),
+            String::from_str(&env, "value")
+        )
+    ];
+
+    // Max value length (512)
+    let max_value = "v".repeat(MAX_METADATA_VALUE_LEN as usize);
+    let max_value_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &max_value)
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), max_entries),
+        (issuer2.clone(), max_key_metadata),
+        (issuer3.clone(), max_value_metadata),
+    ];
+
+    let skipped = client.batch_register_issuers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    assert!(!client.is_verified(&issuer1));
+    assert!(!client.is_verified(&issuer2));
+    assert!(!client.is_verified(&issuer3));
+
+    assert_eq!(client.get_profile(&issuer1).metadata.len(), 20);
+    assert_eq!(
+        client
+            .get_profile(&issuer2)
+            .metadata
+            .get(String::from_str(&env, &max_key))
+            .unwrap(),
+        String::from_str(&env, "value")
+    );
+    assert_eq!(
+        client
+            .get_profile(&issuer3)
+            .metadata
+            .get(String::from_str(&env, "key"))
+            .unwrap()
+            .len(),
+        MAX_METADATA_VALUE_LEN
+    );
+}
+
+#[test]
+fn test_batch_register_buyers_accepts_max_metadata_limits() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+    let buyer3 = Address::generate(&env);
+
+    // Max entries (20)
+    let mut max_entries = map![&env];
+    for i in 0..MAX_METADATA_SIZE {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        max_entries.set(key, value);
+    }
+
+    // Max key length (64)
+    let max_key = "k".repeat(MAX_METADATA_KEY_LEN as usize);
+    let max_key_metadata = map![
+        &env,
+        (
+            String::from_str(&env, &max_key),
+            String::from_str(&env, "value")
+        )
+    ];
+
+    // Max value length (512)
+    let max_value = "v".repeat(MAX_METADATA_VALUE_LEN as usize);
+    let max_value_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &max_value)
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), max_entries),
+        (buyer2.clone(), max_key_metadata),
+        (buyer3.clone(), max_value_metadata),
+    ];
+
+    let skipped = client.batch_register_buyers(&entries);
+    assert_eq!(skipped.len(), 0);
+
+    assert!(!client.is_verified(&buyer1));
+    assert!(!client.is_verified(&buyer2));
+    assert!(!client.is_verified(&buyer3));
+
+    assert_eq!(client.get_profile(&buyer1).metadata.len(), 20);
+    assert_eq!(
+        client
+            .get_profile(&buyer2)
+            .metadata
+            .get(String::from_str(&env, &max_key))
+            .unwrap(),
+        String::from_str(&env, "value")
+    );
+    assert_eq!(
+        client
+            .get_profile(&buyer3)
+            .metadata
+            .get(String::from_str(&env, "key"))
+            .unwrap()
+            .len(),
+        MAX_METADATA_VALUE_LEN
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_oversized_entry_count() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    // Valid metadata for first two
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    // Third entry has 21 entries (exceeds MAX_METADATA_SIZE=20)
+    let mut oversized = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata.clone()),
+        (issuer2.clone(), valid_metadata),
+        (issuer3.clone(), oversized),
+    ];
+
+    // Should panic and reject entire batch
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_oversized_entry_count_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+    let issuer3 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let mut oversized = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata.clone()),
+        (issuer2.clone(), valid_metadata),
+        (issuer3.clone(), oversized),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(
+        result.is_err(),
+        "batch with oversized metadata should panic"
+    );
+
+    // Verify NO profiles were persisted (atomic rejection)
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer3),
+        VerificationStatus::Unregistered
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_oversized_key() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let long_key = "k".repeat((MAX_METADATA_KEY_LEN + 1) as usize);
+    let oversized_key_metadata = map![
+        &env,
+        (
+            String::from_str(&env, &long_key),
+            String::from_str(&env, "value")
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_key_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_oversized_key_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let long_key = "k".repeat((MAX_METADATA_KEY_LEN + 1) as usize);
+    let oversized_key_metadata = map![
+        &env,
+        (
+            String::from_str(&env, &long_key),
+            String::from_str(&env, "value")
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_key_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_oversized_value() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let long_value = "v".repeat((MAX_METADATA_VALUE_LEN + 1) as usize);
+    let oversized_value_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &long_value)
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_value_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_oversized_value_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let long_value = "v".repeat((MAX_METADATA_VALUE_LEN + 1) as usize);
+    let oversized_value_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "key"),
+            String::from_str(&env, &long_value)
+        )
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), oversized_value_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_empty_key() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let empty_key_metadata = map![
+        &env,
+        (String::from_str(&env, ""), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_key_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_empty_key_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let empty_key_metadata = map![
+        &env,
+        (String::from_str(&env, ""), String::from_str(&env, "value"))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_key_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_batch_register_issuers_rejects_empty_value() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let empty_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, ""))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_value_metadata),
+    ];
+
+    client.batch_register_issuers(&entries);
+}
+
+#[test]
+fn test_batch_register_issuers_rejects_empty_value_leaves_state_clean() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let issuer1 = Address::generate(&env);
+    let issuer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    let empty_value_metadata = map![
+        &env,
+        (String::from_str(&env, "key"), String::from_str(&env, ""))
+    ];
+
+    let entries = vec![
+        &env,
+        (issuer1.clone(), valid_metadata),
+        (issuer2.clone(), empty_value_metadata),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_issuers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(
+        client.get_verification_status(&issuer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer2),
+        VerificationStatus::Unregistered
+    )
+}
+
+#[test]
+fn test_batch_register_buyers_metadata_bounds_mirror_issuers() {
+    // Buyers use the same validate_metadata path; spot-check the same boundaries.
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+
+    let buyer1 = Address::generate(&env);
+    let buyer2 = Address::generate(&env);
+
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid")
+        )
+    ];
+
+    // Oversized entry count
+    let mut oversized = map![&env];
+    for i in 0..21 {
+        let key = String::from_str(&env, &std::format!("key_{}", i));
+        let value = String::from_str(&env, &std::format!("value_{}", i));
+        oversized.set(key, value);
+    }
+
+    let entries = vec![
+        &env,
+        (buyer1.clone(), valid_metadata),
+        (buyer2.clone(), oversized),
+    ];
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.batch_register_buyers(&entries);
+    }));
+    assert!(result.is_err());
+
+    assert_eq!(
+        client.get_verification_status(&buyer1),
+        VerificationStatus::Unregistered
+    );
+    assert_eq!(
+        client.get_verification_status(&buyer2),
+        VerificationStatus::Unregistered
+    );
+}
+
 #[test]
 fn test_verify_profile_updates_status() {
     let (env, client) = setup();
@@ -1305,6 +2308,64 @@ fn test_get_verification_status_distinguishes_pending_from_unregistered() {
     assert_eq!(
         client.get_verification_status(&pending),
         VerificationStatus::Pending
+    );
+}
+
+// The state-transition table in docs/THREAT_MODEL.md ("Registry Profile
+// States and Transitions") is the documented contract for how a profile
+// moves between Pending, Verified and Revoked. This test walks every
+// documented transition — including the two documented no-ops — so the
+// table cannot silently drift from the code (#995).
+#[test]
+fn test_documented_verification_state_transitions() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    let metadata = map![&env];
+
+    // Unregistered -> Pending on self-authenticated registration.
+    client.register_issuer(&issuer, &metadata);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    // Pending -> Verified via verify_profile(_, true) (admin or verifier).
+    client.verify_profile(&admin, &issuer, &true);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    // Verified -> Revoked via the admin-only revoke.
+    client.revoke(&issuer);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    // Revoked -> Verified via the admin-only reinstate.
+    client.reinstate(&issuer);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    // Admin revoke transitions a never-verified (Pending) profile to Revoked.
+    let pending = Address::generate(&env);
+    client.register_buyer(&pending, &metadata);
+    client.revoke(&pending);
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
+
+    // Revoked remains Revoked via verify_profile(_, false) (admin or verifier).
+    client.verify_profile(&admin, &pending, &false);
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
     );
 }
 
@@ -2615,9 +3676,7 @@ fn run_batch_register_prop_test(is_buyer: bool) {
                             client.get_verification_status(&addr),
                             VerificationStatus::Pending
                         );
-                        // Both roles store the supplied metadata exactly as
-                        // given, including explicitly empty maps (#978: the
-                        // issuer batch path previously discarded it).
+                        // Both issuers and buyers now preserve metadata in batch registration
                         let expected_metadata = build_metadata(&env, &metadata_per_entry[i]);
                         prop_assert_eq!(profile.metadata, expected_metadata);
                     }
@@ -3354,4 +4413,60 @@ fn test_update_profile_preserves_role_flags_and_registered_at() {
     assert_eq!(client.get_profile(&issuer).registered_at, 1_000);
     assert_eq!(client.get_profile(&buyer).registered_at, 2_000);
     assert_eq!(client.get_profile(&revoked_buyer).registered_at, 3_000);
+}
+
+#[test]
+fn test_revoke_pending_verified_and_revoked_transitions() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let pending = Address::generate(&env);
+    let verified = Address::generate(&env);
+    client.register_issuer(&pending, &map![&env]);
+    client.register_issuer(&verified, &map![&env]);
+    client.verify_profile(&admin, &verified, &true);
+
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Pending
+    );
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Verified
+    );
+    assert_eq!(count_events_named(&env, "address_revoked"), 0);
+
+    assert!(client.revoke(&pending));
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
+    let pending_profile = client.get_profile(&pending);
+    assert!(!pending_profile.verified());
+    assert!(pending_profile.revoked());
+    assert!(!client.is_verified(&pending));
+    assert_eq!(count_events_named(&env, "address_revoked"), 1);
+
+    assert!(client.revoke(&verified));
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Revoked
+    );
+    let verified_profile = client.get_profile(&verified);
+    assert!(!verified_profile.verified());
+    assert!(verified_profile.revoked());
+    assert!(!client.is_verified(&verified));
+    assert_eq!(count_events_named(&env, "address_revoked"), 2);
+
+    assert!(client.revoke(&pending));
+    assert!(client.revoke(&verified));
+    assert_eq!(
+        client.get_verification_status(&pending),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(
+        client.get_verification_status(&verified),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(count_events_named(&env, "address_revoked"), 2);
 }

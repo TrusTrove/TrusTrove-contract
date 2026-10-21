@@ -264,7 +264,8 @@ impl PoolContract {
     /// No authorization is required.
     ///
     /// # Panics
-    /// * Panics if the contract has not been initialized (missing `FundingAsset`).
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `FundingAsset`).
     ///
     /// # Returns
     /// * `Address` - The funding asset address.
@@ -280,6 +281,24 @@ impl PoolContract {
     /// Deprecated alias for [`Self::get_funding_asset`], kept so integrators
     /// built against the pre-factory USDC-only naming keep working. New
     /// callers should use `get_funding_asset` instead.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `PoolError::NotInitialized` if the contract has not been initialized
+    ///   (missing `FundingAsset`), matching [`Self::get_funding_asset`].
+    ///
+    /// # Returns
+    /// * `Address` - The funding asset address.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let asset = client.get_usdc_asset();
+    /// ```
     pub fn get_usdc_asset(env: Env) -> Address {
         Self::funding_asset(&env)
     }
@@ -1787,7 +1806,9 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `NotInitialized` if the pool contract has not been initialized.
-    /// * `Overflow` if scaling `total_funded` into basis points would overflow.
+    /// * `Overflow` if scaling `total_funded` into basis points would overflow,
+    ///   or if the invariant `TotalFunded <= TotalDeposits` is violated
+    ///   (corrupt storage or logic bug).
     ///
     /// # Returns
     /// * `PoolStats` - The current pool statistics.
@@ -1803,6 +1824,13 @@ impl PoolContract {
         let totals = Self::totals(&env);
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
+        // Invariant: total_funded must never exceed total_deposits.
+        // If it does (corrupt storage or logic bug), fail with a typed error
+        // rather than underflowing on `available = total_deposits - total_funded`
+        // in a public read path.
+        if total_funded > total_deposits {
+            panic_with_error!(&env, PoolError::Overflow);
+        }
         let available = total_deposits - total_funded;
         let utilization = Self::utilization_bps_or_panic(&env, total_funded, total_deposits);
 
@@ -1834,6 +1862,17 @@ impl PoolContract {
     ///
     /// All storage reads default to `0` when the LP has no recorded position,
     /// so an LP without a position simply reports zeros.
+    ///
+    /// # Overflow behaviour
+    /// The share price is computed as `lp_shares * total_deposits /
+    /// total_shares` in `u128` arithmetic, and the multiplication is
+    /// **checked**: when the product would exceed `u128::MAX` the view fails
+    /// with the typed `PoolError::Overflow` (`#13`) instead of returning a
+    /// wrapped-around position value. A corrupted pool state therefore fails
+    /// loudly rather than reporting a plausible-looking but wrong USDC value
+    /// to an integrator reading the position. This mirrors the write paths
+    /// (`withdraw` / `preview_withdraw`), which raise the same typed error
+    /// for the same product.
     ///
     /// # TTL maintenance
     /// `get_lp_position` is a read that keeps a live position alive: every
