@@ -1008,7 +1008,7 @@ fn test_release_to_pool_partial_repayment_succeeds() {
     let partial: u128 = 500_000_000;
     let result = client.release_to_pool(&invoice_id, &partial);
     assert!(result);
-    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(client.get_locked(&invoice_id), amount - partial);
 
     // Verify pool received exactly `partial`, not the full locked `amount`
     let pool_balance_after = get_balance(&env, &usdc_id, &pool);
@@ -1018,6 +1018,53 @@ fn test_release_to_pool_partial_repayment_succeeds() {
         escrow_balance_before - escrow_balance_after,
         partial as i128
     );
+}
+
+#[test]
+fn test_repeated_partial_releases_converge_and_preserve_history_order() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 81);
+    let original = 1_000_000_000u128;
+    let first = 200_000_000u128;
+    let second = 350_000_000u128;
+    let final_release = original - first - second;
+
+    client.lock(&invoice_id, &original, &issuer);
+    assert_eq!(client.get_locked(&invoice_id), original);
+
+    assert!(client.release_to_pool(&invoice_id, &first));
+    assert_eq!(client.get_locked(&invoice_id), original - first);
+
+    assert!(client.release_to_pool(&invoice_id, &second));
+    assert_eq!(client.get_locked(&invoice_id), original - first - second);
+
+    let history_before_final = client.get_history(&invoice_id);
+    assert_eq!(history_before_final.len(), 3);
+    assert_eq!(history_before_final.get(0).unwrap().action, EscrowAction::Locked);
+    assert_eq!(history_before_final.get(0).unwrap().amount, original);
+    assert_eq!(history_before_final.get(1).unwrap().action, EscrowAction::ReleasedToPool);
+    assert_eq!(history_before_final.get(1).unwrap().amount, first);
+    assert_eq!(history_before_final.get(2).unwrap().action, EscrowAction::ReleasedToPool);
+    assert_eq!(history_before_final.get(2).unwrap().amount, second);
+
+    assert!(client.release_to_pool(&invoice_id, &final_release));
+    assert_eq!(client.get_locked(&invoice_id), 0);
+
+    let history = client.get_history(&invoice_id);
+    assert_eq!(history.len(), 4);
+    assert_eq!(history.get(0).unwrap().action, EscrowAction::Locked);
+    assert_eq!(history.get(0).unwrap().amount, original);
+    assert_eq!(history.get(1).unwrap().amount, first);
+    assert_eq!(history.get(2).unwrap().amount, second);
+    assert_eq!(history.get(3).unwrap().action, EscrowAction::ReleasedToPool);
+    assert_eq!(history.get(3).unwrap().amount, final_release);
+    let released_total = history.get(1).unwrap().amount
+        + history.get(2).unwrap().amount
+        + history.get(3).unwrap().amount;
+    assert_eq!(released_total, original);
+    assert!(client.try_release_to_pool(&invoice_id, &1).is_err());
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(client.get_history(&invoice_id).len(), 4);
 }
 
 #[test]

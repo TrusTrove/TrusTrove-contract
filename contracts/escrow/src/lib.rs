@@ -355,9 +355,11 @@ impl EscrowContract {
     /// therefore accepts either evidence of a prior lock for this invoice:
     /// the live `Locked` record (principal still in escrow) or the
     /// [`DataKey::IssuerReleased`] marker written by
-    /// [`Self::release_to_issuer`] (principal already paid out). Whichever
-    /// exists is consumed, so `release_to_pool` can succeed at most once per
-    /// funded invoice.
+    /// [`Self::release_to_issuer`] (principal already paid out). When a live
+    /// lock exists, partial repayment reduces the recorded locked
+    /// amount by the transfer; the record is removed when repayment reaches or
+    /// exceeds the remaining amount. An issuer-release marker is consumed by
+    /// the first repayment because the original principal already left escrow.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -432,7 +434,20 @@ impl EscrowContract {
             None,
         );
         if locked {
-            env.storage().persistent().remove(&key);
+            let mut record: EscrowRecord = env
+                .storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
+            if repayment_amount < record.amount {
+                record.amount -= repayment_amount;
+                env.storage().persistent().set(&key, &record);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            } else {
+                env.storage().persistent().remove(&key);
+            }
         } else {
             env.storage().persistent().remove(&released_key);
         }
