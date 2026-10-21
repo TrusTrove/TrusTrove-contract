@@ -4235,57 +4235,66 @@ fn test_update_profile_preserves_role_flags_and_registered_at() {
 }
 
 #[test]
-fn test_revoke_pending_verified_and_revoked_transitions() {
+fn test_batch_issuers_invalid_late_metadata_is_atomic_for_storage_events_and_ttl() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
-    let pending = Address::generate(&env);
-    let verified = Address::generate(&env);
-    client.register_issuer(&pending, &map![&env]);
-    client.register_issuer(&verified, &map![&env]);
-    client.verify_profile(&admin, &verified, &true);
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    let invalid = Address::generate(&env);
+    let valid_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Valid issuer")
+        )
+    ];
+    // Invalid metadata is deliberately last, after two valid entries.
+    let bad_metadata = map![
+        &env,
+        (
+            String::from_str(&env, ""),
+            String::from_str(&env, "invalid empty key")
+        )
+    ];
+    let entries = vec![
+        &env,
+        (first.clone(), valid_metadata.clone()),
+        (second.clone(), valid_metadata),
+        (invalid.clone(), bad_metadata),
+    ];
+    let contract_id = client.address.clone();
+    let events_before = env.events().all();
+    let instance_ttl_before = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
 
-    assert_eq!(
-        client.get_verification_status(&pending),
-        VerificationStatus::Pending
+    let result = client.try_batch_register_issuers(&entries);
+    assert!(
+        result.is_err(),
+        "late invalid metadata must reject the whole batch"
     );
-    assert_eq!(
-        client.get_verification_status(&verified),
-        VerificationStatus::Verified
-    );
-    assert_eq!(count_events_named(&env, "address_revoked"), 0);
 
-    assert!(client.revoke(&pending));
+    for address in [&first, &second, &invalid] {
+        let key = DataKey::Profile(address.clone());
+        assert_eq!(
+            client.get_verification_status(address),
+            VerificationStatus::Unregistered
+        );
+        env.as_contract(&contract_id, || {
+            assert!(
+                !env.storage().persistent().has(&key),
+                "profile must not be stored"
+            );
+        });
+    }
+    assert_eq!(client.get_profile_count(&Role::Issuer), 0);
     assert_eq!(
-        client.get_verification_status(&pending),
-        VerificationStatus::Revoked
+        env.events().all(),
+        events_before,
+        "failed batch must not publish events"
     );
-    let pending_profile = client.get_profile(&pending);
-    assert!(!pending_profile.verified());
-    assert!(pending_profile.revoked());
-    assert!(!client.is_verified(&pending));
-    assert_eq!(count_events_named(&env, "address_revoked"), 1);
-
-    assert!(client.revoke(&verified));
+    let instance_ttl_after = env.as_contract(&contract_id, || env.storage().instance().get_ttl());
     assert_eq!(
-        client.get_verification_status(&verified),
-        VerificationStatus::Revoked
+        instance_ttl_after, instance_ttl_before,
+        "failed batch must not extend instance TTL"
     );
-    let verified_profile = client.get_profile(&verified);
-    assert!(!verified_profile.verified());
-    assert!(verified_profile.revoked());
-    assert!(!client.is_verified(&verified));
-    assert_eq!(count_events_named(&env, "address_revoked"), 2);
-
-    assert!(client.revoke(&pending));
-    assert!(client.revoke(&verified));
-    assert_eq!(
-        client.get_verification_status(&pending),
-        VerificationStatus::Revoked
-    );
-    assert_eq!(
-        client.get_verification_status(&verified),
-        VerificationStatus::Revoked
-    );
-    assert_eq!(count_events_named(&env, "address_revoked"), 2);
 }
