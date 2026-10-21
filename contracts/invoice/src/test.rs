@@ -61,6 +61,24 @@ impl MockRegistry {
 #[contracttype]
 pub struct DataKey(Address);
 
+// --------------- Mock Registry that Fails (Issue #939) ---------------
+//
+// Stands in for a malformed or broken registry contract whose
+// `is_verified` call traps or exposes the wrong entry point. This test
+// ensures the invoice contract handles external call failures gracefully
+// during invoice creation without persisting state.
+
+#[contract]
+pub struct FailingRegistry;
+
+#[contractimpl]
+impl FailingRegistry {
+    pub fn is_verified(_env: Env, _address: Address) -> bool {
+        // Trap on any is_verified call to simulate registry failure
+        soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+    }
+}
+
 // --------------- Mock Token ---------------
 
 #[contract]
@@ -1005,6 +1023,53 @@ fn test_create_fails_unverified_buyer() {
     let face_value: u128 = DEFAULT_FACE_VALUE;
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     client.create(&issuer, &buyer, &face_value, &due_date, &usdc_asset);
+}
+
+#[test]
+fn test_create_registry_external_failure() {
+    // Issue #939: Test that when the registry's is_verified call fails
+    // (traps or exposes wrong entry point), the transaction fails without
+    // persisting an invoice or advancing the Counter.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Deploy a failing registry that traps on is_verified
+    let failing_registry_id = env.register_contract(None, FailingRegistry);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &failing_registry_id);
+
+    let usdc_asset = env.register_contract(None, MockToken);
+    client.add_supported_asset(&usdc_asset);
+
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Record event count before the call
+    let events_before = env.events().all().len();
+
+    // The call should fail because the registry traps on is_verified
+    let result = env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
+        &client.address,
+        &Symbol::new(&env, "create"),
+        (issuer.clone(), buyer.clone(), face_value, due_date, usdc_asset.clone()).into_val(&env),
+    );
+    assert!(result.is_err(), "registry failure must cause transaction to fail");
+
+    // AC2: no invoice was persisted, and Counter was not advanced.
+    // The transaction must fail atomically without side effects.
+    // We verify this by checking that no invoice_created event was emitted.
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "failed create must not emit invoice_created event"
+    );
 }
 
 #[test]
