@@ -2281,6 +2281,34 @@ fn test_set_pool_contract_emits_event() {
 }
 
 #[test]
+fn test_set_pool_contract_replacement_emits_old_and_new_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let old_pool = Address::generate(&env);
+    let new_pool = Address::generate(&env);
+
+    client.set_pool_contract(&old_pool);
+    let events_before_replacement = env.events().all().len();
+
+    client.set_pool_contract(&new_pool);
+
+    assert_eq!(client.get_pool_contract(), Some(new_pool.clone()));
+    let events = env.events().all();
+    assert_eq!(events.len(), events_before_replacement + 1);
+    let (event_contract, topics, data) = events.last().expect("expected replacement event");
+    assert_eq!(event_contract, client.address.clone());
+    assert_eq!(
+        topics,
+        (
+            Symbol::new(&env, "pool_contract_updated"),
+            old_pool,
+            new_pool
+        )
+            .into_val(&env)
+    );
+    <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
 fn test_set_pool_contract_rejects_conflicting_addresses() {
     let (env, client, _, _, _, _) = setup();
     let admin = client.get_admin().unwrap();
