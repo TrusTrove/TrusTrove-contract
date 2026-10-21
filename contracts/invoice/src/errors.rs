@@ -37,4 +37,5 @@ pub enum InvoiceError {
     /// [`MAX_BATCH_SIZE`](crate::MAX_BATCH_SIZE), which would defeat the
     /// per-call cost bound batching exists to provide.
     BatchSizeExceeded = 28,
+    InvalidRecoveryId = 29,
 }
