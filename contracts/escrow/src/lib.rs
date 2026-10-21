@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, IntoVal, Symbol, Vec,
 };
 use trusttrove_pause::{require_not_paused, set_paused};
 
@@ -202,6 +202,16 @@ impl EscrowContract {
         )
     }
 
+    /// Returns the canonical issuer recorded by the configured invoice contract.
+    fn invoice_issuer(env: &Env, invoice_id: &BytesN<32>) -> Address {
+        let invoice_contract = Self::get_invoice_contract(env.clone());
+        env.invoke_contract(
+            &invoice_contract,
+            &Symbol::new(env, "get_issuer"),
+            (invoice_id.clone(),).into_val(env),
+        )
+    }
+
     /// Locks USDC in escrow against a funded invoice.
     ///
     /// # Arguments
@@ -279,8 +289,8 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if no escrow record exists for the invoice.
-    /// * `InvalidRecipient` if issuer is escrow or pool contract address.
-    /// * `InvalidRecipient` if issuer does not match the stored issuer address.
+    /// * `InvalidRecipient` if issuer is escrow or pool contract address, or
+    ///   does not match the canonical issuer recorded by the invoice contract.
     /// * `InvalidAmount` if the stored amount exceeds `i128::MAX` (checked
     ///   conversion fails before any transfer or record removal).
     ///
@@ -306,10 +316,6 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        if issuer != record.issuer {
-            panic_with_error!(&env, EscrowError::InvalidRecipient);
-        }
-
         let usdc = Self::usdc_client(&env);
         // #1001: checked conversion — a corrupted record whose stored amount
         // exceeds `i128::MAX` must surface the typed `InvalidAmount` error
@@ -317,7 +323,11 @@ impl EscrowContract {
         // invalid token amount.
         let amount = i128::try_from(record.amount)
             .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
-        usdc.transfer(&env.current_contract_address(), &issuer, &amount);
+        let canonical_issuer = Self::invoice_issuer(&env, &invoice_id);
+        if issuer != canonical_issuer {
+            panic_with_error!(&env, EscrowError::InvalidRecipient);
+        }
+        usdc.transfer(&env.current_contract_address(), &canonical_issuer, &amount);
 
         Self::append_history(
             &env,
@@ -340,7 +350,7 @@ impl EscrowContract {
             .persistent()
             .extend_ttl(&released_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
-        events::released_to_issuer(&env, &invoice_id, &issuer, record.amount);
+        events::released_to_issuer(&env, &invoice_id, &canonical_issuer, record.amount);
         true
     }
 
