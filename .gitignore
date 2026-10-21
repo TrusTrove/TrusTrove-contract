@@ -12,7 +12,6 @@ target/
 *.swo
 *~
 .idea/
-.vscode/
 
 # OS files
 .DS_Store
@@ -22,6 +21,7 @@ Thumbs.db
 *.log
 
 # Coverage / profiling
+temp_auto_push.bat
 *.profraw
 tarpaulin-report.html
 cobertura.xml
@@ -45,3 +45,5 @@ contracts/*/test_snapshots/
 /create_issues.sh
 /create_issues.py
 /create_issues.ps1
+.gitignore
+branch_structure.json

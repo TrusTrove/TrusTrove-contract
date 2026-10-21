@@ -2101,7 +2101,8 @@ fn test_mark_funded_succeeds_for_configured_pool() {
     assert_eq!(inv.funding_pool, Some(pool));
 }
 
-// #554: mark_funded panics when funded_amount exceeds face_value.
+// #554 / #934: mark_funded panics with the typed InvalidAmount error when
+// funded_amount exceeds face_value.
 #[test]
 #[should_panic(expected = "Error(Contract, #16)")]
 fn test_mark_funded_fails_when_amount_exceeds_face_value() {
@@ -2114,6 +2115,38 @@ fn test_mark_funded_fails_when_amount_exceeds_face_value() {
     let pool = mock_pool_with_asset(&env, &usdc);
     client.set_pool_contract(&pool);
     client.mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1));
+}
+
+// #934: a rejected over-funding attempt must not mutate the invoice at all —
+// the status stays Listed and funded_amount stays 0, so a later legitimate
+// funding (at or below face_value) is still possible.
+#[test]
+fn test_mark_funded_overfunding_leaves_invoice_unchanged() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    let events_before = env.events().all().len();
+    assert!(client
+        .try_mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1))
+        .is_err());
+
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Listed);
+    assert_eq!(inv.funded_amount, 0);
+    assert_eq!(inv.funding_pool, None);
+    assert_eq!(inv.funded_at, None);
+    assert_eq!(env.events().all().len(), events_before);
+
+    // The invoice is still fundable at its face value after the rejection.
+    assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FACE_VALUE));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Funded);
+    assert_eq!(client.get(&invoice_id).funded_amount, DEFAULT_FACE_VALUE);
 }
 
 // #554: funded_amount == face_value is the boundary and must succeed.
