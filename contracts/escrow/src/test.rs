@@ -1186,6 +1186,59 @@ fn test_release_to_pool_partial_repayment_retains_residual_lock_state() {
     assert_eq!(client.get_locked_at(&invoice_id), 0);
 }
 
+// #1006: `release_to_pool` transfers before mutating custody state, so a
+// rejected token transfer must leave the lock, timestamp, history and events
+// untouched.
+#[test]
+fn test_release_to_pool_rolls_back_when_transfer_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = env.register_contract(None, MockCaller);
+    let pool = env.register_contract(None, poolmock::MockPool);
+    let invoice = env.register_contract(None, MockCaller);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
+    let issuer = env.register_contract(None, MockCaller);
+    let token_id = env.register_contract(None, reject::RecipientRejectMockToken);
+    let token = reject::RecipientRejectMockTokenClient::new(&env, &token_id);
+
+    // Fund the pool so the lock can succeed; the rejection is recipient-based.
+    env.as_contract(&token_id, || {
+        env.storage()
+            .persistent()
+            .set(&BalanceKey(pool.clone()), &10_000_000_000_000i128);
+    });
+
+    let contract_id = env.register_contract(None, EscrowContract);
+    let client = EscrowContractClient::new(&env, &contract_id);
+    client.initialize(&admin, &pool, &token_id);
+
+    // Reject the escrow→pool leg of `release_to_pool`.
+    token.set_reject_to(&pool);
+
+    let invoice_id = generate_invoice_id(&env, 40);
+    let amount: u128 = 1_000_000_000;
+    assert!(client.lock(&invoice_id, &amount, &issuer));
+
+    let locked_at = client.get_locked_at(&invoice_id);
+    let history_before = client.get_history(&invoice_id);
+    let events_before = env.events().all().len();
+    let pool_before = token.balance(&pool);
+    let escrow_before = token.balance(&contract_id);
+
+    assert!(client
+        .try_release_to_pool(&invoice_id, &(amount / 2))
+        .is_err());
+
+    // Lock, timestamp, history, balances and events are all unchanged.
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_locked_at(&invoice_id), locked_at);
+    assert_eq!(client.get_history(&invoice_id), history_before);
+    assert_eq!(token.balance(&pool), pool_before);
+    assert_eq!(token.balance(&contract_id), escrow_before);
+    assert_eq!(env.events().all().len(), events_before);
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_release_to_pool_unknown_invoice_id_panics() {
