@@ -40,4 +40,10 @@ pub enum PoolError {
     /// or a setter's caller-supplied `admin` argument does not match the
     /// stored admin (`set_max_utilization`, issue #821).
     NotAuthorized = 27,
+    /// The invoice's `discount_bps` is below the admin-configured minimum
+    /// discount floor (`DataKey::MinDiscountBps`, set via `set_min_discount`),
+    /// so funding it would deploy LP capital at less than the pool's yield
+    /// floor. Never triggers while the floor is at its default of `0`
+    /// (issue #829).
+    DiscountBelowMinimum = 28,
 }

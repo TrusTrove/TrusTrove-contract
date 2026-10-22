@@ -193,6 +193,8 @@ handle_default(invoice_id) → bool
 set_protocol_fee(fee_bps, treasury) → bool   ← admin only
 get_protocol_fee_bps() → u32
 get_treasury() → Address
+set_min_discount(bps) → bool               ← admin only, yield floor enforced in fund_invoice (#829)
+get_min_discount_bps() → u32
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
@@ -312,6 +314,8 @@ Invoice status: → Repaid
 `repay_early` is restricted to `Confirmed` invoices strictly before `due_date`; `repay` accepts `Funded`, `Active`, or `Confirmed` at any time and also refunds the unearned discount before maturity. Partial installments accumulate in escrow and settle at the pool only when the final one clears the balance. See [Repayment Timing and Refund Math](./docs/LIMITATIONS.md#repayment-timing-and-refund-math) for the allowed statuses, formulas, and worked examples.
 
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
+
+**Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
