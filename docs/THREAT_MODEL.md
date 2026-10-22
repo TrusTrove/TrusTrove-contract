@@ -353,6 +353,60 @@ gas or storage.
 **Mitigation:** `batch_register_issuers` limits entries to `≤ 50` and
 panics with `RegistryError::BatchSizeExceeded` otherwise.
 
+### 9. Wiring-Setter Abuse (Escrow / Agent Registry)
+
+**Risk:** Two invoice contract-pointer setters widen the admin blast
+radius beyond profile management: they redirect the fund flow or the trust
+anchor of the whole protocol, instantly and with no operational guard.
+
+- `set_escrow_contract` (`contracts/invoice/src/lib.rs:401`) overwrites the
+  stored `DataKey::EscrowContract` (`contracts/invoice/src/lib.rs:436`).
+  Repayments send buyer funds directly to that stored address:
+  `repay_partial` executes `token.try_transfer(&invoice.buyer, &escrow, ...)`
+  (`contracts/invoice/src/lib.rs:1628`), `repay` delegates to it with the
+  full remaining balance (`contracts/invoice/src/lib.rs:1753`), and
+  `repay_early` mirrors the same pattern
+  (`contracts/invoice/src/lib.rs:1850`). Repointing the pointer therefore
+  redirects every future buyer repayment to any address the attacker
+  picks — funds never reach the real escrow, so the "cannot release
+  escrowed funds to themselves" limitation in the blast-radius table does
+  not cover this path.
+- `set_agent_registry_contract` (`contracts/invoice/src/lib.rs:315`)
+  overwrites the stored `DataKey::AgentRegistryContract`
+  (`contracts/invoice/src/lib.rs:344`). `submit_attestation` resolves its
+  signer trust anchor from that stored address
+  (`contracts/invoice/src/lib.rs:1289-1293`) and accepts any attestation
+  whose recovered pubkey matches an agent the *stored* registry reports as
+  active (`contracts/invoice/src/lib.rs:1296-1300`). Swapping the pointer
+  lets the attacker install their own registry, register their own agent
+  keys, and produce attestations the contract treats as legitimate.
+
+**Current state:** Both setters require `admin.require_auth()`
+(`contracts/invoice/src/lib.rs:322` and `:408`), honour the pause flag
+(`require_not_paused`, `contracts/pause/src/lib.rs:83`), reject candidates
+that alias the admin, the invoice contract itself, the identity registry, or
+the other already-wired pointer (`assert_valid_wiring_address`,
+`contracts/invoice/src/lib.rs:2873-2891`), and emit a change event
+(`events::agent_registry_contract_updated`, `contracts/invoice/src/events.rs:196`;
+`events::escrow_contract_updated`, `contracts/invoice/src/events.rs:237`).
+That alias check only blocks swapping in an *already-wired* address; any
+fresh attacker-controlled address is accepted immediately. There is no
+timelock, no two-step commit, and no lock-after-wiring — the only trace is
+the event emitted after the fact.
+
+**Mitigations (planned / operational):**
+
+- Multi-sig the invoice admin (3-of-5) before mainnet, as for
+  [Attack Vector 1](#1-admin-key-compromise); the alias check alone cannot
+  stop a swap to a new attacker address.
+- Treat re-wiring as a coordinated release: monitor
+  `escrow_contract_updated` / `agent_registry_contract_updated` events and
+  alert on any emission, and retire the key that can call the setters once
+  wiring is complete.
+- **Planned:** two-step setters (commit → delay → apply) and a
+  `finalize_wiring` step that makes the contract pointers immutable once
+  all four contracts are wired.
+
 ---
 
 ## Centralization Risks
@@ -377,6 +431,8 @@ If the admin key is compromised or malicious:
 | Change pool utilization cap (≤10000 bps) | Bypass the utilization cap (>10000 bps) |
 | Expire listings | Mint unbacked LP shares |
 | | Release escrowed funds to themselves (only pool contract can) |
+| Repoint `EscrowContract` and redirect buyer repayments (`set_escrow_contract`) | |
+| Swap the signer trust anchor behind `submit_attestation` (`set_agent_registry_contract`) | |
 
 ---
 
