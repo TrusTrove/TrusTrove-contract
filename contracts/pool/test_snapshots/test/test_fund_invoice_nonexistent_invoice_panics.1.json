@@ -1995,6 +1995,33 @@
       "event": {
         "ext": "v0",
         "contract_id": "0000000000000000000000000000000000000000000000000000000000000009",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "contract_initialized"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+              }
+            ],
+            "data": "void"
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000009",
         "type_": "diagnostic",
         "body": {
           "v0": {
@@ -2872,7 +2899,7 @@
                 "bytes": "0000000000000000000000000000000000000000000000000000000000000008"
               },
               {
-                "symbol": "get_funding_terms"
+                "symbol": "get_funding_context"
               }
             ],
             "data": {
@@ -2988,7 +3015,7 @@
                   "string": "contract call failed"
                 },
                 {
-                  "symbol": "get_funding_terms"
+                  "symbol": "get_funding_context"
                 },
                 {
                   "vec": [

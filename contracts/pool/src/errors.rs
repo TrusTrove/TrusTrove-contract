@@ -36,4 +36,14 @@ pub enum PoolError {
     /// cap bounds the worst-case cost of a single batch so a caller cannot
     /// exceed the per-transaction budget by batching.
     BatchSizeExceeded = 26,
+    /// `receive_repayment_with_refund` was given a refund destination that
+    /// does not match the buyer recorded on the configured invoice contract
+    /// (`get_buyer`). The refund is invoice-computed data, so its destination
+    /// must be the invoice's canonical buyer (#969).
+    BuyerMismatch = 27,
+    /// `handle_default` asked the invoice contract to persist the `Defaulted`
+    /// status and it reported that the transition did not happen. The pool
+    /// books no loss in that case, so an invoice that is still active can
+    /// never leave the pool reporting a realised loss (#971).
+    InvoiceDefaultNotRecorded = 28,
 }

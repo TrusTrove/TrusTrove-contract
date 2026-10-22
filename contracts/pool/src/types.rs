@@ -122,4 +122,12 @@ pub enum DataKey {
     /// `docs/SEP41_DESIGN.md` requires shares to carry the funding asset's
     /// decimals, and under the factory model each instance has its own.
     ShareDecimals,
+    /// Canonical buyer of a funded invoice, snapshotted from the invoice
+    /// contract's `get_funding_context` at funding time and removed together
+    /// with the `FundedInvoice` entry. `receive_repayment_with_refund`
+    /// verifies its refund destination against this record (#969): during
+    /// settlement the invoice contract is the active caller, so Soroban's
+    /// no-re-entry rule forbids reading `get_buyer` at that point.
+    /// Appended after `ShareDecimals` to keep existing discriminants stable.
+    FundedInvoiceBuyer(BytesN<32>),
 }

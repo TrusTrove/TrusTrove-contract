@@ -1214,6 +1214,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "FeeBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "FundingAsset"
                             }
                           ]
@@ -1733,6 +1745,33 @@
                 }
               ]
             }
+          }
+        }
+      },
+      "failed_call": false
+    },
+    {
+      "event": {
+        "ext": "v0",
+        "contract_id": "0000000000000000000000000000000000000000000000000000000000000009",
+        "type_": "contract",
+        "body": {
+          "v0": {
+            "topics": [
+              {
+                "symbol": "contract_initialized"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAVAX5"
+              },
+              {
+                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
+              }
+            ],
+            "data": "void"
           }
         }
       },
@@ -2446,7 +2485,7 @@
                 {
                   "u128": {
                     "hi": 0,
-                    "lo": 9053644
+                    "lo": 4524382
                   }
                 }
               ]
@@ -2571,7 +2610,7 @@
                     {
                       "u128": {
                         "hi": 0,
-                        "lo": 9053644
+                        "lo": 4524382
                       }
                     }
                   ]
