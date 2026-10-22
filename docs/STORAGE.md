@@ -1,6 +1,6 @@
 # Storage Schema
 
-> **Updated:** 2025-07-25
+> **Updated:** 2026-10-20
 > **Applies to:** All four Soroban smart contracts
 
 This document describes the on-chain storage layout for every contract in the
@@ -174,8 +174,12 @@ let status = if !profile_exists {
   rewritten or freed, and revoked profiles stay enumerated.
 - `get_profile(address)` returns the full `Profile` struct or panics with
   `NotFound` if absent.
-- `get_verification_status(address)` returns a three-valued enum
-  (`Unregistered`, `Verified`, `Revoked`).
+- `get_verification_status(address)` returns a four-valued enum
+  (`Unregistered`, `Pending`, `Verified`, `Revoked`). Like `get_profile` and
+  `is_verified`, it extends the TTL of the `Profile` entry when one exists,
+  so applications that poll status cannot let actively-accessed profiles
+  expire (issue #984). An `Unregistered` lookup does not create a profile
+  entry and performs no TTL writes.
 
 ### Storage Key Count
 
@@ -397,6 +401,82 @@ The `History` vector entries are never removed — they form an append-only log 
 | `LPDepositCount(Address)` | `u32` | Number of deposits made by this LP |
 | `LPYieldEarned(Address)` | `u128` | Cumulative yield earned (updated on withdraw) |
 | `LPInitialDeposit(Address)` | `u128` | Total principal deposited by LP (tracked for yield calculation) |
+
+#### LP Key Lifecycle Across Deposits and Withdrawals
+
+The four LP-scoped keys have different lifecycles. The behavior below is
+verified against `contracts/pool/src/lib.rs` (`deposit`, `withdraw`,
+`get_lp_position`) and the pool test suite; key names alone can be
+misleading — in particular `LPInitialDeposit` accumulates *every* deposit,
+not just the first one.
+
+**Principal and yield accounting model.** Principal is tracked as one
+aggregate amount per LP in `LPInitialDeposit`, not as per-deposit lots.
+A withdrawal allocates that principal pro rata across the shares being
+withdrawn (`principal_portion = shares × LPInitialDeposit / LPShares_before`),
+and everything the withdrawal returns beyond that portion is realized as
+yield into `LPYieldEarned`. Because the basis is aggregate, yield attribution
+can differ from FIFO or HIFO lot accounting when an LP deposits at different
+share prices (see `test_multi_deposit_average_basis_differs_from_fifo_yield`).
+
+##### A. Deposit (`deposit`)
+
+| Key | Initial deposit | Additional deposit |
+|-----|-----------------|--------------------|
+| `LPDepositCount` | Initialized to `1` (read defaults to `0`, then incremented) | Incremented by `1` |
+| `LPInitialDeposit` | Initialized to the deposited amount (read defaults to `0`, then incremented by it) | **Accumulated**: the amount is added to the existing value |
+| `LPShares` | Minted 1:1 (or at the current share price once yield exists) | Minted at the current share price |
+| `LPYieldEarned` | Not touched | Not touched |
+
+Every deposit refreshes the TTL of `LPDepositCount` and `LPInitialDeposit`
+(and `LPShares` via minting) to the shared `TTL_EXTEND_TO` target.
+
+##### B. Partial withdrawal (`withdraw` with fewer shares than held)
+
+| Key | Behavior |
+|-----|----------|
+| `LPDepositCount` | **Preserved unchanged** — a partial withdrawal is not counted as a deposit and does not reset the count |
+| `LPInitialDeposit` | **Reduced pro rata** by the principal portion of the withdrawal; after the write it holds the LP's *remaining* tracked principal, not the original deposit amount |
+| `LPYieldEarned` | **Accumulated**: increased by the realized yield of this withdrawal (USDC returned minus the pro-rata principal portion). The entry is created on the first withdrawal even when the realized yield is zero |
+| `LPShares` | Reduced by the burned shares |
+
+Yield is *realized* (moved into `LPYieldEarned`) only at withdrawal time.
+Undistributed pool yield is not stored per LP; it is reflected economically
+in the share price and therefore in `get_lp_position().usdc_value`.
+
+##### C. Full withdrawal (`withdraw` all remaining shares)
+
+| Key | Behavior |
+|-----|----------|
+| `LPDepositCount` | **Removed** from storage — the deposit-cycle counter is deleted, not reset in place |
+| `LPInitialDeposit` | **Removed** from storage — the pro-rata allocation consumes the entire remaining principal, and a zero value is deleted rather than written |
+| `LPYieldEarned` | **Retained** — cumulative realized yield survives the full withdrawal; it is not reset or deleted anywhere in the contract |
+| `LPShares` | Set to `0` (the entry itself is kept, not removed) |
+
+A zero position is therefore distinct from deleted accounting data:
+`get_lp_position` reports `shares = 0`, `usdc_value = 0`, and
+`deposit_count = 0` (missing keys read as `0`), while `yield_earned` still
+reports the cumulative realized yield of previous cycles.
+
+##### D. Redeposit after a full withdrawal
+
+A new position lifecycle begins for the deposit-cycle keys, while realized
+yield history continues:
+
+| Key | Behavior |
+|-----|----------|
+| `LPDepositCount` | **Restarts at `1`** — the previous entry was removed, so the new deposit reads the default `0` and increments it |
+| `LPInitialDeposit` | **Restarts** from the new deposit amount alone; pre-withdrawal principal does not carry over |
+| `LPYieldEarned` | **Continues** — previously realized yield is retained and future withdrawals keep accumulating on top of it (see `test_full_withdraw_then_deposit_yield_accounting`) |
+| `LPShares` | Accumulates from `0` at the current share price |
+
+##### TTL maintenance on read
+
+`get_lp_position` extends the TTL of every surviving LP-scoped entry
+(`LPShares`, `LPYieldEarned`, `LPDepositCount`, `LPInitialDeposit`) using the
+same shared threshold/target as the write paths, so a deposit-and-hold LP's
+entries stay alive through reads alone (issue #588). Entries that do not
+exist are skipped, so reads for an LP with no position perform no writes.
 
 #### SEP-41 Share Transfers
 
