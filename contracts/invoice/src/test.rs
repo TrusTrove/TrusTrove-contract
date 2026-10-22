@@ -702,7 +702,7 @@ fn test_submit_attestation_invoice_id_mismatch() {
 /// can be pointed at the same registry.
 fn register_test_agent(env: &Env, client: &InvoiceContractClient) -> Address {
     let agent_id = Symbol::new(env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     MockAgentRegistryClient::new(env, &registry_id).register_agent(
         &agent_id,
         &crate::Agent {
@@ -757,23 +757,23 @@ fn test_attestation_signed_for_one_deployment_rejected_by_another() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     registry_client.register(&issuer);
     registry_client.register(&buyer);
-    let usdc = env.register_contract(None, MockToken);
+    let usdc = env.register(MockToken, ());
 
     // Deployment A.
-    let a_id = env.register_contract(None, InvoiceContract);
+    let a_id = env.register(InvoiceContract, ());
     let a = InvoiceContractClient::new(&env, &a_id);
     a.initialize(&Address::generate(&env), &registry_id);
     a.add_supported_asset(&usdc);
     let agent_registry = register_test_agent(&env, &a);
 
     // Deployment B: same network, same agent registry, same parties.
-    let b_id = env.register_contract(None, InvoiceContract);
+    let b_id = env.register(InvoiceContract, ());
     let b = InvoiceContractClient::new(&env, &b_id);
     b.initialize(&Address::generate(&env), &registry_id);
     b.add_supported_asset(&usdc);
