@@ -1365,6 +1365,48 @@ fn test_handle_default_rejects_before_grace_period() {
     client.handle_default(&invoice_id, &pool);
 }
 
+// #1003: a record whose `locked_at` is ahead of ledger time (timestamp
+// rollback or malformed record) must be rejected with the typed NotAuthorized
+// error rather than underflowing `now - locked_at`, and the lock must remain
+// untouched.
+#[test]
+fn test_handle_default_rejects_future_locked_at_and_keeps_lock() {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 11);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // Seed a future `locked_at`, as if ledger time had rolled back after the
+    // record was written.
+    let future_locked_at = env.ledger().timestamp() + 3_600;
+    env.as_contract(&client.address, || {
+        let key = DataKey::Locked(invoice_id.clone());
+        let mut record: EscrowRecord = env.storage().persistent().get(&key).expect("lock record");
+        record.locked_at = future_locked_at;
+        env.storage().persistent().set(&key, &record);
+    });
+
+    let history_before = client.get_history(&invoice_id);
+    let events_before = env.events().all().len();
+    let pool_before = get_balance(&env, &usdc_id, &pool);
+    let escrow_before = get_balance(&env, &usdc_id, &client.address);
+
+    let err = client
+        .try_handle_default(&invoice_id, &pool)
+        .expect_err("future locked_at must be rejected");
+    assert_eq!(err, Ok(soroban_sdk::Error::from_contract_error(3)));
+
+    // The lock (including its timestamp), history, balances and events are
+    // all unchanged — no funds moved and no default was recorded.
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_locked_at(&invoice_id), future_locked_at);
+    assert_eq!(client.get_history(&invoice_id), history_before);
+    assert_eq!(get_balance(&env, &usdc_id, &pool), pool_before);
+    assert_eq!(get_balance(&env, &usdc_id, &client.address), escrow_before);
+    assert_eq!(env.events().all().len(), events_before);
+}
+
 #[test]
 fn test_handle_default_allows_at_grace_period_boundary() {
     let (env, client, _admin, pool, issuer, _usdc_id) = setup();
