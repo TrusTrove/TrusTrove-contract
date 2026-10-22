@@ -2126,9 +2126,14 @@ impl PoolContract {
     ///   (`10_000` = 100%).
     ///
     /// # Auth
-    /// Requires authorization from `admin` (via `admin.require_auth()`).
+    /// Requires authorization from the **stored** admin. The `admin`
+    /// argument must match the stored admin: a caller that passes a
+    /// different address — including its own, even when it authorizes for
+    /// itself — reverts with `PoolError::NotAuthorized` (#821).
     ///
     /// # Panics
+    /// * `NotInitialized` if the pool has no stored admin.
+    /// * `NotAuthorized` if `admin` does not match the stored admin.
     /// * `InvalidAmount` if `new_cap_bps` exceeds `10_000`.
     ///
     /// # Returns
@@ -2140,7 +2145,12 @@ impl PoolContract {
     /// ```
     pub fn set_max_utilization(env: Env, admin: Address, new_cap_bps: u32) -> bool {
         require_not_paused(&env);
-        admin.require_auth();
+        let stored_admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        if admin != stored_admin {
+            panic_with_error!(&env, PoolError::NotAuthorized);
+        }
+        stored_admin.require_auth();
         if new_cap_bps > 10000 {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
