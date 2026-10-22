@@ -2057,7 +2057,7 @@ fn test_set_max_utilization_self_authorizing_non_admin_leaves_cap_untouched() {
 fn test_set_max_utilization_uninitialized_pool_rejects_not_initialized() {
     let env = Env::default();
     env.mock_all_auths();
-    let pool_id = env.register_contract(None, PoolContract);
+    let pool_id = env.register(PoolContract, ());
     let pool = PoolContractClient::new(&env, &pool_id);
     let attacker = Address::generate(&env);
     pool.set_max_utilization(&attacker, &10000);
