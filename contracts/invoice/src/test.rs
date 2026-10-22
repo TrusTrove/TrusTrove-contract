@@ -61,6 +61,24 @@ impl MockRegistry {
 #[contracttype]
 pub struct DataKey(Address);
 
+// --------------- Mock Registry that Fails (Issue #939) ---------------
+//
+// Stands in for a malformed or broken registry contract whose
+// `is_verified` call traps or exposes the wrong entry point. This test
+// ensures the invoice contract handles external call failures gracefully
+// during invoice creation without persisting state.
+
+#[contract]
+pub struct FailingRegistry;
+
+#[contractimpl]
+impl FailingRegistry {
+    pub fn is_verified(_env: Env, _address: Address) -> bool {
+        // Trap on any is_verified call to simulate registry failure
+        soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+    }
+}
+
 // --------------- Mock Token ---------------
 
 #[contract]
@@ -268,6 +286,24 @@ impl MockAgentRegistry {
 
 #[contracttype]
 pub struct AgentKey(Symbol);
+
+// --------------- Mock Agent Registry that Fails (Issue #943) ---------------
+//
+// Stands in for a malformed or broken agent-registry contract whose
+// `get_agent` call traps or returns an incompatible result. This test
+// ensures the invoice contract handles external call failures gracefully
+// without persisting state or emitting success events.
+
+#[contract]
+pub struct FailingAgentRegistry;
+
+#[contractimpl]
+impl FailingAgentRegistry {
+    pub fn get_agent(_env: Env, _agent_id: Symbol) -> Option<crate::Agent> {
+        // Trap on any get_agent call to simulate registry failure
+        soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+    }
+}
 
 use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 
@@ -570,6 +606,58 @@ fn test_submit_attestation_replay_rejection() {
     let signature = BytesN::from_array(&env, &sig_bytes);
 
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+#[test]
+fn test_submit_attestation_agent_registry_external_failure() {
+    // Issue #943: Test that when the agent-registry's get_agent call fails
+    // (traps or returns incompatible result), the transaction fails without
+    // storing an Attestation or emitting a success event.
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Deploy a failing agent registry that traps on get_agent
+    let failing_registry_id = env.register_contract(None, FailingAgentRegistry);
+    client.set_agent_registry_contract(&failing_registry_id);
+
+    let agent_id = Symbol::new(&env, "test_agent");
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+    };
+    let payload_bytes = payload.to_xdr(&env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    let signature = BytesN::from_array(&env, &sig_bytes);
+
+    // Record event count before the call
+    let events_before = env.events().all().len();
+
+    // The call should fail because the registry traps on get_agent
+    let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
+    assert!(result.is_err(), "registry failure must cause transaction to fail");
+
+    // AC2: no attestation was persisted, and no attestation_submitted event
+    // was emitted. The transaction must fail atomically without side effects.
+    assert!(
+        client.get_attestation(&invoice_id).is_none(),
+        "failed attestation must not be stored"
+    );
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "failed attestation must not emit attestation_submitted"
+    );
 }
 
 // Note: Malformed payload testing is limited by Soroban SDK's XDR decoding -
@@ -935,6 +1023,53 @@ fn test_create_fails_unverified_buyer() {
     let face_value: u128 = DEFAULT_FACE_VALUE;
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     client.create(&issuer, &buyer, &face_value, &due_date, &usdc_asset);
+}
+
+#[test]
+fn test_create_registry_external_failure() {
+    // Issue #939: Test that when the registry's is_verified call fails
+    // (traps or exposes wrong entry point), the transaction fails without
+    // persisting an invoice or advancing the Counter.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Deploy a failing registry that traps on is_verified
+    let failing_registry_id = env.register_contract(None, FailingRegistry);
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+
+    let contract_id = env.register_contract(None, InvoiceContract);
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let admin = Address::generate(&env);
+    client.initialize(&admin, &failing_registry_id);
+
+    let usdc_asset = env.register_contract(None, MockToken);
+    client.add_supported_asset(&usdc_asset);
+
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Record event count before the call
+    let events_before = env.events().all().len();
+
+    // The call should fail because the registry traps on is_verified
+    let result = env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
+        &client.address,
+        &Symbol::new(&env, "create"),
+        (issuer.clone(), buyer.clone(), face_value, due_date, usdc_asset.clone()).into_val(&env),
+    );
+    assert!(result.is_err(), "registry failure must cause transaction to fail");
+
+    // AC2: no invoice was persisted, and Counter was not advanced.
+    // The transaction must fail atomically without side effects.
+    // We verify this by checking that no invoice_created event was emitted.
+    assert_eq!(
+        env.events().all().len(),
+        events_before,
+        "failed create must not emit invoice_created event"
+    );
 }
 
 #[test]
