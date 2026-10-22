@@ -1281,6 +1281,11 @@ impl InvoiceContract {
         let mut rs = [0u8; 64];
         rs.copy_from_slice(&sig_bytes[0..64]);
         let recovery_id = sig_bytes[64] as u32;
+        // Soroban's secp256k1_recover accepts recovery ids in the range 0..=3.
+        // Reject malformed signatures before invoking host crypto.
+        if recovery_id > 3 {
+            panic_with_error!(&env, InvoiceError::InvalidRecoveryId);
+        }
         let sig_rs = BytesN::from_array(&env, &rs);
 
         let hash = env.crypto().keccak256(&payload);
