@@ -7974,6 +7974,12 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// `fund_invoice` batches now carry the per-entrypoint instance-TTL bumps
 /// #865 added, so the corrected flow costs cpu = 1,562,040 / mem = 318,929
 /// on this branch; the ceilings below pin that re-measurement.
+///
+/// Re-measured on the `feb76fd1` (#1034) rebase: the #829 yield floor adds one
+/// instance-storage read (`DataKey::MinDiscountBps`) to `fund_one`, so the
+/// funded flow now costs cpu = 1,580,219 / mem = 320,571 (deterministic host
+/// budget accounting); the CPU ceiling below pins that re-measurement with the
+/// usual ~1% headroom and the memory ceiling is unchanged.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -7987,7 +7993,7 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_570_000,
+        cpu < 1_590_000,
         "fund_invoice (batched read + #819 issuer payout) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
@@ -8326,6 +8332,142 @@ fn prop_pool_token_balance_always_covers_available_liquidity() {
         accepted_steps.get(),
         rejected_steps.get()
     );
+}
+
+// ---------------------------------------------------------------------------
+//  ISSUE #829: ADMIN-SETTABLE min_discount_bps YIELD FLOOR
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_min_discount_bps_defaults_to_zero_and_funding_is_unchanged() {
+    let te = setup();
+    assert_eq!(te.pool.get_min_discount_bps(), 0);
+
+    // The griefing case the floor exists for: a 1-bps invoice. With the
+    // default floor of 0 it still funds, proving pre-#829 behaviour is
+    // unchanged.
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list_with_params(&te, &te.usdc_id, 10_000_000_000, 1);
+    assert!(te.pool.fund_invoice(&invoice_id));
+    assert_eq!(te.pool.get_min_discount_bps(), 0);
+}
+
+#[test]
+fn test_set_min_discount_at_max_cap_succeeds_and_reads_back() {
+    let te = setup();
+    let ok = te.pool.set_min_discount(&5000);
+    assert!(ok);
+    assert_eq!(te.pool.get_min_discount_bps(), 5000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_set_min_discount_above_max_cap_panics() {
+    let te = setup();
+    te.pool.set_min_discount(&5001);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_min_discount_requires_admin_authorization() {
+    let te = setup();
+    // Clear all mocked auths so the stored admin's require_auth() fails.
+    te.env.set_auths(&[]);
+    te.pool.set_min_discount(&300);
+}
+
+/// Self-authorizing non-admin: only `non_admin` signed the call, so the
+/// stored admin's `require_auth()` rejects it — mirroring the
+/// `set_protocol_fee` negative-auth pattern from #772.
+#[test]
+fn test_set_min_discount_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_min_discount",
+            args: (300u32,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_min_discount(&300).is_err());
+    assert_eq!(te.pool.get_min_discount_bps(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_fund_invoice_discount_below_floor_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_discount(&300);
+    let invoice_id = create_and_list_with_params(&te, &te.usdc_id, 10_000_000_000, 200);
+    te.pool.fund_invoice(&invoice_id);
+}
+
+#[test]
+fn test_fund_invoice_discount_at_floor_accepted() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_discount(&300);
+    let invoice_id = create_and_list_with_params(&te, &te.usdc_id, 10_000_000_000, 300);
+    assert!(te.pool.fund_invoice(&invoice_id));
+    assert_eq!(te.pool.get_min_discount_bps(), 300);
+}
+
+/// The floor is an eligibility failure, not a capacity shortfall, so
+/// `batch_fund_invoice` must surface `DiscountBelowMinimum` rather than
+/// stopping silently (matching the panic-in-both-modes rule of `fund_one`).
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_batch_fund_invoice_discount_below_floor_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_discount(&300);
+    let invoice_id = create_and_list_with_params(&te, &te.usdc_id, 10_000_000_000, 200);
+    let ids = vec![&te.env, invoice_id];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+#[test]
+fn test_set_min_discount_emits_event_with_old_and_new_values() {
+    let te = setup();
+
+    te.pool.set_min_discount(&750);
+
+    let events = te.env.events().all();
+    // sdk >=22: this buffer holds only the set_min_discount call's event.
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "min_discount_updated")
+    );
+    // setup() leaves the floor at its default 0 bps, so the first change
+    // reports 0 -> 750.
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (0u32, 750u32)
+    );
+
+    // A second change reports the value it replaced, not the original one.
+    te.pool.set_min_discount(&1500);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (750u32, 1500u32)
+    );
+
+    // A rejected change (above MAX_MIN_DISCOUNT_BPS) must not emit anything,
+    // and must leave the stored floor at 1500.
+    assert!(te.pool.try_set_min_discount(&5001).is_err());
+    // A rejected change emits nothing in its own per-invocation buffer.
+    assert_eq!(te.env.events().all().len(), 0);
+    assert_eq!(te.pool.get_min_discount_bps(), 1500);
 }
 
 // --------------- Configurable failing invoice (issue #964) ---------------

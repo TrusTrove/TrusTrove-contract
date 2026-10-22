@@ -426,6 +426,25 @@ nothing.
 
 ---
 
+### `min_discount_updated`
+
+Emitted when the admin changes the pool's minimum discount floor (yield floor)
+via `set_min_discount` (issue #829). Mirrors `protocol_fee_updated`: the old
+value is included so an indexer can report what changed rather than only what
+it changed to. A rejected call (non-admin, or floor above
+`MAX_MIN_DISCOUNT_BPS` = 5000 bps) emits nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_discount_updated"` |
+| **Data** | `(u32, u32)` | `(old_min_bps, new_min_bps)` |
+
+**Emitted by:** `set_min_discount()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
