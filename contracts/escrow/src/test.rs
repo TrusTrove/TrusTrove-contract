@@ -966,6 +966,128 @@ fn test_release_to_pool_rejects_non_invoice_contract_caller() {
     client.release_to_pool(&invoice_id, &amount);
 }
 
+// ---- Issue #997: pinned invoice contract reference for release_to_pool ----
+
+// The admin pins the expected invoice contract with `set_invoice_contract`;
+// `release_to_pool` validates the pool-resolved address against that pin so
+// a drifted pool configuration cannot silently redirect repayments.
+#[test]
+fn test_set_invoice_contract_emits_event() {
+    let (env, client, admin, _, _, _) = setup();
+    let invoice = client.get_invoice_contract();
+
+    client.set_invoice_contract(&invoice);
+
+    let events = env.events().all();
+    let (contract, topics, data) = events
+        .last()
+        .expect("set_invoice_contract must publish an invoice_contract_set event");
+    assert_eq!(contract, client.address);
+    assert_eq!(topics.len(), 2, "symbol + admin topics");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_contract_set")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+    assert_eq!(Address::try_from_val(&env, &data).unwrap(), invoice);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_set_invoice_contract_requires_admin_auth() {
+    let (_env, client, _, _, _, _) = setup_without_auths();
+    let invoice = client.get_invoice_contract();
+    client.set_invoice_contract(&invoice);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_set_invoice_contract_rejects_admin_address() {
+    let (_env, client, admin, _pool, _issuer, _usdc_id) = setup();
+    client.set_invoice_contract(&admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_set_invoice_contract_rejects_pool_address() {
+    let (_env, client, _admin, pool, _issuer, _usdc_id) = setup();
+    client.set_invoice_contract(&pool);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_set_invoice_contract_rejects_escrow_address() {
+    let (_env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let escrow = client.address.clone();
+    client.set_invoice_contract(&escrow);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_set_invoice_contract_rejects_usdc_address() {
+    let (_env, client, _admin, _pool, _issuer, usdc_id) = setup();
+    client.set_invoice_contract(&usdc_id);
+}
+
+#[test]
+fn test_release_to_pool_succeeds_with_matching_pin() {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 40);
+    let amount: u128 = 1_000_000_000;
+
+    // Pin the exact invoice contract the pool reports — no drift.
+    let invoice = client.get_invoice_contract();
+    client.set_invoice_contract(&invoice);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    let pool_before = get_balance(&env, &usdc_id, &pool);
+    assert!(client.release_to_pool(&invoice_id, &amount));
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(
+        get_balance(&env, &usdc_id, &pool) - pool_before,
+        amount as i128
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_release_to_pool_rejects_drifted_pin() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 41);
+    let amount: u128 = 1_000_000_000;
+
+    // The admin pinned a reference that does NOT match the pool's configured
+    // invoice contract: settlement must be rejected with InvalidConfig (#8)
+    // even though the pool-resolved caller authorizes the call.
+    let other_invoice = env.register_contract(None, MockCaller);
+    client.set_invoice_contract(&other_invoice);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_pool(&invoice_id, &amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_release_to_pool_rejects_pool_rotation_after_pin() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 42);
+    let amount: u128 = 1_000_000_000;
+
+    // The admin pins the invoice contract, then the pool's configuration
+    // rotates away from it: settlement must fail with InvalidConfig (#8)
+    // until the escrow admin repins the reference.
+    let invoice = client.get_invoice_contract();
+    client.set_invoice_contract(&invoice);
+    let rotated = env.register_contract(None, MockCaller);
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&rotated);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_pool(&invoice_id, &amount);
+}
+
 // ============================================================================
 // Handle Default Tests
 // ============================================================================

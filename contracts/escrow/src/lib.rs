@@ -202,6 +202,63 @@ impl EscrowContract {
         )
     }
 
+    /// Pins the invoice contract reference used to validate `release_to_pool`
+    /// (#997).
+    ///
+    /// Defense-in-depth on top of issue #820: `release_to_pool` resolves the
+    /// invoice contract from the pool's own `get_invoice_contract` view and
+    /// requires its authorization. Storing the expected reference here lets
+    /// the escrow admin validate that resolution — when a pin is stored and
+    /// the pool's view drifts from it, settlement is rejected with
+    /// `InvalidConfig` instead of silently following the pool's
+    /// configuration.
+    ///
+    /// Optional by design: a deployment wired before this entry point existed
+    /// keeps the #820 behaviour (pool-resolved authorization) until the
+    /// admin pins a reference; no re-initialization is required.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_contract` - The invoice contract address to pin.
+    ///
+    /// # Auth
+    /// * Requires `admin.require_auth()` — only the stored admin may pin or
+    ///   repin the reference.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the contract has not been initialized.
+    /// * `InvalidConfig` if `invoice_contract` collides with the admin, the
+    ///   pool contract, the USDC asset, or this escrow contract — mirroring
+    ///   the distinct-address rule enforced by
+    ///   [`Self::initialize`](Self::initialize).
+    ///
+    /// # Returns
+    /// * `()` - No value is returned. Emits `invoice_contract_set`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_invoice_contract(&invoice);
+    /// ```
+    pub fn set_invoice_contract(env: Env, invoice_contract: Address) {
+        require_not_paused(&env);
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        let pool = Self::get_pool_contract(env.clone());
+        let usdc = Self::get_usdc_asset(env.clone());
+        if invoice_contract == admin
+            || invoice_contract == pool
+            || invoice_contract == usdc
+            || invoice_contract == env.current_contract_address()
+        {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &invoice_contract);
+        events::invoice_contract_set(&env, &admin, &invoice_contract);
+        Self::extend_instance_ttl(&env);
+    }
+
     /// Locks USDC in escrow against a funded invoice.
     ///
     /// # Arguments
@@ -379,11 +436,19 @@ impl EscrowContract {
     /// direct caller — never by an unrelated address, and never by a
     /// buyer-signed transaction pretending to carry the pool's authorization.
     ///
+    /// When the admin has pinned a reference with
+    /// [`Self::set_invoice_contract`] (#997), that pin is validated against
+    /// the pool-resolved address, so settlement additionally requires the
+    /// pool's configuration to match the escrow admin's pin.
+    ///
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if neither a lock record nor an issuer-release marker
     ///   exists for the invoice (unknown invoice or replayed release).
     /// * `InvalidAmount` if `repayment_amount` is zero.
+    /// * `InvalidConfig` if a pinned invoice contract (see
+    ///   [`Self::set_invoice_contract`]) differs from the invoice contract
+    ///   configured on the pool (#997).
     ///
     /// # Returns
     /// * `bool` - `true` when funds are returned.
@@ -411,6 +476,21 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
         let invoice_contract: Address = Self::get_invoice_contract(env.clone());
         invoice_contract.require_auth();
+
+        // Issue #997: when the admin pinned the invoice contract reference
+        // via `set_invoice_contract`, the pool-resolved address must match
+        // it — a pool whose configuration drifted from the pin is a
+        // misconfiguration to reject, not a licence to redirect repayments.
+        // Deployments that never pinned a reference keep the #820 behaviour.
+        if let Some(pinned) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if pinned != invoice_contract {
+                panic_with_error!(&env, EscrowError::InvalidConfig);
+            }
+        }
 
         if repayment_amount == 0 || repayment_amount > i128::MAX as u128 {
             panic_with_error!(&env, EscrowError::InvalidAmount);

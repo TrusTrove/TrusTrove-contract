@@ -3131,6 +3131,145 @@ fn test_is_verified_does_not_extend_ttl_for_unknown() {
     assert!(client.is_verified(&issuer));
 }
 
+// ============== ISSUE #984: get_verification_status TTL EXTENSION ==============
+
+/// Drives the profile entry's TTL below the extension threshold and asserts
+/// that a `get_verification_status` read extends it back toward `EXTEND_TO`.
+/// Shared by the Pending / Verified / Revoked coverage below so all three
+/// states exercise the identical drain-then-extend sequence.
+fn assert_verification_status_read_extends_ttl(
+    env: &Env,
+    client: &RegistryContractClient<'static>,
+    issuer: &Address,
+    expected: VerificationStatus,
+) {
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+
+    // Record the initial remaining TTL, then advance the ledger so the
+    // remaining TTL drops below the write-path threshold.
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let ttl_before_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_before_read < TTL_THRESHOLD,
+        "TTL should be below threshold before read, got {ttl_before_read}"
+    );
+
+    // The read must both report the right status and extend the entry TTL.
+    assert_eq!(client.get_verification_status(issuer), expected);
+
+    let ttl_after_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after_read > ttl_before_read,
+        "get_verification_status should extend TTL: before={ttl_before_read}, after={ttl_after_read}"
+    );
+    assert!(
+        ttl_after_read >= 1_999_000,
+        "TTL should be extended close to EXTEND_TO (2_000_000), got {ttl_after_read}"
+    );
+}
+
+#[test]
+fn test_get_verification_status_extends_ttl_for_pending_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    // New profiles start Pending: registered but never verified (#130).
+    client.register_issuer(&issuer, &map![&env]);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    assert_verification_status_read_extends_ttl(
+        &env,
+        &client,
+        &issuer,
+        VerificationStatus::Pending,
+    );
+}
+
+#[test]
+fn test_get_verification_status_extends_ttl_for_verified_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    assert_verification_status_read_extends_ttl(
+        &env,
+        &client,
+        &issuer,
+        VerificationStatus::Verified,
+    );
+}
+
+#[test]
+fn test_get_verification_status_extends_ttl_for_revoked_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    client.revoke(&issuer);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    assert_verification_status_read_extends_ttl(
+        &env,
+        &client,
+        &issuer,
+        VerificationStatus::Revoked,
+    );
+}
+
+#[test]
+fn test_get_verification_status_unregistered_does_not_create_profile() {
+    let (env, client) = setup();
+    let admin = Address::generate(&env);
+    client.initialize(&admin);
+    let unknown = Address::generate(&env);
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(unknown.clone());
+
+    // An Unregistered lookup must not panic, must report Unregistered, must
+    // not create a Profile entry, and must not attempt to extend the TTL of
+    // a nonexistent entry.
+    assert_eq!(
+        client.get_verification_status(&unknown),
+        VerificationStatus::Unregistered
+    );
+    let has_profile = env.as_contract(&contract_id, || env.storage().persistent().has(&key));
+    assert!(
+        !has_profile,
+        "get_verification_status must not create a Profile entry for an unregistered address"
+    );
+
+    // Repeated calls keep the same semantics.
+    assert_eq!(
+        client.get_verification_status(&unknown),
+        VerificationStatus::Unregistered
+    );
+    let has_profile = env.as_contract(&contract_id, || env.storage().persistent().has(&key));
+    assert!(!has_profile);
+}
+
 #[test]
 fn test_get_admin_extends_instance_ttl() {
     let (env, client) = setup();

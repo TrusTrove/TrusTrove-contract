@@ -1,0 +1,65 @@
+# Cargo dependency policy for the Soroban Rust workspace (issue #1025).
+#
+# Enforced in CI by `cargo deny check` (see .github/workflows/ci.yml).
+# Every check runs deny-by-default: an advisory, license, banned crate or
+# source that is not explicitly allowed below fails the build.
+#
+# Sections and keys follow the cargo-deny configuration schema:
+# https://embarkstudios.github.io/cargo-deny/
+
+[advisories]
+# All RUSTSEC advisories are denied unless explicitly ignored here.
+# RUSTSEC-2026-0009 (time DoS) no longer applies: the lockfile resolves
+# time 0.3.54, which is past the fixed 0.3.47.
+ignore = [
+  # paste is an unmaintained proc-macro crate pulled in transitively by the
+  # Soroban VM dependency tree. It has no known vulnerability; there is no
+  # upstream replacement available to this workspace, and upgrading is gated
+  # on soroban-sdk.
+  { id = "RUSTSEC-2024-0436", reason = "transitive via soroban-sdk; unmaintained, not vulnerable" },
+]
+
+[licenses]
+# A dependency is accepted when one of its licenses appears here; anything
+# else fails the check. The current graph (184 registry crates) resolves to
+# MIT, Apache-2.0, Apache-2.0 WITH LLVM-exception, BSD-2-Clause,
+# BSD-3-Clause, Zlib, Unicode-3.0, 0BSD or Unlicense, including the legacy
+# "MIT/Apache-2.0" expression form.
+allow = [
+  "MIT",
+  "Apache-2.0",
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  "Zlib",
+  "Unicode-3.0",
+  "0BSD",
+  "Unlicense",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Fail if two versions of the same third-party crate ever enter the graph.
+# The current lockfile resolves to a single version of every external crate,
+# so this stays a hard gate.
+multiple-versions = "deny"
+# Pre-existing transitive duplicates that cannot be unified without an
+# upstream release; skipping them keeps the check failing on anything new.
+skip = [
+  # soroban-sdk -> bytes-lit still requires syn 2, while a newer dependency
+  # tree resolves syn 3. Both are proc-macro-only builds.
+  { crate = "syn@2.0.117", reason = "pinned by bytes-lit via soroban-sdk; syn 3 is also in the graph" },
+]
+# Wildcard requirements are allowed only because every workspace crate is
+# referenced by path with no version requirement (`{ path = "../pause" }` or
+# `{ workspace = true }`), which cargo-deny reports as `*`. First-party
+# crates are versioned together by the workspace manifest.
+wildcards = "allow"
+
+[sources]
+# Only the crates.io registry (plus in-workspace path dependencies) may be
+# used; git and alternative-registry sources are rejected.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
