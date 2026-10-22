@@ -197,6 +197,93 @@ mod failing_escrow_default {
     }
 }
 
+// --------------- Mock Invoice (mark_funded failure after escrow lock) ---------------
+//
+// Stands in for the pool's configured invoice contract so a test can prove that
+// a failure in `invoice.mark_funded` — reached only after `escrow.lock` has
+// already moved the principal — rolls the whole transaction back (issue #966).
+//
+// `mark_funded` records whether it observed the locked principal in escrow
+// before failing. The counters are process statics rather than contract
+// storage so they survive the rollback and prove the ordering: lock first,
+// mark_funded second, revert after.
+
+mod failing_mark_funded_invoice {
+    use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+    use soroban_sdk::{
+        contract, contracterror, contractimpl, panic_with_error, Address, BytesN, Env, Symbol,
+    };
+
+    use crate::FundingContext;
+
+    /// Number of times `mark_funded` was reached.
+    pub static MARK_FUNDED_ATTEMPTS: AtomicU32 = AtomicU32::new(0);
+    /// Whether `mark_funded` saw the funded amount already held by escrow.
+    pub static SAW_LOCKED_FUNDS: AtomicBool = AtomicBool::new(false);
+
+    #[contracterror]
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum MockInvoiceError {
+        MarkFundedFailed = 1,
+    }
+
+    #[contract]
+    pub struct MockFailingMarkFundedInvoice;
+
+    #[contractimpl]
+    impl MockFailingMarkFundedInvoice {
+        pub fn configure(env: Env, ctx: FundingContext, escrow: Address, funded_amount: u128) {
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "ctx")), &ctx);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "escrow")), &escrow);
+            env.storage()
+                .instance()
+                .set(&super::InvKey(Symbol::new(&env, "funded")), &funded_amount);
+        }
+
+        pub fn get_funding_context(env: Env, _invoice_id: BytesN<32>) -> FundingContext {
+            env.storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "ctx")))
+                .unwrap()
+        }
+
+        pub fn mark_funded(
+            env: Env,
+            _invoice_id: BytesN<32>,
+            _pool: Address,
+            funding_asset: Address,
+            funded_amount: u128,
+        ) -> bool {
+            let escrow: Address = env
+                .storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "escrow")))
+                .unwrap();
+            let expected_amount: u128 = env
+                .storage()
+                .instance()
+                .get(&super::InvKey(Symbol::new(&env, "funded")))
+                .unwrap();
+
+            // The pool commits pool-side accounting before interacting, then
+            // calls escrow.lock, then this method. Observing the locked amount
+            // in escrow here proves the lock happened before mark_funded.
+            let escrow_balance = super::MockTokenClient::new(&env, &funding_asset).balance(&escrow);
+            SAW_LOCKED_FUNDS.store(
+                funded_amount == expected_amount && escrow_balance == funded_amount as i128,
+                Ordering::SeqCst,
+            );
+            MARK_FUNDED_ATTEMPTS.fetch_add(1, Ordering::SeqCst);
+
+            panic_with_error!(&env, MockInvoiceError::MarkFundedFailed);
+        }
+    }
+}
+
 // --------------- Mock Token (refund transfer failure) ---------------
 //
 // Stands in for the pool's funding asset to prove that a failing refund
@@ -610,6 +697,116 @@ fn test_fund_invoice_escrow_lock_failure_preserves_state() {
         te.invoice.get_status(&invoice_id),
         invoice_status_before,
         "invoice status must not change when escrow.lock fails"
+    );
+}
+
+#[test]
+fn test_fund_invoice_mark_funded_failure_preserves_state_and_escrow() {
+    use core::sync::atomic::Ordering;
+
+    use failing_mark_funded_invoice::{
+        MockFailingMarkFundedInvoice, MockFailingMarkFundedInvoiceClient, MARK_FUNDED_ATTEMPTS,
+        SAW_LOCKED_FUNDS,
+    };
+
+    MARK_FUNDED_ATTEMPTS.store(0, Ordering::SeqCst);
+    SAW_LOCKED_FUNDS.store(false, Ordering::SeqCst);
+
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Swap the pool's invoice reference for a stub whose `mark_funded` fails.
+    // The rest of the wiring (registry, escrow, token) stays real so the test
+    // exercises the actual `escrow.lock` transfer before the failure.
+    let mock_invoice_id = te.env.register_contract(None, MockFailingMarkFundedInvoice);
+    let mock_invoice = MockFailingMarkFundedInvoiceClient::new(&te.env, &mock_invoice_id);
+    mock_invoice.configure(
+        &crate::FundingContext {
+            status: 1, // Listed
+            face_value: DEFAULT_FACE_VALUE,
+            discount_bps: DEFAULT_DISCOUNT_BPS,
+            issuer: te.issuer.clone(),
+            buyer: te.buyer.clone(),
+            funding_asset: te.usdc_id.clone(),
+        },
+        &te.escrow_id,
+        &DEFAULT_FUNDED_AMOUNT,
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_invoice_id);
+    });
+
+    let invoice_id = BytesN::from_array(&te.env, &[7u8; 32]);
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let escrow = RealEscrowClient::new(&te.env, &te.escrow_id);
+
+    let stats_before = te.pool.get_stats();
+    let pool_balance_before = usdc.balance(&te.pool_id);
+    let escrow_balance_before = usdc.balance(&te.escrow_id);
+    assert_eq!(escrow.get_locked(&invoice_id), 0);
+
+    let result = te.pool.try_fund_invoice(&invoice_id);
+    assert!(
+        result.is_err(),
+        "fund_invoice must revert when invoice.mark_funded fails after escrow.lock"
+    );
+
+    // Ordering proof: mark_funded ran once, after the lock had moved the
+    // principal into escrow.
+    assert_eq!(
+        MARK_FUNDED_ATTEMPTS.load(Ordering::SeqCst),
+        1,
+        "invoice.mark_funded must be reached exactly once"
+    );
+    assert!(
+        SAW_LOCKED_FUNDS.load(Ordering::SeqCst),
+        "invoice.mark_funded must observe the escrow.lock transfer before failing"
+    );
+
+    // The failed call must roll back the whole transaction, including the
+    // pool's checks-effects-interactions pre-commit and escrow's lock record.
+    let stats_after = te.pool.get_stats();
+    assert_eq!(
+        stats_after.total_deposits, stats_before.total_deposits,
+        "total deposits must not change when mark_funded fails"
+    );
+    assert_eq!(
+        stats_after.total_funded, stats_before.total_funded,
+        "total funded must not change when mark_funded fails"
+    );
+    assert_eq!(
+        stats_after.active_invoice_count, stats_before.active_invoice_count,
+        "active invoice count must not change when mark_funded fails"
+    );
+    assert_eq!(
+        stats_after.available_liquidity, stats_before.available_liquidity,
+        "available liquidity must not change when mark_funded fails"
+    );
+    assert!(
+        !te.env.as_contract(&te.pool_id, || {
+            te.env.storage().persistent().has(&funded_key)
+        }),
+        "no FundedInvoice entry may remain when mark_funded fails"
+    );
+
+    assert_eq!(
+        escrow.get_locked(&invoice_id),
+        0,
+        "escrow must not retain an orphaned lock after rollback"
+    );
+    assert_eq!(
+        usdc.balance(&te.escrow_id),
+        escrow_balance_before,
+        "escrow token balance must be restored after rollback"
+    );
+    assert_eq!(
+        usdc.balance(&te.pool_id),
+        pool_balance_before,
+        "pool token balance must be restored after rollback"
     );
 }
 
@@ -3873,6 +4070,11 @@ fn test_initialize_accepts_distinct_addresses() {
 // Every pairwise collision among (admin, invoice_contract, escrow_contract,
 // usdc_asset, registry_contract) must be rejected with InvalidConfiguration
 // (#15) so the handle_default gate can never collide with the admin path.
+//
+// The table covers all ten pairs of the five distinct addresses. Each failed
+// attempt must also leave instance storage empty: a rejected initialization
+// that partially wrote Admin or the contract wiring would make the pool look
+// initialized while it is missing the rest of its configuration.
 #[test]
 fn test_initialize_rejects_each_pairwise_address_collision() {
     let env = Env::default();
@@ -3884,6 +4086,13 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
         Address::generate(&env), // escrow_contract
         Address::generate(&env), // usdc_asset
         Address::generate(&env), // registry_contract
+    ];
+    let roles = [
+        "admin",
+        "invoice_contract",
+        "escrow_contract",
+        "usdc_asset",
+        "registry_contract",
     ];
 
     let pairs = [
@@ -3916,9 +4125,25 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
             &String::from_str(&env, TEST_SHARE_SYMBOL),
             &DEFAULT_SHARE_DECIMALS,
         );
-        assert!(
-            res.is_err(),
-            "collision between initialize() params {i} and {j} should be rejected"
+        match res {
+            Err(Ok(err)) => assert_eq!(
+                err,
+                soroban_sdk::Error::from(PoolError::InvalidConfiguration),
+                "collision between {} and {} must surface InvalidConfiguration",
+                roles[i],
+                roles[j]
+            ),
+            _ => panic!(
+                "collision between {} and {} should be rejected with InvalidConfiguration",
+                roles[i], roles[j]
+            ),
+        }
+
+        let instance_len = env.as_contract(&pool_id, || env.storage().instance().all().len());
+        assert_eq!(
+            instance_len, 0,
+            "collision between {} and {} must not initialize any instance keys",
+            roles[i], roles[j]
         );
     }
 }
