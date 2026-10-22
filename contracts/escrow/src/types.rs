@@ -7,8 +7,10 @@ use soroban_sdk::{contracttype, BytesN};
 /// - `amount` must be greater than zero — guaranteed by [`EscrowContract::lock`].
 /// - `locked_at` is set to `env.ledger().timestamp()` at lock time and is never
 ///   updated for the lifetime of the record.
-/// - A record is removed (via `persistent().remove`) when escrow is released
-///   or default-handled; after removal `get_locked` / `get_locked_at` return `0`.
+/// - A partial `release_to_pool` repayment reduces `amount` in place while
+///   preserving `locked_at`; the record is only removed when the residual is
+///   fully repaid (or on a full release / default); after removal
+///   `get_locked` / `get_locked_at` return `0`.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct EscrowRecord {
@@ -110,4 +112,18 @@ pub enum DataKey {
     /// renumber every later variant and orphan the keys already written by
     /// deployed ledgers.
     IssuerReleased(BytesN<32>),
+    /// Invoice contract reference pinned by the admin as defense-in-depth for
+    /// `release_to_pool` (#997). Instance key; value type: `Address`.
+    ///
+    /// Written by [`EscrowContract::set_invoice_contract`] (admin-authenticated).
+    /// `release_to_pool` still resolves the invoice contract it authorizes
+    /// from the pool's `get_invoice_contract` view (#820), but when a pin is
+    /// stored here that resolved address must equal the pin or the call is
+    /// rejected with [`EscrowError::InvalidConfig`](crate::EscrowError::InvalidConfig) —
+    /// so a pool whose invoice-contract configuration drifted from the
+    /// escrow admin's pin cannot silently redirect repayments.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 7) — see the note on [`DataKey::IssuerReleased`].
+    InvoiceContract,
 }

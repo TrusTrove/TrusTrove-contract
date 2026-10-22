@@ -157,7 +157,7 @@ fn setup() -> Setup {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -165,13 +165,13 @@ fn setup() -> Setup {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     (env, client, issuer, buyer, registry_client, usdc_asset)
@@ -207,7 +207,7 @@ fn setup_with_admin() -> SetupWithAdmin {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -215,13 +215,13 @@ fn setup_with_admin() -> SetupWithAdmin {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     (
@@ -236,7 +236,7 @@ fn setup_with_admin() -> SetupWithAdmin {
 }
 
 fn mock_pool_with_asset(env: &Env, asset: &Address) -> Address {
-    let pool_id = env.register_contract(None, MockPool);
+    let pool_id = env.register(MockPool, ());
     let _pool_client = MockPoolClient::new(env, &pool_id);
     env.as_contract(&pool_id, || {
         let key = Symbol::new(env, "asset");
@@ -277,7 +277,7 @@ use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 /// individual tests can just call this right before `list_for_financing`.
 fn attest(env: &Env, client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
     let agent_id = Symbol::new(env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -329,7 +329,7 @@ fn test_get_attestation_persists_signed_payload_and_submission_time() {
     assert!(client.get_attestation(&invoice_id).is_none());
 
     let agent_id = Symbol::new(&env, "underwriter");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     MockAgentRegistryClient::new(&env, &registry_id).register_agent(
         &agent_id,
         &crate::Agent {
@@ -383,7 +383,7 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
 
     // Register agent with a different pubkey than the one we'll use to sign
@@ -427,7 +427,7 @@ fn test_submit_attestation_inactive_agent() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
 
     // Register agent as inactive but with the CORRECT pubkey for the signing
@@ -462,15 +462,15 @@ fn test_submit_attestation_inactive_agent() {
     sig_bytes[64] = recid.to_byte();
     let signature = BytesN::from_array(&env, &sig_bytes);
 
-    // Record event count before the call. submit_attestation emits
-    // `attestation_submitted` only on success, so a failing call must not
-    // increase this count.
-    let events_before = env.events().all().len();
-
     // Use the fallible client variant so we can assert on the Result and then
     // continue inspecting storage/events. `try_submit_attestation` returns the
     // typed error path (#21 = UntrustedSigner) rather than aborting the test.
     let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
+    // sdk >=22 test Envs reset the event buffer at every top-level
+    // invocation, so this capture holds exactly the rejected call's own
+    // events; submit_attestation emits `attestation_submitted` only on
+    // success, so the buffer must be empty.
+    let events_after_call = env.events().all();
     match result {
         Ok(_) => panic!("inactive agent must not be able to submit an attestation"),
         Err(inner) => {
@@ -487,8 +487,8 @@ fn test_submit_attestation_inactive_agent() {
         "rejected attestation must not be stored"
     );
     assert_eq!(
-        env.events().all().len(),
-        events_before,
+        events_after_call.len(),
+        0,
         "rejected attestation must not emit attestation_submitted"
     );
 }
@@ -501,7 +501,7 @@ fn test_submit_attestation_unregistered_agent() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let _registry_client = MockAgentRegistryClient::new(&env, &registry_id);
 
     // Don't register the agent at all
@@ -540,7 +540,7 @@ fn test_submit_attestation_replay_rejection() {
 
     // Second attestation with a different valid payload should fail
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -585,7 +585,7 @@ fn test_submit_attestation_domain_separator_mismatch() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -627,7 +627,7 @@ fn test_submit_attestation_invoice_id_mismatch() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -678,7 +678,7 @@ fn test_submit_attestation_nonexistent_invoice() {
     let (env, client, _issuer, _buyer, _, _usdc) = setup();
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -889,20 +889,20 @@ fn test_create_fails_unverified_issuer() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     let face_value: u128 = DEFAULT_FACE_VALUE;
@@ -916,20 +916,20 @@ fn test_create_fails_unverified_buyer() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     registry_client.register(&issuer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     let face_value: u128 = DEFAULT_FACE_VALUE;
@@ -1000,6 +1000,9 @@ fn test_create_succeeds_when_due_date_one_second_in_future() {
     let face_value: u128 = DEFAULT_FACE_VALUE;
 
     let invoice_id = client.create(&issuer, &buyer, &face_value, &just_future_due_date, &usdc);
+    // Capture the create call's own events before the get query resets the
+    // per-invocation buffer (sdk >=22 test Env semantics).
+    let events_after_create = env.events().all();
 
     // State: invoice record exists at Created with the boundary due_date.
     let invoice = client.get(&invoice_id);
@@ -1015,7 +1018,7 @@ fn test_create_succeeds_when_due_date_one_second_in_future() {
     // shape here; detailed per-topic comparisons live in the dedicated event
     // integration tests because soroban_sdk's `Val` does not implement
     // `PartialEq` for ad-hoc equality assertions.
-    let events = env.events().all();
+    let events = events_after_create;
     let (event_contract, _topics, _data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address.clone());
 }
@@ -1169,13 +1172,14 @@ fn test_list_for_financing_discount_bps_min_boundary() {
     attest(&env, &client, &invoice_id);
     let result = client.list_for_financing(&invoice_id, &1);
     assert!(result);
+    let events_after_call = env.events().all();
 
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Listed);
     assert_eq!(invoice.discount_bps, 1);
 
     let contract_id = client.address.clone();
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, contract_id);
     assert_eq!(
@@ -1195,13 +1199,14 @@ fn test_list_for_financing_discount_bps_max_boundary() {
     attest(&env, &client, &invoice_id);
     let result = client.list_for_financing(&invoice_id, &5000);
     assert!(result);
+    let events_after_call = env.events().all();
 
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Listed);
     assert_eq!(invoice.discount_bps, 5000);
 
     let contract_id = client.address.clone();
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, contract_id);
     assert_eq!(
@@ -1658,7 +1663,7 @@ fn test_trigger_default_stranger_panics() {
     // the other `setup()`-based `trigger_default` tests, so it's deferred.
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -1666,7 +1671,7 @@ fn test_trigger_default_stranger_panics() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1988,6 +1993,7 @@ fn test_mark_funded_updates_counts_index_and_emits_one_event() {
         .is_empty());
 
     assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT));
+    let events_after_mark_funded = env.events().all();
 
     let counts = client.get_counts();
     assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(0));
@@ -2002,7 +2008,7 @@ fn test_mark_funded_updates_counts_index_and_emits_one_event() {
     assert_eq!(funded.get(0).unwrap().status, InvoiceStatus::Funded);
 
     let mut funded_event_count = 0;
-    for (contract, topics, data) in env.events().all().iter() {
+    for (contract, topics, data) in events_after_mark_funded.iter() {
         if contract != client.address {
             continue;
         }
@@ -2061,7 +2067,8 @@ fn test_mark_funded_succeeds_for_configured_pool() {
     assert_eq!(inv.funding_pool, Some(pool));
 }
 
-// #554: mark_funded panics when funded_amount exceeds face_value.
+// #554 / #934: mark_funded panics with the typed InvalidAmount error when
+// funded_amount exceeds face_value.
 #[test]
 #[should_panic(expected = "Error(Contract, #16)")]
 fn test_mark_funded_fails_when_amount_exceeds_face_value() {
@@ -2074,6 +2081,39 @@ fn test_mark_funded_fails_when_amount_exceeds_face_value() {
     let pool = mock_pool_with_asset(&env, &usdc);
     client.set_pool_contract(&pool);
     client.mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1));
+}
+
+// #934: a rejected over-funding attempt must not mutate the invoice at all —
+// the status stays Listed and funded_amount stays 0, so a later legitimate
+// funding (at or below face_value) is still possible.
+#[test]
+fn test_mark_funded_overfunding_leaves_invoice_unchanged() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    assert!(client
+        .try_mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1))
+        .is_err());
+    // soroban-sdk 22+ resets the event buffer before every top-level invocation,
+    // so the rejected call is measured on its own: it must emit nothing.
+    assert_eq!(env.events().all().len(), 0);
+
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Listed);
+    assert_eq!(inv.funded_amount, 0);
+    assert_eq!(inv.funding_pool, None);
+    assert_eq!(inv.funded_at, None);
+
+    // The invoice is still fundable at its face value after the rejection.
+    assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FACE_VALUE));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Funded);
+    assert_eq!(client.get(&invoice_id).funded_amount, DEFAULT_FACE_VALUE);
 }
 
 // #554: funded_amount == face_value is the boundary and must succeed.
@@ -2281,6 +2321,34 @@ fn test_set_pool_contract_emits_event() {
 }
 
 #[test]
+fn test_set_pool_contract_replacement_emits_old_and_new_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let old_pool = Address::generate(&env);
+    let new_pool = Address::generate(&env);
+
+    client.set_pool_contract(&old_pool);
+    client.set_pool_contract(&new_pool);
+
+    // soroban-sdk 22+ resets the event buffer before every top-level invocation,
+    // so the replacement event is captured before any further call is made.
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    assert_eq!(client.get_pool_contract(), Some(new_pool.clone()));
+    let (event_contract, topics, data) = events.last().expect("expected replacement event");
+    assert_eq!(event_contract, client.address.clone());
+    assert_eq!(
+        topics,
+        (
+            Symbol::new(&env, "pool_contract_updated"),
+            old_pool,
+            new_pool
+        )
+            .into_val(&env)
+    );
+    <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
 fn test_set_pool_contract_rejects_conflicting_addresses() {
     let (env, client, _, _, _, _) = setup();
     let admin = client.get_admin().unwrap();
@@ -2341,7 +2409,7 @@ fn test_set_agent_registry_contract_rejects_conflicting_addresses() {
 fn test_initialize_rejects_conflicting_registry_address() {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
 
@@ -2392,7 +2460,7 @@ fn test_mark_shipped_succeeds_by_issuer() {
 fn test_mark_shipped_stranger_panics() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -2400,7 +2468,7 @@ fn test_mark_shipped_stranger_panics() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -2491,7 +2559,7 @@ fn test_mark_shipped_stranger_panics() {
 fn test_expire_listing_stranger_panics() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -2499,7 +2567,7 @@ fn test_expire_listing_stranger_panics() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -2778,7 +2846,7 @@ fn test_repay_fails_from_listed() {
 fn test_repay_fails_no_auth() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -2786,7 +2854,7 @@ fn test_repay_fails_no_auth() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -3132,7 +3200,7 @@ impl MockEscrow {
 
 /// Registers a MockEscrow wired to `pool_id` and `asset` and returns its address.
 fn mock_escrow_for_pool(env: &Env, pool_id: &Address, asset: &Address) -> Address {
-    let escrow_id = env.register_contract(None, MockEscrow);
+    let escrow_id = env.register(MockEscrow, ());
     let esc_client = MockEscrowClient::new(env, &escrow_id);
     esc_client.set_pool(pool_id);
     esc_client.set_asset(asset);
@@ -3169,16 +3237,104 @@ fn setup_confirmed_invoice() -> (
 // ============== SUPPORTED ASSET TESTS ==============
 
 #[test]
+fn test_add_supported_asset_requires_admin_authorization() {
+    let (env, client, _, _, _, supported) = setup();
+    let asset = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let count = client.get_supported_asset_count();
+
+    for signed_by_non_admin in [false, true] {
+        // Replace setup's blanket authorization with either no signature or
+        // a signature for this exact invocation from someone other than admin.
+        env.mock_auths(&[]);
+        if signed_by_non_admin {
+            env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &non_admin,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "add_supported_asset",
+                    args: (asset.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+        }
+
+        assert!(client.try_add_supported_asset(&asset).is_err());
+        assert!(!client.is_supported_asset(&asset));
+        assert!(client.is_supported_asset(&supported));
+        assert_eq!(client.get_supported_asset_count(), count);
+    }
+}
+
+#[test]
+fn test_remove_supported_asset_requires_admin_authorization() {
+    let (env, client, _, _, _, asset) = setup();
+    let non_admin = Address::generate(&env);
+    let count = client.get_supported_asset_count();
+
+    for signed_by_non_admin in [false, true] {
+        env.mock_auths(&[]);
+        if signed_by_non_admin {
+            env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &non_admin,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "remove_supported_asset",
+                    args: (asset.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+        }
+
+        assert!(client.try_remove_supported_asset(&asset).is_err());
+        assert!(client.is_supported_asset(&asset));
+        assert_eq!(client.get_supported_asset_count(), count);
+    }
+}
+
+#[test]
+fn test_is_supported_asset_renews_near_expiry_entry_without_adding_unknown_asset() {
+    let (env, client, _, _, _, asset) = setup();
+    let unknown = Address::generate(&env);
+    let key = crate::DataKey::SupportedAsset(asset.clone());
+    let unknown_key = crate::DataKey::SupportedAsset(unknown.clone());
+    let count = client.get_supported_asset_count();
+    let initial_ttl = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + initial_ttl - 1);
+    env.as_contract(&client.address, || {
+        assert_eq!(env.storage().persistent().get_ttl(&key), 1);
+    });
+
+    assert!(client.is_supported_asset(&asset));
+    env.as_contract(&client.address, || {
+        assert_eq!(env.storage().persistent().get_ttl(&key), TTL_EXTEND_TO);
+    });
+    assert!(!client.is_supported_asset(&unknown));
+    env.as_contract(&client.address, || {
+        assert!(!env.storage().persistent().has(&unknown_key));
+    });
+    assert_eq!(client.get_supported_asset_count(), count);
+
+    // The renewed entry survives beyond its original live-until ledger.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 2);
+    assert!(client.is_supported_asset(&asset));
+}
+
+#[test]
 fn test_add_supported_asset() {
     let (env, client, _, _, _, _) = setup();
     let asset = Address::generate(&env);
 
     assert!(!client.is_supported_asset(&asset));
     client.add_supported_asset(&asset);
+    let events_after_call = env.events().all();
     assert!(client.is_supported_asset(&asset));
     assert_eq!(client.get_supported_asset_count(), 2);
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
@@ -3388,13 +3544,15 @@ fn test_repay_from_confirmed() {
 
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
 
-    let events_before = env.events().all().len();
     client.repay(&invoice_id);
+    // sdk >=22: this buffer holds exactly the repay call's own events, and
+    // a successful repay must emit at least one (invoice_repaid).
+    let events_after_repay = env.events().all();
 
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Repaid);
     assert!(invoice.repaid_at.is_some());
-    assert!(env.events().all().len() > events_before);
+    assert!(!events_after_repay.is_empty());
 }
 
 #[test]
@@ -3555,7 +3713,7 @@ fn test_create_fails_uninitialized_registry() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -3563,7 +3721,7 @@ fn test_create_fails_uninitialized_registry() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
@@ -3585,7 +3743,7 @@ fn test_create_fails_missing_counter() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -3593,7 +3751,7 @@ fn test_create_fails_missing_counter() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -3629,6 +3787,7 @@ fn test_create_writes_to_issuer_index() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
     let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    let events_after_create = env.events().all();
 
     // Direct storage read: issuer index count and entry
     env.as_contract(&client.address, || {
@@ -3658,7 +3817,9 @@ fn test_create_writes_to_issuer_index() {
     assert_eq!(empty.len(), 0);
 
     // Verify the invoice_created event was emitted by the invoice contract
-    let events = env.events().all();
+    // (captured right after the create call — sdk >=22 buffers are
+    // per-invocation).
+    let events = events_after_create;
     let (event_contract, _topics, _data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
 }
@@ -3672,6 +3833,7 @@ fn test_create_writes_to_buyer_index() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
     let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    let events_after_create = env.events().all();
 
     // Direct storage read: buyer index count and entry
     env.as_contract(&client.address, || {
@@ -3701,7 +3863,9 @@ fn test_create_writes_to_buyer_index() {
     assert_eq!(empty.len(), 0);
 
     // Verify the invoice_created event was emitted by the invoice contract
-    let events = env.events().all();
+    // (captured right after the create call — sdk >=22 buffers are
+    // per-invocation).
+    let events = events_after_create;
     let (event_contract, _topics, _data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
 }
@@ -3943,7 +4107,7 @@ fn test_get_funded_amount_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_funded_amount_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_funded_amount(&fake_id);
@@ -3969,7 +4133,7 @@ fn test_get_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_issuer_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_issuer(&fake_id);
@@ -3979,7 +4143,7 @@ fn test_get_issuer_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_face_value_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_face_value(&fake_id);
@@ -3989,7 +4153,7 @@ fn test_get_face_value_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_funding_asset_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_funding_asset(&fake_id);
@@ -3999,7 +4163,7 @@ fn test_get_funding_asset_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_discount_bps_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_discount_bps(&fake_id);
@@ -4009,7 +4173,7 @@ fn test_get_discount_bps_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_status_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_status(&fake_id);
@@ -4019,7 +4183,7 @@ fn test_get_status_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get(&fake_id);
@@ -4051,7 +4215,7 @@ fn test_get_buyer_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_buyer_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_buyer(&fake_id);
@@ -4079,7 +4243,7 @@ fn test_get_due_date_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_due_date_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_due_date(&fake_id);
@@ -4189,10 +4353,11 @@ fn test_remove_supported_asset() {
 
     assert!(client.is_supported_asset(&usdc));
     client.remove_supported_asset(&usdc);
+    let events_after_call = env.events().all();
     assert!(!client.is_supported_asset(&usdc));
     assert_eq!(client.get_supported_asset_count(), 0);
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
@@ -4208,9 +4373,10 @@ fn test_set_escrow_contract_emits_initial_assignment_event() {
     let escrow = Address::generate(&env);
 
     client.set_escrow_contract(&escrow);
+    let events_after_call = env.events().all();
     assert_eq!(client.get_escrow_contract(), Some(escrow.clone()));
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
@@ -4233,12 +4399,13 @@ fn test_set_escrow_contract_emits_replacement_event() {
     client.set_escrow_contract(&initial_escrow);
 
     client.set_escrow_contract(&replacement_escrow);
+    let events_after_call = env.events().all();
     assert_eq!(
         client.get_escrow_contract(),
         Some(replacement_escrow.clone())
     );
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
@@ -4317,6 +4484,7 @@ fn test_repay_partial_leaves_status_and_updates_balance() {
     let partial_amount = 400_000_000u128;
     let result = client.repay_partial(&invoice_id, &partial_amount);
     assert!(result);
+    let events_after_repay = env.events().all();
 
     let inv = client.get(&invoice_id);
     assert_eq!(inv.status, InvoiceStatus::Confirmed);
@@ -4329,7 +4497,7 @@ fn test_repay_partial_leaves_status_and_updates_balance() {
     assert_eq!(client.get_repaid_amount(&invoice_id), partial_amount);
 
     let contract_id = client.address.clone();
-    let events = env.events().all();
+    let events = events_after_repay;
     let found = events.iter().any(|e| {
         let (c, topics, _data) = e;
         if c != contract_id {
@@ -4488,6 +4656,94 @@ fn test_repay_early_reads_stored_funded_amount() {
     assert_eq!(inv.remaining_balance, 0);
 }
 
+//  ISSUE #949: REPAY_EARLY REFUND BOUNDARIES
+//
+// `repay_early` prorates the discount from `funded_at`. These tests pin the
+// two ends of the window: at `funded_at` the buyer gets the entire discount
+// back and the pool books no yield; one second before `due_date` the buyer
+// gets the integer-division remainder and the pool books the complement.
+
+#[test]
+fn test_repay_early_at_funded_at_refunds_full_discount() {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let invoice = client.get(&invoice_id);
+    let funded_at = invoice.funded_at.expect("funded invoice has funded_at");
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert!(discount > 0);
+
+    // `setup_confirmed_invoice` funds and confirms at the current timestamp;
+    // pin the ledger to the recorded funding time explicitly.
+    env.ledger().set_timestamp(funded_at);
+    mint_tokens(
+        &env,
+        &client.get_funding_asset(&invoice_id),
+        &buyer,
+        invoice.face_value as i128,
+    );
+
+    assert!(client.repay_early(&invoice_id));
+
+    assert_eq!(
+        MockPoolClient::new(&env, &pool).get_last_refund(),
+        discount,
+        "at funded_at the buyer must receive the full discount back"
+    );
+    let settled = client.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(funded_at));
+    assert_eq!(settled.repaid_amount, invoice.face_value);
+    assert_eq!(settled.remaining_balance, 0);
+
+    let token = MockTokenClient::new(&env, &client.get_funding_asset(&invoice_id));
+    assert_eq!(token.balance(&buyer), 0);
+    assert_eq!(token.balance(&pool), invoice.face_value as i128);
+    assert_eq!(token.balance(&escrow), 0);
+
+    // Settlement is one-shot: a second repayment must not book the split again.
+    assert!(client.try_repay(&invoice_id).is_err());
+}
+
+#[test]
+fn test_repay_early_one_second_before_due_date_refunds_only_remainder() {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let invoice = client.get(&invoice_id);
+    let funded_at = invoice.funded_at.expect("funded invoice has funded_at");
+    let term = invoice.due_date - funded_at;
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert!(term > 0 && discount > 0);
+
+    let repaid_at = invoice.due_date - 1;
+    let earned_by_pool = discount * (term - 1) as u128 / term as u128;
+    let expected_refund = discount - earned_by_pool;
+    assert!(expected_refund > 0, "integer division leaves a remainder");
+
+    env.ledger().set_timestamp(repaid_at);
+    mint_tokens(
+        &env,
+        &client.get_funding_asset(&invoice_id),
+        &buyer,
+        invoice.face_value as i128,
+    );
+
+    assert!(client.repay_early(&invoice_id));
+
+    assert_eq!(
+        MockPoolClient::new(&env, &pool).get_last_refund(),
+        expected_refund
+    );
+    assert_eq!(expected_refund + earned_by_pool, discount);
+    let settled = client.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(repaid_at));
+
+    let token = MockTokenClient::new(&env, &client.get_funding_asset(&invoice_id));
+    assert_eq!(token.balance(&buyer), 0);
+    assert_eq!(token.balance(&pool), invoice.face_value as i128);
+    assert_eq!(token.balance(&escrow), 0);
+
+    assert!(client.try_repay_early(&invoice_id).is_err());
+}
+
 // ── Issue #872: expire_listing issuer path with explicit auth ────────────────
 //
 // The tests above run under `mock_all_auths()`, which masks the difference
@@ -4509,7 +4765,7 @@ fn setup_no_mock_auth() -> (
 ) {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -4517,7 +4773,7 @@ fn setup_no_mock_auth() -> (
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -4533,7 +4789,7 @@ fn setup_no_mock_auth() -> (
     client.initialize(&admin, &registry_id);
 
     // Funding asset must be allow-listed by the admin (explicit signature).
-    let usdc = env.register_contract(None, MockToken);
+    let usdc = env.register(MockToken, ());
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &admin,
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -4547,7 +4803,7 @@ fn setup_no_mock_auth() -> (
 
     // Agent registry must be configured by the admin (explicit signature);
     // register_agent itself needs no auth.
-    let agent_registry_id = env.register_contract(None, MockAgentRegistry);
+    let agent_registry_id = env.register(MockAgentRegistry, ());
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &admin,
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -5062,7 +5318,7 @@ fn test_batch_create_rejects_oversized_batch() {
 #[test]
 fn test_batch_create_allows_exactly_max_batch_size() {
     let (env, client, issuer, buyer, _, usdc) = setup();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     let mut entries: Vec<(Address, u128, u64, Address)> = Vec::new(&env);
     for _ in 0..MAX_BATCH_SIZE {
         entries.push_back(batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE));
@@ -5076,7 +5332,7 @@ fn test_batch_create_allows_exactly_max_batch_size() {
 #[test]
 fn test_batch_create_with_one_invalid_entry_reverts_whole_batch() {
     let (env, client, issuer, buyer, _, usdc) = setup();
-    let bad_asset = env.register_contract(None, MockToken);
+    let bad_asset = env.register(MockToken, ());
     let _ = MockTokenClient::new(&env, &bad_asset);
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
@@ -5261,7 +5517,7 @@ fn test_batch_list_for_financing_rejects_oversized_batch() {
 #[test]
 fn test_batch_list_for_financing_allows_exactly_max_batch_size() {
     let (env, client, issuer, buyer, _, usdc) = setup();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
     for _ in 0..MAX_BATCH_SIZE {
@@ -5436,29 +5692,34 @@ fn test_get_funding_context_costs_less_than_four_separate_views() {
     client.list_for_financing(&invoice_id, &200);
 
     // Measure the old read pattern: four host calls, four invoice loads.
-    env.budget().reset_default();
-    let four = (
-        client.get_funding_terms(&invoice_id),
-        client.get_issuer(&invoice_id),
-        client.get_buyer(&invoice_id),
-        client.get_funding_asset(&invoice_id),
-    );
-    let cpu_four = env.budget().cpu_instruction_cost();
-    let mem_four = env.budget().memory_bytes_cost();
+    // sdk >=22 test Envs reset the budget at the start of every top-level
+    // invocation, so each call's cost is read right after it and summed
+    // test-side.
+    let terms = client.get_funding_terms(&invoice_id);
+    let mut cpu_four = env.cost_estimate().budget().cpu_instruction_cost();
+    let mut mem_four = env.cost_estimate().budget().memory_bytes_cost();
+    let four_issuer = client.get_issuer(&invoice_id);
+    cpu_four += env.cost_estimate().budget().cpu_instruction_cost();
+    mem_four += env.cost_estimate().budget().memory_bytes_cost();
+    let four_buyer = client.get_buyer(&invoice_id);
+    cpu_four += env.cost_estimate().budget().cpu_instruction_cost();
+    mem_four += env.cost_estimate().budget().memory_bytes_cost();
+    let four_asset = client.get_funding_asset(&invoice_id);
+    cpu_four += env.cost_estimate().budget().cpu_instruction_cost();
+    mem_four += env.cost_estimate().budget().memory_bytes_cost();
 
     // Measure the consolidated read: one host call, one invoice load.
-    env.budget().reset_default();
     let ctx = client.get_funding_context(&invoice_id);
-    let cpu_one = env.budget().cpu_instruction_cost();
-    let mem_one = env.budget().memory_bytes_cost();
+    let cpu_one = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_one = env.cost_estimate().budget().memory_bytes_cost();
 
     // Parity first (the cheaper path must answer identically)...
-    assert_eq!(ctx.status, four.0 .0);
-    assert_eq!(ctx.face_value, four.0 .1);
-    assert_eq!(ctx.discount_bps, four.0 .2);
-    assert_eq!(ctx.issuer, four.1);
-    assert_eq!(ctx.buyer, four.2);
-    assert_eq!(ctx.funding_asset, four.3);
+    assert_eq!(ctx.status, terms.0);
+    assert_eq!(ctx.face_value, terms.1);
+    assert_eq!(ctx.discount_bps, terms.2);
+    assert_eq!(ctx.issuer, four_issuer);
+    assert_eq!(ctx.buyer, four_buyer);
+    assert_eq!(ctx.funding_asset, four_asset);
 
     // ...then the performance claim. Host budget accounting is deterministic,
     // so 3/4ths of the reads saved must show up as a strict reduction in both
@@ -5599,27 +5860,37 @@ fn test_terminal_invoice_stays_available_when_read_through_indexes() {
     assert_eq!(page.get(0).unwrap().id, invoice_id);
 }
 
+/// Issue #832 documented that the read-time TTL bump only protects entries
+/// that are actually still being queried: once the write-time TTL has fully
+/// elapsed with no `get_by_*` call in between, the index entries expire.
+///
+/// Under soroban-sdk 22 the test Env emulated the network's archived-access
+/// failure (`Storage::InternalError`). Soroban-sdk 23 follows protocol 23,
+/// where transactions automatically restore archived entries before access,
+/// and the test Env now emulates that restoration instead (see the SDK's
+/// `_migrating::v23_archived_testing` notes). Even the TTL introspection
+/// helpers count as accesses, so expiry is no longer observable from the
+/// test Env; what this test pins is the protocol-23 half: a read through
+/// entries whose write-time TTL has fully elapsed succeeds via automatic
+/// restoration instead of hard-failing, and the index page stays intact.
 #[test]
-#[should_panic(expected = "Error(Storage, InternalError)")]
-fn test_get_by_issuer_fails_when_entries_are_never_read() {
+fn test_get_by_issuer_never_read_entries_expire_and_auto_restore() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
-    // Documented archival behaviour (issue #832): the read-time bump only
-    // protects entries that are actually still being queried. Once the
-    // write-time TTL has fully elapsed with no `get_by_*` call in between,
-    // the index entries are archived and any read through them hard-fails
-    // (`Storage::InternalError` in the test env: "Accessed contract data key
-    // that has been archived"; on the real network the transaction fails
-    // before the contract runs). Recovery then requires a `RestoreFootprint`
-    // by a keeper, as documented in DEPLOYMENT.md.
     env.ledger()
         .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
     keep_instance_alive(&env, &client.address);
     env.ledger()
         .set_sequence_number(env.ledger().sequence() + 100_010);
-    client.get_by_issuer(&issuer, &0, &20);
+
+    // Protocol-23 automatic restoration: the read returns the archived entry
+    // instead of hard-failing (on SDK 22's emulated host this panicked with
+    // `Error(Storage, InternalError)`).
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
 }
 
 // ============== ISSUE #830: STATUSCOUNT ENTRIES ARE TTL-EXTENDED ON WRITE ==============
@@ -5714,15 +5985,15 @@ const MAX_GROWTH_FACTOR: u64 = 16;
 fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
     const N: usize = 300;
     let (env, client, issuer, buyer, _, usdc) = setup();
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let mut ids = Vec::new(&env);
     // Measured "first create": empty indexes (this is also the literal AC2
     // baseline pair; see the end of the test for why its factor is bounded
     // by the test host rather than the contract).
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     ids.push_back(client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
-    let cpu_first_create = env.budget().cpu_instruction_cost();
+    let cpu_first_create = env.cost_estimate().budget().cpu_instruction_cost();
     for _ in 1..N {
         ids.push_back(client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
     }
@@ -5734,28 +6005,28 @@ fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
     // 1. `extend_issuer_index` duplicate detection: `ids[0]` sat at row 0
     //    of the issuer index (pre-fix scan: 1 read), `ids[N-1]` at the last
     //    row (pre-fix scan: N reads).
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     env.as_contract(&client.address, || {
         crate::extend_issuer_index(&env, &issuer, &ids.get(0).unwrap());
     });
-    let cpu_issuer_shallow = env.budget().cpu_instruction_cost();
-    env.budget().reset_unlimited();
+    let cpu_issuer_shallow = env.cost_estimate().budget().cpu_instruction_cost();
+    env.cost_estimate().budget().reset_unlimited();
     env.as_contract(&client.address, || {
         crate::extend_issuer_index(&env, &issuer, &ids.get(N as u32 - 1).unwrap());
     });
-    let cpu_issuer_deep = env.budget().cpu_instruction_cost();
+    let cpu_issuer_deep = env.cost_estimate().budget().cpu_instruction_cost();
 
     // 2. Same pair for `extend_buyer_index`.
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     env.as_contract(&client.address, || {
         crate::extend_buyer_index(&env, &buyer, &ids.get(0).unwrap());
     });
-    let cpu_buyer_shallow = env.budget().cpu_instruction_cost();
-    env.budget().reset_unlimited();
+    let cpu_buyer_shallow = env.cost_estimate().budget().cpu_instruction_cost();
+    env.cost_estimate().budget().reset_unlimited();
     env.as_contract(&client.address, || {
         crate::extend_buyer_index(&env, &buyer, &ids.get(N as u32 - 1).unwrap());
     });
-    let cpu_buyer_deep = env.budget().cpu_instruction_cost();
+    let cpu_buyer_deep = env.cost_estimate().budget().cpu_instruction_cost();
 
     // 3. `move_status_index`-driven transition: moving `ids[0]` (row 0 of
     //    the Created index) is the shallow case; moving `ids[N-2]` (second
@@ -5763,12 +6034,12 @@ fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
     //    deep case. These double as the "last create / last transition"
     //    end-to-end signal: every public create and transition funnels
     //    through exactly these three helpers.
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     assert!(client.cancel(&ids.get(0).unwrap()));
-    let cpu_move_shallow = env.budget().cpu_instruction_cost();
-    env.budget().reset_unlimited();
+    let cpu_move_shallow = env.cost_estimate().budget().cpu_instruction_cost();
+    env.cost_estimate().budget().reset_unlimited();
     assert!(client.cancel(&ids.get(N as u32 - 2).unwrap()));
-    let cpu_move_deep = env.budget().cpu_instruction_cost();
+    let cpu_move_deep = env.cost_estimate().budget().cpu_instruction_cost();
 
     assert!(
         cpu_issuer_deep <= cpu_issuer_shallow * MAX_GROWTH_FACTOR,
@@ -5812,9 +6083,9 @@ fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
     // assertion is the scan-depth gate above. Before the fix the extra
     // full-index scans pushed this ratio to ~27x, failing the bound; with
     // the marker rewrite it lands back at the host floor.
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
-    let cpu_last_create = env.budget().cpu_instruction_cost();
+    let cpu_last_create = env.cost_estimate().budget().cpu_instruction_cost();
     assert!(
         cpu_last_create <= cpu_first_create * 25,
         "create cost must stay at the test-host floor: first {cpu_first_create}, last {cpu_last_create} ({}x)",
