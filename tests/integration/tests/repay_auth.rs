@@ -143,7 +143,7 @@ fn setup_repay_wiring() -> RepayWiring {
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     let lp = Address::generate(&env);
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     for address in [&lp, &buyer] {
         let key = TKey(address.clone());
         env.as_contract(&usdc_id, || {
@@ -153,7 +153,7 @@ fn setup_repay_wiring() -> RepayWiring {
         });
     }
 
-    let registry_id = env.register_contract(None, RegistryContract);
+    let registry_id = env.register(RegistryContract, ());
     let registry = RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
     let metadata: Map<String, String> = Map::new(&env);
@@ -162,16 +162,16 @@ fn setup_repay_wiring() -> RepayWiring {
     registry.verify_profile(&admin, &issuer, &true);
     registry.verify_profile(&admin, &buyer, &true);
 
-    let invoice_addr = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let invoice_addr = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
     let invoice = InvoiceContractClient::new(&env, &invoice_addr);
     invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
 
-    let agent_reg_id = env.register_contract(None, MockAgentRegistry);
+    let agent_reg_id = env.register(MockAgentRegistry, ());
     MockAgentRegistryClient::new(&env, &agent_reg_id).register_agent(
         &test_agent_id(&env),
         &trusttrove_invoice::Agent {

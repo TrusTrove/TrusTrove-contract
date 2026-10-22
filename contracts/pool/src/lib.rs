@@ -1,4 +1,11 @@
 #![no_std]
+// `PoolContract::initialize` takes 10 contract arguments (issue #826 SDK
+// upgrade): under soroban-sdk 23 the `#[contractimpl]`/`contractargs`
+// expansion re-emits that signature as generated code that inherits neither a
+// fn-level nor an impl-level `#[allow(clippy::too_many_arguments)]` (both were
+// verified ineffective with the workspace's clippy), so the suppression has to
+// live at the crate root.
+#![allow(clippy::too_many_arguments)]
 
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, IntoVal,
@@ -640,7 +647,7 @@ impl PoolContract {
 
         let usdc_id = Self::funding_asset(&env);
         let usdc = token::Client::new(&env, &usdc_id);
-        usdc.transfer(&lp, &env.current_contract_address(), &(usdc_amount as i128));
+        usdc.transfer(&lp, env.current_contract_address(), &(usdc_amount as i128));
 
         Self::_mint(&env, &lp, shares_to_issue);
         env.storage()

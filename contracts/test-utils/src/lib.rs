@@ -101,7 +101,7 @@ pub fn setup_full_protocol() -> FullProtocol {
     let lp = Address::generate(&env);
 
     // 1. Registry
-    let registry_id = env.register_contract(None, trusttrove_registry::RegistryContract);
+    let registry_id = env.register(trusttrove_registry::RegistryContract, ());
     let registry = trusttrove_registry::RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
 
@@ -110,7 +110,7 @@ pub fn setup_full_protocol() -> FullProtocol {
     registry.register_buyer(&buyer, &empty_meta);
 
     // 2. Token
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     let lp_bal_key = TKey(lp.clone());
     env.as_contract(&usdc_id, || {
         env.storage()
@@ -125,9 +125,9 @@ pub fn setup_full_protocol() -> FullProtocol {
     });
 
     // 3. Contracts
-    let invoice_id = env.register_contract(None, trusttrove_invoice::InvoiceContract);
-    let escrow_id = env.register_contract(None, trusttrove_escrow::EscrowContract);
-    let pool_id = env.register_contract(None, trusttrove_pool::PoolContract);
+    let invoice_id = env.register(trusttrove_invoice::InvoiceContract, ());
+    let escrow_id = env.register(trusttrove_escrow::EscrowContract, ());
+    let pool_id = env.register(trusttrove_pool::PoolContract, ());
 
     let invoice = trusttrove_invoice::InvoiceContractClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
@@ -153,7 +153,7 @@ pub fn setup_full_protocol() -> FullProtocol {
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
 
-    let agent_registry_id = env.register_contract(None, MockAgentRegistry);
+    let agent_registry_id = env.register(MockAgentRegistry, ());
     let agent_registry = MockAgentRegistryClient::new(&env, &agent_registry_id);
     agent_registry.register_agent(
         &test_agent_id(&env),

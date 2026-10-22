@@ -1,3 +1,9 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, Env, Symbol};
 
 /// Published when the pool factory is initialized.

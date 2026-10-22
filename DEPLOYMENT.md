@@ -10,7 +10,8 @@ smart contracts on Stellar.
 |------|---------|---------|
 | Rust | 1.85.0 | `rustup toolchain install 1.85.0` |
 | wasm32v1-none target | — | `rustup target add wasm32v1-none --toolchain 1.85.0` |
-| Stellar CLI | latest | See [Stellar CLI docs](https://github.com/stellar/stellar-cli) |
+| Soroban SDK | 23.5.3 (protocol 23) | Pinned in `Cargo.toml`; nothing to install |
+| Stellar CLI | v23 or newer (protocol 23 support) | See [Stellar CLI docs](https://github.com/stellar/stellar-cli) |
 | jq | latest | Required by `scripts/maintainer/update-readme-addresses.sh`, run automatically at the end of `deploy.sh`. See [jq docs](https://jqlang.github.io/jq/download/) |
 
 The repo ships `rust-toolchain.toml` pinning channel `1.85.0` and

@@ -24,7 +24,7 @@
     <img src="https://img.shields.io/codecov/c/github/TrusTrove/TrusTrove-contract?label=coverage" />
   </a>
   <img src="https://img.shields.io/badge/rust-1.85.0-orange" />
-  <img src="https://img.shields.io/badge/soroban--sdk-21.7.6-blueviolet" />
+  <img src="https://img.shields.io/badge/soroban--sdk-23.5.3-blueviolet" />
   <img src="https://img.shields.io/badge/network-Stellar%20Testnet-00c9a7" />
   <img src="https://img.shields.io/github/license/TrusTrove/TrusTrove-contract" />
 </p>
@@ -374,7 +374,7 @@ Verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet)
 ### Prerequisites
 
 - Rust 1.85.0 (required — other versions either have WASM bugs or are blocked by Stellar CLI)
-- [Stellar CLI](https://github.com/stellar/stellar-cli) (latest)
+- [Stellar CLI](https://github.com/stellar/stellar-cli) v23 or newer (the contracts build against soroban-sdk 23 / protocol 23)
 - [jq](https://jqlang.github.io/jq/download/) (latest) — required by `scripts/maintainer/update-readme-addresses.sh`, which runs automatically at the end of `deploy.sh`
 
 ### 1. Install Rust 1.85.0
