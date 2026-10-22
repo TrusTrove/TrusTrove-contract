@@ -284,6 +284,17 @@ You can also verify on [Stellar Expert Testnet](https://stellar.expert/explorer/
 
 Testnet contract addresses are ephemeral and may be rotated at any time during development. When rotated, old addresses will drift silently and are no longer maintained.
 
+Every push, pull request, and nightly schedule runs the CI `readme-addresses`
+job, which executes `scripts/maintainer/check-readme-addresses.sh` to
+structurally validate the deployed-addresses table in `README.md`: marker
+integrity, the expected `Contract | Address` header, the four contract rows
+(`registry_contract`, `invoice_contract`, `escrow_contract`, `pool_contract`)
+each present exactly once, and Stellar contract-ID format for every address.
+Note this check is **structural only**: it does NOT verify that the recorded
+addresses are live or correct on-chain, because no committed source of truth
+exists to compare against (`.deployed-addresses` and `deployments.json` are
+gitignored).
+
 ### Rotation Conditions
 
 Deployed addresses are saved in `.deployed-addresses`:
