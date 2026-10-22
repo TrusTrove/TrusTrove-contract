@@ -1,3 +1,9 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
 pub fn invoice_created(
@@ -223,6 +229,11 @@ pub fn supported_asset_removed(env: &Env, asset: &Address) {
     );
 }
 
+/// Emitted after a successful `set_escrow_contract` update.
+///
+/// Topics are `(escrow_contract_updated, old_escrow, new_escrow)` and the
+/// payload is `()`. On the initial assignment, `old_escrow` is the same as
+/// `new_escrow` because event topics cannot encode the absent prior address.
 pub fn escrow_contract_updated(env: &Env, old: &Address, new: &Address) {
     env.events().publish(
         (

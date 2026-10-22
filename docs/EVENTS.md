@@ -497,6 +497,23 @@ Emitted when the admin disengages the emergency circuit breaker.
 **Contract:** `escrow_contract`  
 **Source:** `contracts/escrow/src/events.rs`
 
+### `contract_initialized`
+
+Emitted when the escrow contract is initialized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"contract_initialized"` |
+| `topic[1]` | `Address` | Admin address |
+| `topic[2]` | `Address` | Pool contract address |
+| `topic[3]` | `Address` | USDC asset address |
+| **Data** | `()` | None |
+
+**Emitted by:** `initialize()` in `contracts/escrow/src/lib.rs:49`
+
+---
+
 ### `funds_locked`
 
 Emitted when funds are locked in escrow for an invoice.
@@ -541,6 +558,17 @@ Emitted when locked funds are released back to the pool (on repayment).
 | **Data** | `u128` | Released amount (repayment amount) |
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
+
+#### Partial Release and Residual Lock
+
+When `release_to_pool` is called with an amount less than the total locked amount, the following occurs:
+
+1. The `released_to_pool` event is emitted with the `repayment_amount` (the amount being repaid in this call).
+2. The escrow `Locked` record's `amount` is reduced by `repayment_amount` (preserving the original `locked_at` timestamp).
+3. The residual locked amount remains in escrow, and `get_locked()` will return the remaining balance.
+4. A subsequent `release_to_pool` call can repay the remaining amount, at which point the `Locked` record is fully removed.
+
+This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time.
 
 ---
 

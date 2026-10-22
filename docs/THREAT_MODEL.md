@@ -1,6 +1,6 @@
 # Threat Model
 
-> **Updated:** 2026-09-29
+> **Updated:** 2026-10-21
 > **Applies to:** All four Soroban smart contracts (registry, invoice, escrow, pool)
 
 This document describes the trust assumptions, authentication gates, and
@@ -14,6 +14,7 @@ profile.
 
 - [Trust Model](#trust-model)
 - [Authentication Gates](#authentication-gates)
+- [Registry Profile States and Transitions](#registry-profile-states-and-transitions)
 - [Attack Vectors](#attack-vectors)
 - [Centralization Risks](#centralization-risks)
 - [Defence-in-Depth](#defence-in-depth)
@@ -126,9 +127,68 @@ One contract authenticates as the caller of another contract's function.
 | `release_to_issuer` | Escrow | The pool contract | Only the pool can release to issuer |
 | `release_to_pool` | Escrow | The pool contract | Only the pool can reclaim escrowed funds |
 
-### Pattern D — Dual-Auth (two `require_auth()` calls)
+---
 
-Two distinct parties must both sign.
+## Escrow Initialization and Repayment Authorization Model
+
+### Stored References from `initialize()`
+
+The escrow contract stores the following references during `initialize(env, admin, pool_contract, usdc_asset)`:
+
+| Storage Key | Value Type | Description |
+|-------------|------------|-------------|
+| `Admin` | `Address` | Contract admin, must authorize `initialize()` and admin-gated operations |
+| `PoolContract` | `Address` | Authorized pool contract; only it may call `lock`, `release_to_issuer`, `release_to_pool` |
+| `InvoiceContract` | `Address` | Invoice contract address; pinned via `set_invoice_contract()` for `release_to_pool` validation (#997) |
+| `UsdcAsset` | `Address` | USDC token contract; used to create the token client for all transfers |
+| `TimeoutWindow` | `u64` | Seconds after `locked_at` before `release_after_timeout` may permissionlessly return a lock to the pool. Defaults to 30 days; capped at 365 days |
+| `Paused` | `bool` | Emergency circuit-breaker flag. While paused, `lock`, `release_to_issuer`, `release_to_pool`, `handle_default` all revert with `ContractPaused` |
+
+### Authorization for Each Escrow Function
+
+| Function | Caller Authorization | Key Storage Reference Used |
+|----------|----------------------|-----------------------------|
+| `lock` | `pool.require_auth()` — the configured pool contract must sign. This is the primary cross-contract auth gate (Pattern C). | `PoolContract`, `UsdcAsset` |
+| `release_to_issuer` | `pool.require_auth()` — the configured pool contract must sign. The issuer must match the stored `record.issuer` from the `Locked` record. | `PoolContract`, `UsdcAsset`, `Locked` record (amount, issuer) |
+| `release_to_pool` | `invoice_contract.require_auth()` — the invoice contract must sign (issue #820). Additionally, if a pinned invoice contract reference exists (via `set_invoice_contract(#997)`), the pool-resolved address must match the pin or the call is rejected with `InvalidConfig`. The function consumes either a live `Locked` record or the `IssuerReleased` marker. | `PoolContract`, `InvoiceContract` (pinned or resolved), `IssuerReleased` marker, `Locked` record, `repayment_amount` |
+| `handle_default` | `caller.require_auth()` — must equal either the stored admin or the pool contract. The grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from `locked_at`) must have elapsed. If no `Locked` record exists (because funding path released to issuer per #819), returns `false` and the pool accounts for it as an unrecoverable LP capital loss. | `PoolContract`, `Admin`, `Locked` record (or absence thereof), `locked_at`, `DEFAULT_MIN_LOCK_SECONDS` |
+
+### Invoice-Contract Binding for Repayment
+
+Repayment flows require the invoice contract to be properly wired:
+
+1. During deployment, the pool is initialized with `invoice_contract` via `initialize(invoice_contract, escrow_contract, ...)` (DEPLOYMENT.md §"Contract Wiring Order", step 7).
+2. The pool's `fund_invoice` call wires the invoice into escrow via `escrow.lock()` followed immediately by `escrow.release_to_issuer()` (issue #819), so the issuer is paid at funding time and the `Locked` record is removed.
+3. At repayment time, `buyer → invoice.repay → escrow.release_to_pool → pool`. The `release_to_pool` entry point:
+   - Resolves the invoice contract from the pool's `get_invoice_contract` view (#820)
+   - When a pinned reference exists via `set_invoice_contract(#997)`, validates that the pool-resolved address matches the pin — rejecting misconfigured pools that have drifted from the admin's pin
+   - Accepts evidence of a prior lock: either the live `Locked` record (principal still in escrow) **or** the `IssuerReleased` marker (principal already paid to the issuer at funding). Whichever exists is consumed, so a full settlement can succeed at most once per funded invoice.
+4. The repayment amount is the buyer's repayment routed through escrow to the pool; the full `face_value` including yield is settled when the invoice lifecycle reaches `Confirmed` status.
+
+### State Sequence Matching the Tests
+
+The following state sequence is tested and documented for end-to-end correctness:
+
+```
+1. initialize(escrow, pool, usdc) — stores PoolContract, UsdcAsset, Admin references
+2. fund_invoice(invoice_id) — pool → escrow.lock → escrow.release_to_issuer → issuer paid; Lock record removed; IssuerReleased marker written
+3. buyer repays: release_to_pool(invoice_id, repayment_amount) — consumes either Locked or IssuerReleased marker
+   - If partial: residual Lock amount reduced, original locked_at preserved
+   - If full: Lock/Marker removed, funds returned to pool
+4. handle_default(invoice_id, caller) — if Lock still live (not yet paired with issuer release): grace period check; return funds to pool; remove Lock
+   - If no Lock exists (funding path already paid issuer): returns false; pool accounts as unrecoverable loss
+5. release_after_timeout(invoice_id) — permissionless exit when now >= locked_at + timeout_window; returns stale lock to pool
+```
+
+All amounts are in **USDC stroops** (1 USDC = 10,000,000 stroops, 7 decimals). Timestamps are **Unix seconds**. Invoice IDs are **BytesN<32>** (32-byte identifiers).
+
+### Defense-in-Depth Notes
+
+- The `IssuerReleased` marker (issue #819) is the critical bridge between the funding path and repayment/default paths. Without it, `release_to_pool` and `handle_default` cannot distinguish "principal already paid to issuer" from "lock removed out of band".
+- The pinned invoice contract reference (#997) is a defense-in-depth measure: it prevents a pool whose `get_invoice_contract` configuration has drifted from the escrow admin's pin from silently redirecting repayments.
+- The `handle_default` function gracefully handles both pre-#819 and post-#819 invoice states: it returns `false` when no `Locked` record exists (post-#819 default case) and the pool accounts for the loss, rather than erroneously returning funds.
+- The `release_to_pool` function's dual-consumption guard (consuming whichever of `Locked` or `IssuerReleased` exists) ensures idempotent settlement at most once per funded invoice.
+
 
 | Function | Contract | Signers |
 |----------|----------|---------|
@@ -146,6 +206,59 @@ Any account can call these.
 | `get_locked`, `get_history` | Escrow | Read-only views |
 | `get_stats`, `get_lp_position`, `get_utilization_rate`, `get_usdc_asset` | Pool | Read-only views |
 | `trigger_default` | Invoice | Callable by any account once `now >= due_date` |
+
+---
+
+## Registry Profile States and Transitions
+
+Every registry profile managed by [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs)
+is in exactly one verification state. The `get_verification_status` view
+decodes it; an address with no profile at all reports `Unregistered`, which
+is the pre-registration state rather than a profile state.
+
+| State | Storage flags | `is_verified()` |
+|-------|---------------|-----------------|
+| `Pending` | `verified = false`, `revoked = false` | `false` |
+| `Verified` | `verified = true`, `revoked = false` | `true` |
+| `Revoked` | `verified = false`, `revoked = true` | `false` |
+
+### Transition table
+
+| From | Entry point | To | Authorization |
+|------|-------------|----|---------------|
+| `Unregistered` | [`register_issuer`](../contracts/registry/src/lib.rs) / [`register_buyer`](../contracts/registry/src/lib.rs) | `Pending` | The registered address itself (self-auth) |
+| `Unregistered` | `batch_register_issuers` / `batch_register_buyers` | `Pending` | Admin only |
+| `Pending` | `verify_profile(caller, address, true)` | `Verified` | Admin or verifier (#732) |
+| `Pending` | `verify_profile(caller, address, false)` | `Revoked` | Admin or verifier (#732) |
+| `Pending` | `revoke` | `Pending` (no-op — a never-verified profile is untouched) | Admin only |
+| `Pending` | `reinstate` | `Pending` (no-op — only operates on `Revoked` profiles, #606) | Admin only |
+| `Verified` | `revoke` | `Revoked` | Admin only |
+| `Verified` | `verify_profile(caller, address, false)` | `Revoked` | Admin or verifier (#732) |
+| `Verified` | `verify_profile(caller, address, true)` | `Verified` (no state change, but a `profile_verified` event is re-emitted per call, #987) | Admin or verifier (#732) |
+| `Revoked` | `reinstate` | `Verified` | Admin only |
+| `Revoked` | `verify_profile(caller, address, true)` | `Verified` | Admin or verifier (#732) |
+| `Revoked` | `revoke` | `Revoked` (idempotent no-op, no event re-emitted) | Admin only |
+
+Notes:
+
+- There is **no deregistration**: a revoked profile stays registered and
+  enumerated by `list_profiles`; revocation only flips the verification
+  flags.
+- `revoke` only acts on a `Verified` profile; to un-verify any registered
+  profile (including a `Pending` one) the verifier path
+  `verify_profile(caller, address, false)` is the general mechanism.
+- Re-registering an existing address panics with `AlreadyRegistered`, so a
+  profile can never return to `Pending` after its first registration.
+
+### Caller authorization for verification and admin entry points
+
+| Function | Who may call | Exact authorization | Source |
+|----------|--------------|---------------------|--------|
+| [`verify_profile`](../contracts/registry/src/lib.rs) | Stored admin **or** stored verifier (#732) | `caller.require_auth()` after a role check; any other caller panics with `Unauthorized` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`revoke`](../contracts/registry/src/lib.rs) | Stored admin only | `admin.require_auth()` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`reinstate`](../contracts/registry/src/lib.rs) | Stored admin only | `admin.require_auth()` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`transfer_ownership`](../contracts/registry/src/lib.rs) | Current admin **and** incoming admin | Dual auth: `admin.require_auth()` + `new_admin.require_auth()`, so ownership cannot be transferred to a non-consenting address | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`transfer_admin`](../contracts/registry/src/lib.rs) | Current admin only | `admin.require_auth()`; the incoming admin does **not** sign — a deliberate key-rotation escape hatch that is strictly weaker than `transfer_ownership` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
 
 ---
 

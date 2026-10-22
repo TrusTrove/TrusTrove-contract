@@ -60,7 +60,7 @@ fn setup_fee_lifecycle() -> FeeLifecycle {
     let buyer = Address::generate(&env);
     let lp = Address::generate(&env);
     let treasury = Address::generate(&env);
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     for address in [&lp, &buyer] {
         let key = TKey(address.clone());
         env.as_contract(&usdc_id, || {
@@ -70,7 +70,7 @@ fn setup_fee_lifecycle() -> FeeLifecycle {
         });
     }
 
-    let registry_id = env.register_contract(None, RegistryContract);
+    let registry_id = env.register(RegistryContract, ());
     let registry = RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
     let metadata: Map<String, String> = Map::new(&env);
@@ -79,16 +79,16 @@ fn setup_fee_lifecycle() -> FeeLifecycle {
     registry.verify_profile(&admin, &issuer, &true);
     registry.verify_profile(&admin, &buyer, &true);
 
-    let invoice_id = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let invoice_id = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
 
-    let agent_reg_id = env.register_contract(None, MockAgentRegistry);
+    let agent_reg_id = env.register(MockAgentRegistry, ());
     MockAgentRegistryClient::new(&env, &agent_reg_id).register_agent(
         &test_agent_id(&env),
         &trusttrove_invoice::Agent {
@@ -181,10 +181,11 @@ fn assert_fee_settlement(lifecycle: &FeeLifecycle, expected: FeeSettlementExpect
         expected.protocol_cut as i128
     );
     assert_eq!(token.balance(&lifecycle.pool_id), 0);
-    // The issuer's original 98% advance remains in escrow; the 100% face-value
-    // repayment is routed back to the pool, so this precisely accounts for the
-    // escrow's balance without affecting LP yield or protocol-fee accounting.
-    assert_eq!(token.balance(&lifecycle.escrow_id), 9_800_000_000);
+    // Issue #819: the 98% principal was released to the issuer at funding
+    // time, and the 100% face-value repayment was routed buyer → escrow →
+    // pool, so escrow is left with nothing.
+    assert_eq!(token.balance(&lifecycle.escrow_id), 0);
+    assert_eq!(token.balance(&lifecycle.issuer), 9_800_000_000);
 }
 
 fn expected_repayment_split(invoice: &trusttrove_invoice::Invoice, repaid_at: u64) -> (u128, u128) {
@@ -282,7 +283,7 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     let lp = Address::generate(&env);
 
     // 1. Deploy & initialize mock USDC token
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     let lp_key = TKey(lp.clone());
     let buyer_key = TKey(buyer.clone());
     env.as_contract(&usdc_id, || {
@@ -295,7 +296,7 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register_contract(None, RegistryContract);
+    let registry_id = env.register(RegistryContract, ());
     let registry = RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
 
@@ -308,9 +309,9 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     assert!(registry.is_verified(&buyer));
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let invoice_id = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
@@ -319,7 +320,7 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     invoice.set_escrow_contract(&escrow_id);
 
     // Configure Agent Registry for attestations
-    let agent_reg_id = env.register_contract(None, MockAgentRegistry);
+    let agent_reg_id = env.register(MockAgentRegistry, ());
     let agent_reg = MockAgentRegistryClient::new(&env, &agent_reg_id);
     agent_reg.register_agent(
         &test_agent_id(&env),
@@ -426,7 +427,7 @@ fn test_fee_bearing_early_repayment_with_lp_withdrawal() {
 }
 
 #[test]
-fn test_fee_bearing_full_term_repayment_with_lp_withdrawal() {
+fn test_repay_early_at_funded_at_refunds_full_discount() {
     let lifecycle = setup_fee_lifecycle();
     let deposit = 12_000_000_000u128;
     let shares = lifecycle.pool.deposit(&lifecycle.lp, &deposit);
@@ -434,20 +435,83 @@ fn test_fee_bearing_full_term_repayment_with_lp_withdrawal() {
     lifecycle
         .pool
         .set_protocol_fee(&fee_bps, &lifecycle.treasury);
-    let (invoice_id, due_date) = create_fee_lifecycle_invoice(&lifecycle);
+    let (invoice_id, _) = create_fee_lifecycle_invoice(&lifecycle);
 
     let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
     let buyer_before = token.balance(&lifecycle.buyer);
     let treasury_before = token.balance(&lifecycle.treasury);
-    lifecycle.env.ledger().set_timestamp(due_date);
     let invoice = lifecycle.invoice.get(&invoice_id);
-    let (gross_yield, refund) = expected_repayment_split(&invoice, due_date);
-    assert_eq!(refund, 0, "full-term repayment should return no discount");
+    let funded_at = invoice.funded_at.unwrap();
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert_eq!(discount, 200_000_000);
 
-    assert!(lifecycle.invoice.repay(&invoice_id));
+    // Nothing has elapsed: the pool must earn nothing and refund the full
+    // discount to the buyer.
+    lifecycle.env.ledger().set_timestamp(funded_at);
+    assert_eq!(lifecycle.env.ledger().timestamp(), funded_at);
+    assert!(lifecycle.invoice.repay_early(&invoice_id));
+
+    let settled = lifecycle.invoice.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(funded_at));
+    assert_eq!(settled.repaid_amount, invoice.face_value);
+    assert_eq!(lifecycle.pool.get_stats().total_yield_distributed, 0);
+    // A replay must not book the split a second time.
+    assert!(lifecycle.invoice.try_repay(&invoice_id).is_err());
+    assert_eq!(lifecycle.pool.get_stats().total_yield_distributed, 0);
+
+    assert_fee_settlement(
+        &lifecycle,
+        FeeSettlementExpectation {
+            shares,
+            deposit,
+            face_value: invoice.face_value,
+            refund: discount,
+            protocol_cut: 0,
+            lp_yield: 0,
+            buyer_before,
+            treasury_before,
+        },
+    );
+}
+
+#[test]
+fn test_repay_early_one_second_before_due_date_refunds_remainder_once() {
+    let lifecycle = setup_fee_lifecycle();
+    let deposit = 12_000_000_000u128;
+    let shares = lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+    let fee_bps = 1000u32;
+    lifecycle
+        .pool
+        .set_protocol_fee(&fee_bps, &lifecycle.treasury);
+    let (invoice_id, _) = create_fee_lifecycle_invoice(&lifecycle);
+
+    let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+    let buyer_before = token.balance(&lifecycle.buyer);
+    let treasury_before = token.balance(&lifecycle.treasury);
+    let invoice = lifecycle.invoice.get(&invoice_id);
+    let discount = invoice.face_value - invoice.funded_amount;
+    let repaid_at = invoice.due_date - 1;
+    let (gross_yield, refund) = expected_repayment_split(&invoice, repaid_at);
+    assert!(refund > 0);
+    assert_eq!(gross_yield + refund, discount);
+
+    lifecycle.env.ledger().set_timestamp(repaid_at);
+    assert!(lifecycle.invoice.repay_early(&invoice_id));
 
     let protocol_cut = gross_yield * fee_bps as u128 / 10_000;
     let lp_yield = gross_yield - protocol_cut;
+    let settled = lifecycle.invoice.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(repaid_at));
+    assert_eq!(
+        lifecycle.pool.get_stats().total_yield_distributed,
+        lp_yield,
+        "the pool must book the complement of the refund exactly once"
+    );
+    assert!(lifecycle.invoice.try_repay_early(&invoice_id).is_err());
+    assert_eq!(lifecycle.pool.get_stats().total_yield_distributed, lp_yield);
+
     assert_fee_settlement(
         &lifecycle,
         FeeSettlementExpectation {
@@ -464,16 +528,86 @@ fn test_fee_bearing_full_term_repayment_with_lp_withdrawal() {
 }
 
 #[test]
+fn test_repay_conserves_face_value_before_at_and_after_maturity() {
+    let term = 30 * 86400;
+    // Independent expectations for the invoice's 200_000_000 discount.
+    for (elapsed, gross_yield, refund) in [
+        (0, 0, 200_000_000),
+        (term / 2, 100_000_000, 100_000_000),
+        (term - 1, 199_999_922, 78),
+        (term, 200_000_000, 0),
+        (term + 1, 200_000_000, 0),
+        (term * 2, 200_000_000, 0),
+    ] {
+        for partial_first in [false, true] {
+            let lifecycle = setup_fee_lifecycle();
+            let deposit = 12_000_000_000u128;
+            let shares = lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+            let fee_bps = 1000u32;
+            lifecycle
+                .pool
+                .set_protocol_fee(&fee_bps, &lifecycle.treasury);
+            let (invoice_id, _) = create_fee_lifecycle_invoice(&lifecycle);
+
+            let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+            let buyer_before = token.balance(&lifecycle.buyer);
+            let treasury_before = token.balance(&lifecycle.treasury);
+            let invoice = lifecycle.invoice.get(&invoice_id);
+            assert_eq!(invoice.face_value - invoice.funded_amount, 200_000_000);
+            if partial_first {
+                assert!(lifecycle
+                    .invoice
+                    .repay_partial(&invoice_id, &(invoice.face_value / 3)));
+            }
+            let repaid_at = invoice.funded_at.unwrap() + elapsed;
+            lifecycle.env.ledger().set_timestamp(repaid_at);
+            if partial_first {
+                let remaining = lifecycle.invoice.get_remaining_balance(&invoice_id);
+                assert!(lifecycle.invoice.repay_partial(&invoice_id, &remaining));
+            } else {
+                assert!(lifecycle.invoice.repay(&invoice_id));
+            }
+
+            let settled = lifecycle.invoice.get(&invoice_id);
+            assert_eq!(settled.status, InvoiceStatus::Repaid);
+            assert_eq!(settled.repaid_at, Some(repaid_at));
+            assert_eq!(settled.repaid_amount, invoice.face_value);
+            assert_eq!(settled.remaining_balance, 0);
+            assert_eq!(
+                invoice.funded_amount + gross_yield + refund,
+                invoice.face_value
+            );
+
+            let protocol_cut = gross_yield * fee_bps as u128 / 10_000;
+            let lp_yield = gross_yield - protocol_cut;
+            assert_fee_settlement(
+                &lifecycle,
+                FeeSettlementExpectation {
+                    shares,
+                    deposit,
+                    face_value: invoice.face_value,
+                    refund,
+                    protocol_cut,
+                    lp_yield,
+                    buyer_before,
+                    treasury_before,
+                },
+            );
+        }
+    }
+}
+
+#[test]
 #[should_panic]
 fn test_cross_contract_unauthorized_pool_setter_rejected() {
     let env = Env::default();
     env.set_auths(&[]);
 
     let admin = Address::generate(&env);
-    let registry_id = env.register_contract(None, RegistryContract);
-    let invoice_id = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let registry_id = env.register(RegistryContract, ());
+    let invoice_id = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
     let usdc_id = Address::generate(&env);
 
     let pool = PoolContractClient::new(&env, &pool_id);
@@ -506,7 +640,7 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     let lp = Address::generate(&env);
 
     // 1. Deploy & initialize mock USDC token
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     let lp_key = TKey(lp.clone());
     let buyer_key = TKey(buyer.clone());
     env.as_contract(&usdc_id, || {
@@ -519,7 +653,7 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register_contract(None, RegistryContract);
+    let registry_id = env.register(RegistryContract, ());
     let registry = RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
 
@@ -530,9 +664,9 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     registry.verify_profile(&admin, &buyer, &true);
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let invoice_id = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
@@ -540,7 +674,7 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
 
-    let agent_reg_id = env.register_contract(None, MockAgentRegistry);
+    let agent_reg_id = env.register(MockAgentRegistry, ());
     let agent_reg = MockAgentRegistryClient::new(&env, &agent_reg_id);
     agent_reg.register_agent(
         &test_agent_id(&env),
@@ -659,7 +793,7 @@ fn test_partial_repayment_then_default_lifecycle() {
     let lp = Address::generate(&env);
 
     // 1. Deploy & initialize mock USDC token
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     let lp_key = TKey(lp.clone());
     let buyer_key = TKey(buyer.clone());
     env.as_contract(&usdc_id, || {
@@ -672,7 +806,7 @@ fn test_partial_repayment_then_default_lifecycle() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register_contract(None, RegistryContract);
+    let registry_id = env.register(RegistryContract, ());
     let registry = RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
 
@@ -683,9 +817,9 @@ fn test_partial_repayment_then_default_lifecycle() {
     registry.verify_profile(&admin, &buyer, &true);
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let invoice_id = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
@@ -693,7 +827,7 @@ fn test_partial_repayment_then_default_lifecycle() {
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
 
-    let agent_reg_id = env.register_contract(None, MockAgentRegistry);
+    let agent_reg_id = env.register(MockAgentRegistry, ());
     let agent_reg = MockAgentRegistryClient::new(&env, &agent_reg_id);
     agent_reg.register_agent(
         &test_agent_id(&env),
@@ -765,13 +899,11 @@ fn test_partial_repayment_then_default_lifecycle() {
     );
     assert_eq!(invoice.get_repaid_amount(&inv_id), partial_repayment);
 
-    // Verify escrow now holds funded_amount + partial_repayment
+    // Issue #819: the funded principal went to the issuer at funding time,
+    // so escrow now holds only the buyer's partial repayment.
     let token = MockTokenClient::new(&env, &usdc_id);
     let escrow_balance_after_partial = token.balance(&escrow_id);
-    assert_eq!(
-        escrow_balance_after_partial,
-        funded_amount as i128 + partial_repayment as i128
-    );
+    assert_eq!(escrow_balance_after_partial, partial_repayment as i128);
 
     // 9. Advance time past due_date AND escrow grace period (60 seconds)
     // escrow DEFAULT_MIN_LOCK_SECONDS = 60, so we need locked_at + 60 < now
@@ -855,7 +987,7 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     let lp = Address::generate(&env);
 
     // 1. Deploy & initialize mock USDC token
-    let usdc_id = env.register_contract(None, MockToken);
+    let usdc_id = env.register(MockToken, ());
     let lp_key = TKey(lp.clone());
     let buyer_key = TKey(buyer.clone());
     env.as_contract(&usdc_id, || {
@@ -868,7 +1000,7 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register_contract(None, RegistryContract);
+    let registry_id = env.register(RegistryContract, ());
     let registry = RegistryContractClient::new(&env, &registry_id);
     registry.initialize(&admin);
 
@@ -879,9 +1011,9 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     registry.verify_profile(&admin, &buyer, &true);
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register_contract(None, InvoiceContract);
-    let escrow_id = env.register_contract(None, EscrowContract);
-    let pool_id = env.register_contract(None, PoolContract);
+    let invoice_id = env.register(InvoiceContract, ());
+    let escrow_id = env.register(EscrowContract, ());
+    let pool_id = env.register(PoolContract, ());
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
     invoice.initialize(&admin, &registry_id);
@@ -889,7 +1021,7 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
 
-    let agent_reg_id = env.register_contract(None, MockAgentRegistry);
+    let agent_reg_id = env.register(MockAgentRegistry, ());
     let agent_reg = MockAgentRegistryClient::new(&env, &agent_reg_id);
     agent_reg.register_agent(
         &test_agent_id(&env),
@@ -961,13 +1093,11 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     );
     assert_eq!(invoice.get_repaid_amount(&inv_id), partial_repayment);
 
-    // Verify escrow now holds funded_amount + partial_repayment
+    // Issue #819: the funded principal went to the issuer at funding time,
+    // so escrow now holds only the buyer's partial repayment.
     let token = MockTokenClient::new(&env, &usdc_id);
     let escrow_balance_after_partial = token.balance(&escrow_id);
-    assert_eq!(
-        escrow_balance_after_partial,
-        funded_amount as i128 + partial_repayment as i128
-    );
+    assert_eq!(escrow_balance_after_partial, partial_repayment as i128);
 
     // 9. Advance time past due_date AND escrow grace period (60 seconds)
     env.ledger().set_timestamp(due_date + 60);
@@ -1021,4 +1151,149 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     // 16. LP withdrawal should reflect correct principal after loss
     let returned = pool.withdraw(&lp, &shares);
     assert_eq!(returned, deposit_amount - expected_loss);
+}
+
+// --------------- Issue #819: issuer payout at funding time ---------------
+
+// Helper: create, attest, list and fund an invoice on a FeeLifecycle env
+// without advancing it through shipping/confirmation.
+fn fund_one_invoice(lifecycle: &FeeLifecycle, face_value: u128, discount_bps: u32) -> BytesN<32> {
+    let due_date = lifecycle.env.ledger().timestamp() + 30 * 86400;
+    let invoice_id = lifecycle.invoice.create(
+        &lifecycle.issuer,
+        &lifecycle.buyer,
+        &face_value,
+        &due_date,
+        &lifecycle.usdc_id,
+    );
+    attest_invoice(&lifecycle.env, &lifecycle.invoice, &invoice_id);
+    lifecycle
+        .invoice
+        .list_for_financing(&invoice_id, &discount_bps);
+    lifecycle.pool.fund_invoice(&invoice_id);
+    invoice_id
+}
+
+#[test]
+fn test_fund_invoice_pays_issuer_at_funding_time() {
+    // Issue #819 acceptance criterion 1: after `fund_invoice`, the issuer's
+    // USDC balance must equal the funded amount and escrow must not hold the
+    // principal (the `escrow.lock` → `escrow.release_to_issuer` flow).
+    let lifecycle = setup_fee_lifecycle();
+    let deposit = 12_000_000_000u128;
+    lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+
+    let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+    // face_value 10_000_000_000, discount 200 bps -> funded_amount 9_800_000_000
+    let face_value = 10_000_000_000u128;
+    let funded_amount = 9_800_000_000u128;
+    let invoice_id = fund_one_invoice(&lifecycle, face_value, 200);
+
+    let invoice = lifecycle.invoice.get(&invoice_id);
+    assert_eq!(invoice.funded_amount, funded_amount);
+
+    // The issuer received the full funded amount.
+    assert_eq!(token.balance(&lifecycle.issuer), funded_amount as i128);
+    // Escrow holds no stranded principal.
+    assert_eq!(token.balance(&lifecycle.escrow_id), 0);
+    let escrow = EscrowContractClient::new(&lifecycle.env, &lifecycle.escrow_id);
+    assert_eq!(escrow.get_locked(&invoice_id), 0);
+    // And escrow recorded the issuer release.
+    assert!(escrow.was_released_to_issuer(&invoice_id));
+}
+
+#[test]
+fn test_repay_after_issuer_payout_leaves_no_stranded_principal() {
+    // Issue #819: once the principal is released to the issuer at funding,
+    // the repayment path (buyer -> escrow -> pool via release_to_pool) must
+    // still work and leave escrow with zero balance for the invoice.
+    let lifecycle = setup_fee_lifecycle();
+    let deposit = 12_000_000_000u128;
+    lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+
+    let face_value = 10_000_000_000u128;
+    let funded_amount = 9_800_000_000u128;
+    let invoice_id = fund_one_invoice(&lifecycle, face_value, 200);
+
+    lifecycle.invoice.mark_shipped(&invoice_id);
+    lifecycle
+        .invoice
+        .confirm_delivery(&invoice_id, &lifecycle.issuer);
+    lifecycle
+        .invoice
+        .confirm_delivery(&invoice_id, &lifecycle.buyer);
+
+    let due_date = lifecycle.invoice.get(&invoice_id).due_date;
+    lifecycle.env.ledger().set_timestamp(due_date);
+    assert!(lifecycle.invoice.repay(&invoice_id));
+
+    let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+    assert_eq!(
+        lifecycle.invoice.get_status(&invoice_id),
+        InvoiceStatus::Repaid as u32
+    );
+    // The buyer's face-value repayment passed through escrow to the pool:
+    // nothing is left behind.
+    assert_eq!(
+        token.balance(&lifecycle.escrow_id),
+        0,
+        "escrow must not strand principal after repay"
+    );
+    // The issuer keeps exactly its funded advance.
+    assert_eq!(token.balance(&lifecycle.issuer), funded_amount as i128);
+    let escrow = EscrowContractClient::new(&lifecycle.env, &lifecycle.escrow_id);
+    assert_eq!(escrow.get_locked(&invoice_id), 0);
+    // The release marker was consumed by release_to_pool (replay guard).
+    assert!(!escrow.was_released_to_issuer(&invoice_id));
+}
+
+#[test]
+fn test_default_after_issuer_payout_does_not_strand_principal() {
+    // Issue #819: on default the funded principal is with the issuer, not in
+    // escrow. The pool must recognize the unrecoverable capital: only the
+    // escrow-side release guard (#21) is satisfied by the issuer-release
+    // marker, TotalFunded is unwound and TotalDeposits reflects the loss.
+    // Driven via pool.handle_default directly (invoice.trigger_default is
+    // pinned to the separate re-entrancy issue).
+    let lifecycle = setup_fee_lifecycle();
+    let deposit = 12_000_000_000u128;
+    lifecycle.pool.deposit(&lifecycle.lp, &deposit);
+
+    let face_value = 10_000_000_000u128;
+    let funded_amount = 9_800_000_000u128;
+    let invoice_id = fund_one_invoice(&lifecycle, face_value, 200);
+
+    let due_date = lifecycle.invoice.get(&invoice_id).due_date;
+    lifecycle.env.ledger().set_timestamp(due_date + 60);
+
+    let before = lifecycle.pool.get_stats();
+    assert_eq!(before.total_deposits, deposit);
+    assert_eq!(before.total_funded, funded_amount);
+
+    assert!(lifecycle.pool.handle_default(&invoice_id));
+
+    let token = MockTokenClient::new(&lifecycle.env, &lifecycle.usdc_id);
+    // The issuer keeps its advance; escrow holds nothing.
+    assert_eq!(token.balance(&lifecycle.issuer), funded_amount as i128);
+    assert_eq!(
+        token.balance(&lifecycle.escrow_id),
+        0,
+        "escrow should not strand principal after default"
+    );
+
+    let after = lifecycle.pool.get_stats();
+    assert_eq!(after.total_funded, 0);
+    assert_eq!(after.active_invoice_count, 0);
+    assert_eq!(
+        after.total_loss_realised,
+        before.total_loss_realised + funded_amount
+    );
+    // LP capital actually left the pool at funding time: deposits shrink by
+    // the unrecoverable principal.
+    assert_eq!(after.total_deposits, before.total_deposits - funded_amount);
+    assert_eq!(
+        token.balance(&lifecycle.pool_id) as u128,
+        after.total_deposits,
+        "pool token balance must match deposit accounting (no insolvency)"
+    );
 }

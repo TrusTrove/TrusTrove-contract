@@ -92,10 +92,10 @@ fn measure<T>(env: &Env, op: &'static str, volume: u32, f: impl FnOnce() -> T) -
     // `reset_unlimited` zeroes the counters without imposing the default
     // test-host limit, so setup work never leaks into a measurement and a
     // measured call is only bounded by the explicit network limits below.
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
     let out = f();
-    let cpu_insns = env.budget().cpu_instruction_cost();
-    let mem_bytes = env.budget().memory_bytes_cost();
+    let cpu_insns = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_bytes = env.cost_estimate().budget().memory_bytes_cost();
     let after = ledger_state(env);
 
     let mut entries_written = 0u32;
@@ -136,7 +136,7 @@ fn measure<T>(env: &Env, op: &'static str, volume: u32, f: impl FnOnce() -> T) -
 /// liquidity. Budget is unlimited for setup; `measure` resets it per call.
 fn bench_protocol() -> FullProtocol {
     let p = setup_full_protocol();
-    p.env.budget().reset_unlimited();
+    p.env.cost_estimate().budget().reset_unlimited();
     p.registry.verify_profile(&p.admin, &p.issuer, &true);
     p.registry.verify_profile(&p.admin, &p.buyer, &true);
     p.pool.deposit(&p.lp, &SEED_DEPOSIT);

@@ -7,6 +7,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- `invoice`: cap repayment yield at the full discount at maturity, including
+  late settlement through `repay` or `repay_partial`, without multiplying by
+  elapsed time after maturity (#948)
+
 ### Added
 
 - `registry`: `get_profile_count(role)` view, returning how many profiles are
@@ -76,6 +82,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   deployer, with an explicit redeploy procedure on mismatch (#825)
 
 ### Testing
+
+- `invoice`: cover attestation persistence and missing entries, all nine
+  lifecycle status counts against their indexes, and the issuer view's
+  stored address and typed missing-invoice error (#945, #946, #947)
+- `invoice`: verify repayment balances before, at, and after maturity through
+  the real pool and escrow, including installments and large-value overflow
+  regression coverage (#948)
+
+- `pool`: cover the refund-transfer failure path of
+  `receive_repayment_with_refund` with a token stub that fails *after*
+  applying its balance moves, proving the settlement accounting
+  (`TotalDeposits`, `TotalFunded`, `ActiveInvoiceCount`, the `FundedInvoice`
+  entry) and the buyer's balance are rolled back together with the failed
+  transfer, so a failed refund cannot leave a partially settled invoice (#968)
+
+- `pool`: cover the `get_lp_position` share-price overflow at the public view
+  boundary with a seeded overflowing state (total shares, total deposits and
+  LP shares), asserting the typed `PoolError::Overflow` (#13) and that the
+  failed read leaves the pool state untouched (#972)
 
 - `pool.deposit` gained regression coverage pinning the behaviour the
   internal `mint` helper refactor relies on: the `lp_deposited` event

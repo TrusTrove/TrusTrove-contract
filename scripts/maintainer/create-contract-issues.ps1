@@ -2,12 +2,59 @@ $REPO = "TrusTrove/TrusTrove-contract"
 
 Write-Host "Creating issues for $REPO..."
 
+# Duplicate-title detection + exponential-backoff rate-limit retry for
+# gh issue create.  Mirrors issue_exists()/gh_req() in
+# create-contract-issues.sh (issue #312); see issue #615.
+$ExistingTitles = @()
+try {
+  $json = gh issue list --repo $REPO --limit 500 --json title | Out-String
+  if ($json.Trim()) { $ExistingTitles = @((ConvertFrom-Json $json).title) }
+} catch {
+  Write-Warning "Could not fetch existing issues; duplicate detection disabled."
+}
+
+function Invoke-GhIssueCreate {
+  param(
+    [string]$Repo,
+    [string]$Title,
+    [string]$Label,
+    [string]$Body
+  )
+
+  if ($ExistingTitles -contains $Title) {
+    Write-Host "SKIP: issue already exists: $Title"
+    return
+  }
+
+  $maxAttempts = 5
+  $wait = 2
+  for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+    $out = gh issue create --repo $Repo --title $Title --label $Label --body $Body 2>&1 | Out-String
+    if ($LASTEXITCODE -eq 0) {
+      Write-Host "OK: created issue: $Title"
+      $script:ExistingTitles += $Title
+      return
+    }
+    if ($out -match "rate limit|secondary rate limit|abuse detection|too many requests") {
+      Write-Host "WARN: gh rate limited (attempt $attempt/$maxAttempts); retrying in ${wait}s..."
+      Start-Sleep -Seconds $wait
+      $wait *= 2
+    } else {
+      Write-Error "gh issue create failed: $out"
+      exit 1
+    }
+  }
+  Write-Error "gh issue create still rate limited after $maxAttempts attempts: $Title"
+  exit 1
+}
+
+
 # ── REGISTRY CONTRACT ─────────────────────────────────────────────────────────
 
-gh issue create --repo $REPO `
-  --title "feat(registry): add batch registration support for multiple issuers" `
-  --label "enhancement,good first issue,complexity:medium" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(registry): add batch registration support for multiple issuers" `
+  -Label "enhancement,good first issue,complexity:medium" `
+  -Body @"
 ## Summary
 The current \`register_issuer\` function registers one address at a time. Add a \`batch_register_issuers\` function that accepts a \`Vec<(Address, Map<String, String>)>\` and registers multiple issuers in a single transaction.
 
@@ -24,12 +71,11 @@ This is needed for onboarding flows where an admin registers multiple SME partne
 Rust · Soroban SDK · soroban-sdk Vec and Map types
 "@
 
-Write-Host "✓ Issue 1 created"
 
-gh issue create --repo $REPO `
-  --title "feat(registry): add metadata update function for registered profiles" `
-  --label "enhancement,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(registry): add metadata update function for registered profiles" `
+  -Label "enhancement,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 After registration, issuers and buyers cannot update their profile metadata (company name, contact info, etc). Add an \`update_metadata\` function.
 
@@ -44,12 +90,11 @@ After registration, issuers and buyers cannot update their profile metadata (com
 Rust · Soroban SDK
 "@
 
-Write-Host "✓ Issue 2 created"
 
-gh issue create --repo $REPO `
-  --title "test(registry): achieve 100% branch coverage on registry_contract" `
-  --label "testing,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "test(registry): achieve 100% branch coverage on registry_contract" `
+  -Label "testing,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 The registry contract currently has unit tests for happy paths only. This issue covers writing tests for all error branches.
 
@@ -65,14 +110,13 @@ The registry contract currently has unit tests for happy paths only. This issue 
 Rust · soroban-sdk testutils · Env::default() · mock_all_auths()
 "@
 
-Write-Host "✓ Issue 3 created"
 
 # ── INVOICE CONTRACT ──────────────────────────────────────────────────────────
 
-gh issue create --repo $REPO `
-  --title "feat(invoice): implement invoice expiry mechanism for Listed invoices" `
-  --label "enhancement,complexity:medium" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(invoice): implement invoice expiry mechanism for Listed invoices" `
+  -Label "enhancement,complexity:medium" `
+  -Body @"
 ## Summary
 Invoices in \`Listed\` status can sit unfunded indefinitely. Add an expiry mechanism: if a Listed invoice is not funded within 7 days (configurable), it auto-transitions to a new \`Expired\` status.
 
@@ -88,12 +132,11 @@ Invoices in \`Listed\` status can sit unfunded indefinitely. Add an expiry mecha
 Rust · Soroban SDK · env.ledger().timestamp()
 "@
 
-Write-Host "✓ Issue 4 created"
 
-gh issue create --repo $REPO `
-  --title "feat(invoice): add get_invoice_count_by_status read function" `
-  --label "enhancement,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(invoice): add get_invoice_count_by_status read function" `
+  -Label "enhancement,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 The frontend needs to display counts per status (e.g., '12 Listed, 3 Funded, 8 Repaid') without loading all invoices. Add a read function that returns counts per status.
 
@@ -107,12 +150,11 @@ The frontend needs to display counts per status (e.g., '12 Listed, 3 Funded, 8 R
 Rust · Soroban SDK · persistent storage
 "@
 
-Write-Host "✓ Issue 5 created"
 
-gh issue create --repo $REPO `
-  --title "test(invoice): write full lifecycle integration test for invoice_contract" `
-  --label "testing,complexity:high" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "test(invoice): write full lifecycle integration test for invoice_contract" `
+  -Label "testing,complexity:high" `
+  -Body @"
 ## Summary
 Write a single end-to-end integration test that exercises the complete invoice lifecycle in one test function using the Soroban test environment.
 
@@ -138,12 +180,11 @@ Write a single end-to-end integration test that exercises the complete invoice l
 Rust · soroban-sdk testutils · env.register_contract()
 "@
 
-Write-Host "✓ Issue 6 created"
 
-gh issue create --repo $REPO `
-  --title "feat(invoice): add early repayment support with partial discount refund" `
-  --label "enhancement,complexity:high" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(invoice): add early repayment support with partial discount refund" `
+  -Label "enhancement,complexity:high" `
+  -Body @"
 ## Summary
 Currently buyers must repay the full face value on or before the due date. Add support for early repayment where the buyer pays face value but receives a partial refund of the discount proportional to how early they paid.
 
@@ -166,14 +207,13 @@ Currently buyers must repay the full face value on or before the due date. Add s
 Rust · Soroban SDK · u128 arithmetic
 "@
 
-Write-Host "✓ Issue 7 created"
 
 # ── ESCROW CONTRACT ───────────────────────────────────────────────────────────
 
-gh issue create --repo $REPO `
-  --title "test(escrow): write unit tests for all escrow_contract functions" `
-  --label "testing,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "test(escrow): write unit tests for all escrow_contract functions" `
+  -Label "testing,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 The escrow contract is missing comprehensive unit tests. Write tests for all functions.
 
@@ -191,12 +231,11 @@ The escrow contract is missing comprehensive unit tests. Write tests for all fun
 Rust · soroban-sdk testutils · token::StellarAssetClient for mock USDC
 "@
 
-Write-Host "✓ Issue 8 created"
 
-gh issue create --repo $REPO `
-  --title "feat(escrow): add escrow record history log for audit trail" `
-  --label "enhancement,complexity:medium" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(escrow): add escrow record history log for audit trail" `
+  -Label "enhancement,complexity:medium" `
+  -Body @"
 ## Summary
 Once an escrow record is deleted (after release or default), there is no on-chain record it existed. Add an append-only history log that records every escrow action for audit purposes.
 
@@ -211,14 +250,13 @@ Once an escrow record is deleted (after release or default), there is no on-chai
 Rust · Soroban SDK · contracttype · persistent storage
 "@
 
-Write-Host "✓ Issue 9 created"
 
 # ── POOL CONTRACT ─────────────────────────────────────────────────────────────
 
-gh issue create --repo $REPO `
-  --title "feat(pool): add per-LP yield tracking and claim history" `
-  --label "enhancement,complexity:high" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(pool): add per-LP yield tracking and claim history" `
+  -Label "enhancement,complexity:high" `
+  -Body @"
 ## Summary
 LPs currently see their total yield earned but cannot see a breakdown of which invoice repayments contributed yield to their position. Add per-LP yield event history.
 
@@ -232,12 +270,11 @@ LPs currently see their total yield earned but cannot see a breakdown of which i
 Rust · Soroban SDK · u128 proportional math
 "@
 
-Write-Host "✓ Issue 10 created"
 
-gh issue create --repo $REPO `
-  --title "feat(pool): add maximum utilization rate cap to protect liquidity" `
-  --label "enhancement,complexity:medium" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "feat(pool): add maximum utilization rate cap to protect liquidity" `
+  -Label "enhancement,complexity:medium" `
+  -Body @"
 ## Summary
 The pool can currently fund invoices until 100% of liquidity is deployed, leaving no buffer for withdrawals. Add a configurable maximum utilization rate (default 85%) above which new invoice funding is rejected.
 
@@ -252,12 +289,11 @@ The pool can currently fund invoices until 100% of liquidity is deployed, leavin
 Rust · Soroban SDK
 "@
 
-Write-Host "✓ Issue 11 created"
 
-gh issue create --repo $REPO `
-  --title "test(pool): write deposit, withdraw, and yield distribution unit tests" `
-  --label "testing,good first issue,complexity:medium" \
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "test(pool): write deposit, withdraw, and yield distribution unit tests" `
+  -Label "testing,good first issue,complexity:medium" \
+  -Body @"
 ## Summary
 Write comprehensive unit tests for the pool contract covering share math and yield distribution.
 
@@ -275,14 +311,13 @@ Write comprehensive unit tests for the pool contract covering share math and yie
 Rust · soroban-sdk testutils · mock USDC token
 "@
 
-Write-Host "✓ Issue 12 created"
 
 # ── DEVOPS / CI ───────────────────────────────────────────────────────────────
 
-gh issue create --repo $REPO `
-  --title "chore(ci): add cargo clippy lint check to GitHub Actions workflow" `
-  --label "devops,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "chore(ci): add cargo clippy lint check to GitHub Actions workflow" `
+  -Label "devops,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 The current CI workflow runs \`cargo test\` but does not run \`cargo clippy\`. Add a clippy step that fails the build on any warnings.
 
@@ -297,12 +332,11 @@ The current CI workflow runs \`cargo test\` but does not run \`cargo clippy\`. A
 GitHub Actions · cargo clippy
 "@
 
-Write-Host "✓ Issue 13 created"
 
-gh issue create --repo $REPO `
-  --title "docs(contracts): write inline rustdoc comments for all public functions" `
-  --label "documentation,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "docs(contracts): write inline rustdoc comments for all public functions" `
+  -Label "documentation,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 None of the public contract functions have rustdoc comments. Add \`///\` doc comments to every public function across all four contracts.
 
@@ -324,12 +358,11 @@ Each doc comment must include:
 Rust rustdoc syntax
 "@
 
-Write-Host "✓ Issue 14 created"
 
-gh issue create --repo $REPO `
-  --title "chore(scripts): add contract verification script for deployed testnet contracts" `
-  --label "devops,good first issue,complexity:low" `
-  --body @"
+Invoke-GhIssueCreate -Repo $REPO `
+  -Title "chore(scripts): add contract verification script for deployed testnet contracts" `
+  -Label "devops,good first issue,complexity:low" `
+  -Body @"
 ## Summary
 After deployment, there is no automated way to verify that contracts are initialized correctly. Add a \`scripts/verify.sh\` that invokes read functions on each deployed contract and prints the results.
 
@@ -349,7 +382,6 @@ After deployment, there is no automated way to verify that contracts are initial
 Bash · Stellar CLI
 "@
 
-Write-Host "✓ Issue 15 created"
 
 Write-Host ""
 Write-Host "==========================================="

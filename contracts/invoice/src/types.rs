@@ -112,13 +112,23 @@ pub enum DataKey {
     AgentRegistryContract,
     // Attestation recorded against a given invoice, keyed by invoice id.
     Attestation(BytesN<32>),
-    // O(1) status-membership marker: `(status, short invoice id)` -> `true`
-    // while the invoice is a member of that status index. Written when an
-    // invoice enters a status and removed when it transitions out, replacing
-    // the full `StatusIndexEntry` scans previously used for duplicate and
-    // idempotency checks (issues #831 / #835). Appended after every existing
-    // variant so already-deployed key discriminants stay stable.
+    // O(1) status-membership marker: `(status, short invoice id)` -> the
+    // `u32` position of the invoice's row in the `StatusIndexEntry` array
+    // while it belongs to that status. Written when an invoice enters a
+    // status and removed when it leaves, replacing the full
+    // `StatusIndexEntry` scans previously used for duplicate, idempotency
+    // and removal-position checks (issues #831 / #835). Appended after every
+    // existing variant so already-deployed key discriminants stay stable.
     StatusMembership(InvoiceStatus, u64),
+    // O(1) issuer-index membership marker: `(issuer, short invoice id)` ->
+    // `true` while the invoice is in that issuer's index. Written by
+    // `extend_issuer_index` (issue #831). The issuer index is append-only,
+    // so a presence bit is sufficient — no stored position is needed.
+    IssuerMembership(Address, u64),
+    // O(1) buyer-index membership marker, mirroring `IssuerMembership`.
+    // Written by `extend_buyer_index` (issue #831). Appended after existing
+    // variants so already-deployed key discriminants stay stable.
+    BuyerMembership(Address, u64),
 }
 
 /// A risk attestation recorded against an invoice by a registered
