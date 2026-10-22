@@ -401,6 +401,7 @@ The `History` vector entries are never removed — they form an append-only log 
 | `ShareName` | `String` | SEP-41 `name()` of this pool's LP share token | `initialize()` |
 | `ShareSymbol` | `String` | SEP-41 `symbol()` of this pool's LP share token | `initialize()` |
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
+| `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 
 ### Persistent Storage
 
