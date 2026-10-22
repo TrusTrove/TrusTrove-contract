@@ -348,10 +348,14 @@ fn test_get_attestation_persists_signed_payload_and_submission_time() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 3_217,
         evidence_hash: BytesN::from_array(&env, &[42u8; 32]),
         agent_id,
         nonce: 17,
+        // This test is about the stored submission time, not expiry.
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.clone().to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
