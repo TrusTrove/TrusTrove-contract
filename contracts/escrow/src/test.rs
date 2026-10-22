@@ -10,7 +10,7 @@ extern crate alloc;
 // must remain clean.
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+use proptest::test_runner::{Config as ProptestConfig, RngSeed, TestRunner};
 use soroban_sdk::{
     contract, contractimpl, contracttype,
     testutils::{Address as _, Events as _, Ledger},
@@ -18,8 +18,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent, EscrowRecord,
-    DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
+    DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowError, EscrowEvent,
+    EscrowRecord, DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
 };
 
 #[contract]
@@ -2242,4 +2242,486 @@ fn test_release_after_timeout_returns_funds_to_pool() {
 fn test_release_after_timeout_without_lock_panics() {
     let (env, client, _, _, _, _) = setup();
     client.release_after_timeout(&generate_invoice_id(&env, 1));
+}
+
+// ===========================================================================
+// ISSUE #1018: u128 → i128 TOKEN AMOUNT BOUNDARIES
+// ===========================================================================
+//
+// `lock` and `release_to_pool` take `u128` amounts and hand them to the
+// SEP-41 token as `i128`; `release_to_issuer` converts the amount stored in
+// the lock record. All three must reject values above `i128::MAX` with the
+// typed `InvalidAmount` (#5) error before any transfer or record change —
+// the boundary checks already shipped in the contract, now pinned
+// deterministically and as properties over both sides of the limit.
+
+/// `i128::MAX` widened to `u128` (2^127 - 1): the largest amount representable
+/// as a token `i128`.
+const I128_MAX_U128: u128 = i128::MAX as u128;
+/// 2^127 — the first `u128` that cannot round-trip through `i128`.
+/// Constructed in `u128` so the test code itself never computes
+/// `i128::MAX + 1` as an `i128`.
+const OVER_I128_MAX: u128 = I128_MAX_U128 + 1;
+
+/// The entire mock balance `setup()` seeds the pool with. Locking it back
+/// leaves the pool's token balance at exactly zero, so every success-path
+/// credit below (`pool_before + amount as i128`) stays inside `i128` even
+/// when `amount == i128::MAX`.
+const LOCK_AMOUNT: u128 = 10_000_000_000_000;
+
+/// Explicit boundary set for `lock`: zero, small positives, both sides of
+/// `i128::MAX`, and `u128::MAX` — always run by the deterministic sweep,
+/// never left for the random sampler to discover.
+const LOCK_BOUNDARY_AMOUNTS: [u128; 8] = [
+    0,
+    1,
+    7,
+    I128_MAX_U128 - 1,
+    I128_MAX_U128,
+    OVER_I128_MAX,
+    OVER_I128_MAX + 1,
+    u128::MAX,
+];
+
+/// Explicit boundary set for `release_to_pool`, additionally covering both
+/// sides of the locked principal (partial, exact, and over-repayment).
+const RELEASE_TO_POOL_BOUNDARY_AMOUNTS: [u128; 11] = [
+    0,
+    1,
+    7,
+    LOCK_AMOUNT - 1,
+    LOCK_AMOUNT,
+    LOCK_AMOUNT + 1,
+    I128_MAX_U128 - 1,
+    I128_MAX_U128,
+    OVER_I128_MAX,
+    OVER_I128_MAX + 1,
+    u128::MAX,
+];
+
+/// Explicit boundary set for `release_to_issuer`. Zero is omitted: it can
+/// never exist in a stored record (`lock` rejects it), so the only way to
+/// reach the conversion is either a valid lock (representable amounts) or a
+/// corrupted record (unrepresentable amounts).
+const RELEASE_TO_ISSUER_BOUNDARY_AMOUNTS: [u128; 6] = [
+    1,
+    I128_MAX_U128 - 1,
+    I128_MAX_U128,
+    OVER_I128_MAX,
+    OVER_I128_MAX + 1,
+    u128::MAX,
+];
+
+/// Runs one `lock` of `amount` and checks the full outcome: exact transfer,
+/// record, and history on success; the typed error plus untouched state on
+/// rejection. Returns a message instead of panicking so the proptest wrapper
+/// can report it per case.
+fn check_lock_boundary_case(amount: u128) -> Result<(), alloc::string::String> {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 601);
+
+    let pool_before = get_balance(&env, &usdc_id, &pool);
+    let escrow_before = get_balance(&env, &usdc_id, &client.address);
+    let events_before = env.events().all().len();
+
+    if amount == 0 || amount > I128_MAX_U128 {
+        let typed = client
+            .try_lock(&invoice_id, &amount, &issuer)
+            .err()
+            .and_then(|e| e.ok());
+        if typed != Some(EscrowError::InvalidAmount.into()) {
+            return Err(alloc::format!(
+                "lock of {amount} must fail with the typed InvalidAmount (#5) error, got {typed:?}"
+            ));
+        }
+        // Rejected before the token is called: no record, no history, no
+        // movement, no event.
+        if client.get_locked(&invoice_id) != 0 {
+            return Err(alloc::format!(
+                "lock record written by rejected lock of {amount}"
+            ));
+        }
+        if !client.get_history(&invoice_id).is_empty() {
+            return Err(alloc::format!(
+                "history written by rejected lock of {amount}"
+            ));
+        }
+        if get_balance(&env, &usdc_id, &pool) != pool_before
+            || get_balance(&env, &usdc_id, &client.address) != escrow_before
+        {
+            return Err(alloc::format!(
+                "token balances changed by rejected lock of {amount}"
+            ));
+        }
+        if env.events().all().len() != events_before {
+            return Err(alloc::format!(
+                "events emitted by rejected lock of {amount}"
+            ));
+        }
+        return Ok(());
+    }
+
+    match client.try_lock(&invoice_id, &amount, &issuer) {
+        Ok(Ok(true)) => {}
+        other => {
+            return Err(alloc::format!(
+                "lock of {amount} must succeed, got {other:?}"
+            ))
+        }
+    }
+
+    if client.get_locked(&invoice_id) != amount {
+        return Err(alloc::format!(
+            "lock record must hold exactly {amount}, got {}",
+            client.get_locked(&invoice_id)
+        ));
+    }
+    let history = client.get_history(&invoice_id);
+    let last = history.last().expect("lock must append a history entry");
+    if history.len() != 1 || last.action != EscrowAction::Locked || last.amount != amount {
+        return Err(alloc::format!(
+            "history must hold one Locked entry of exactly {amount}"
+        ));
+    }
+    if get_balance(&env, &usdc_id, &client.address) != escrow_before + amount as i128 {
+        return Err(alloc::format!("escrow must receive exactly {amount}"));
+    }
+    if get_balance(&env, &usdc_id, &pool) != pool_before - amount as i128 {
+        return Err(alloc::format!("pool must pay exactly {amount}"));
+    }
+    Ok(())
+}
+
+/// Deterministic sweep: every explicit `lock` boundary runs on every test.
+#[test]
+fn test_lock_i128_amount_boundary_sweep() {
+    for amount in LOCK_BOUNDARY_AMOUNTS {
+        check_lock_boundary_case(amount).unwrap_or_else(|msg| panic!("amount {amount}: {msg}"));
+    }
+}
+
+/// Boundary-weighted `lock` strategy: every edge in
+/// `LOCK_BOUNDARY_AMOUNTS` stays reachable, plus samples from both the
+/// representable range [0, i128::MAX] and the non-representable range
+/// [i128::MAX + 1, u128::MAX].
+///
+/// Note: `prop_oneof!` stays at three arms on purpose — with ten or more
+/// arms it falls back to a `vec![]`-building expansion, and `vec!` is not
+/// in scope in this `#![no_std]` test module (unlike the pool/invoice test
+/// files, it would not resolve to any imported macro); three arms use the
+/// `TupleUnion` path instead.
+fn lock_i128_boundary_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        3 => (0u8..(LOCK_BOUNDARY_AMOUNTS.len() as u8))
+            .prop_map(|i| LOCK_BOUNDARY_AMOUNTS[i as usize]),
+        2 => 0u128..=I128_MAX_U128,
+        1 => OVER_I128_MAX..=u128::MAX,
+    ]
+}
+
+#[test]
+fn prop_lock_amounts_respect_i128_token_boundary() {
+    // Fixed seed: the generated amounts must be identical on every run
+    // (issue #1018 requires reproducible generated cases).
+    let mut config = ProptestConfig::with_cases(16);
+    config.rng_seed = RngSeed::Fixed(1018);
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&lock_i128_boundary_amount_strategy(), |amount| {
+            let outcome = check_lock_boundary_case(amount);
+            prop_assert!(outcome.is_ok(), "amount {amount}: {outcome:?}");
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Runs one `release_to_pool` of `amount` against a fresh lock of
+/// `LOCK_AMOUNT` and checks the full outcome: exact transfer and residual
+/// record on success; the typed error plus untouched custody state on
+/// rejection.
+fn check_release_to_pool_boundary_case(amount: u128) -> Result<(), alloc::string::String> {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 602);
+
+    // Lock the pool's entire mock balance back (see `LOCK_AMOUNT`) so the
+    // pool's token balance starts at exactly zero below.
+    client.lock(&invoice_id, &LOCK_AMOUNT, &issuer);
+    if client.get_locked(&invoice_id) != LOCK_AMOUNT {
+        return Err(alloc::format!("fixture lock of {LOCK_AMOUNT} failed"));
+    }
+
+    let history_before = client.get_history(&invoice_id).len();
+    let pool_before = get_balance(&env, &usdc_id, &pool);
+    let escrow_before = get_balance(&env, &usdc_id, &client.address);
+    let events_before = env.events().all().len();
+
+    if amount == 0 || amount > I128_MAX_U128 {
+        let typed = client
+            .try_release_to_pool(&invoice_id, &amount)
+            .err()
+            .and_then(|e| e.ok());
+        if typed != Some(EscrowError::InvalidAmount.into()) {
+            return Err(alloc::format!(
+                "release_to_pool of {amount} must fail with the typed InvalidAmount (#5) error, got {typed:?}"
+            ));
+        }
+        // Rejected before the token is called: lock record, history,
+        // balances, and events all untouched.
+        if client.get_locked(&invoice_id) != LOCK_AMOUNT {
+            return Err(alloc::format!(
+                "lock record changed by rejected release_to_pool of {amount}"
+            ));
+        }
+        if client.get_history(&invoice_id).len() != history_before {
+            return Err(alloc::format!(
+                "history written by rejected release_to_pool of {amount}"
+            ));
+        }
+        if get_balance(&env, &usdc_id, &pool) != pool_before
+            || get_balance(&env, &usdc_id, &client.address) != escrow_before
+        {
+            return Err(alloc::format!(
+                "token balances changed by rejected release_to_pool of {amount}"
+            ));
+        }
+        if env.events().all().len() != events_before {
+            return Err(alloc::format!(
+                "events emitted by rejected release_to_pool of {amount}"
+            ));
+        }
+        return Ok(());
+    }
+
+    match client.try_release_to_pool(&invoice_id, &amount) {
+        Ok(Ok(true)) => {}
+        other => {
+            return Err(alloc::format!(
+                "release_to_pool of {amount} must succeed, got {other:?}"
+            ))
+        }
+    }
+
+    // Exact transfer. Repaying more than the lock is the documented
+    // over-repayment path, so the lenient mock token may take escrow below
+    // zero — that is balance behavior, not a conversion failure.
+    if get_balance(&env, &usdc_id, &pool) != pool_before + amount as i128 {
+        return Err(alloc::format!("pool must receive exactly {amount}"));
+    }
+    if get_balance(&env, &usdc_id, &client.address) != escrow_before - amount as i128 {
+        return Err(alloc::format!("escrow must release exactly {amount}"));
+    }
+    // Residual record: partial repayments keep the remainder, anything at or
+    // above the lock clears it.
+    let expected_locked = if amount < LOCK_AMOUNT {
+        LOCK_AMOUNT - amount
+    } else {
+        0
+    };
+    if client.get_locked(&invoice_id) != expected_locked {
+        return Err(alloc::format!(
+            "expected residual lock {expected_locked}, got {}",
+            client.get_locked(&invoice_id)
+        ));
+    }
+    let history = client.get_history(&invoice_id);
+    let last = history
+        .last()
+        .expect("release_to_pool must append a history entry");
+    if history.len() != history_before + 1
+        || last.action != EscrowAction::ReleasedToPool
+        || last.amount != amount
+    {
+        return Err(alloc::format!(
+            "history must append one ReleasedToPool entry of exactly {amount}"
+        ));
+    }
+    Ok(())
+}
+
+/// Deterministic sweep: every explicit `release_to_pool` boundary runs on
+/// every test.
+#[test]
+fn test_release_to_pool_i128_amount_boundary_sweep() {
+    for amount in RELEASE_TO_POOL_BOUNDARY_AMOUNTS {
+        check_release_to_pool_boundary_case(amount)
+            .unwrap_or_else(|msg| panic!("amount {amount}: {msg}"));
+    }
+}
+
+/// Boundary-weighted `release_to_pool` strategy (see the `lock` strategy
+/// for the three-arm rationale).
+fn release_to_pool_i128_boundary_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        3 => (0u8..(RELEASE_TO_POOL_BOUNDARY_AMOUNTS.len() as u8))
+            .prop_map(|i| RELEASE_TO_POOL_BOUNDARY_AMOUNTS[i as usize]),
+        2 => 0u128..=I128_MAX_U128,
+        1 => OVER_I128_MAX..=u128::MAX,
+    ]
+}
+
+#[test]
+fn prop_release_to_pool_amounts_respect_i128_token_boundary() {
+    let mut config = ProptestConfig::with_cases(16);
+    config.rng_seed = RngSeed::Fixed(1018);
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&release_to_pool_i128_boundary_amount_strategy(), |amount| {
+            let outcome = check_release_to_pool_boundary_case(amount);
+            prop_assert!(outcome.is_ok(), "amount {amount}: {outcome:?}");
+            Ok(())
+        })
+        .unwrap();
+}
+
+/// Runs one `release_to_issuer` for `amount`. Representable amounts are
+/// locked first and must transfer exactly; unrepresentable amounts only
+/// exist as corrupted records (they can never pass `lock`'s own guard) and
+/// must be rejected by the checked `i128::try_from(record.amount)` conversion
+/// without removing the record or moving anything.
+fn check_release_to_issuer_boundary_case(amount: u128) -> Result<(), alloc::string::String> {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 603);
+
+    let representable = amount <= I128_MAX_U128;
+    if representable {
+        client.lock(&invoice_id, &amount, &issuer);
+    } else {
+        // Storage injection is required to reach the corrupted-record path:
+        // `lock` rejects the value before any record exists. Same technique
+        // as the existing #1001 regression tests.
+        env.as_contract(&client.address, || {
+            env.storage().persistent().set(
+                &DataKey::Locked(invoice_id.clone()),
+                &EscrowRecord {
+                    invoice_id: invoice_id.clone(),
+                    amount,
+                    locked_at: env.ledger().timestamp(),
+                    issuer: issuer.clone(),
+                },
+            );
+        });
+    }
+
+    let history_before = client.get_history(&invoice_id).len();
+    let issuer_before = get_balance(&env, &usdc_id, &issuer);
+    let escrow_before = get_balance(&env, &usdc_id, &client.address);
+    let events_before = env.events().all().len();
+
+    if !representable {
+        let typed = client
+            .try_release_to_issuer(&invoice_id, &issuer)
+            .err()
+            .and_then(|e| e.ok());
+        if typed != Some(EscrowError::InvalidAmount.into()) {
+            return Err(alloc::format!(
+                "release_to_issuer of stored {amount} must fail with the typed InvalidAmount (#5) error, got {typed:?}"
+            ));
+        }
+        // The corrupted record must survive untouched: no removal, no
+        // transfer, no history, no event.
+        if client.get_locked(&invoice_id) != amount {
+            return Err(alloc::format!(
+                "corrupted record changed by rejected release_to_issuer: get_locked now {}",
+                client.get_locked(&invoice_id)
+            ));
+        }
+        if client.get_history(&invoice_id).len() != history_before {
+            return Err(alloc::format!(
+                "history written by rejected release_to_issuer: {} entries",
+                client.get_history(&invoice_id).len()
+            ));
+        }
+        if get_balance(&env, &usdc_id, &issuer) != issuer_before
+            || get_balance(&env, &usdc_id, &client.address) != escrow_before
+        {
+            return Err(alloc::format!(
+                "token balances changed by rejected release_to_issuer: issuer {} (was {}), escrow {} (was {})",
+                get_balance(&env, &usdc_id, &issuer),
+                issuer_before,
+                get_balance(&env, &usdc_id, &client.address),
+                escrow_before
+            ));
+        }
+        if env.events().all().len() != events_before {
+            return Err(alloc::format!(
+                "events emitted by rejected release_to_issuer: {} (was {})",
+                env.events().all().len(),
+                events_before
+            ));
+        }
+        return Ok(());
+    }
+
+    match client.try_release_to_issuer(&invoice_id, &issuer) {
+        Ok(Ok(true)) => {}
+        other => {
+            return Err(alloc::format!(
+                "release_to_issuer of {amount} must succeed, got {other:?}"
+            ))
+        }
+    }
+
+    if get_balance(&env, &usdc_id, &issuer) != issuer_before + amount as i128 {
+        return Err(alloc::format!("issuer must receive exactly {amount}"));
+    }
+    if get_balance(&env, &usdc_id, &client.address) != escrow_before - amount as i128 {
+        return Err(alloc::format!("escrow must release exactly {amount}"));
+    }
+    if client.get_locked(&invoice_id) != 0 {
+        return Err(alloc::format!(
+            "lock record must be consumed, get_locked still {}",
+            client.get_locked(&invoice_id)
+        ));
+    }
+    let history = client.get_history(&invoice_id);
+    let last = history
+        .last()
+        .expect("release_to_issuer must append a history entry");
+    if history.len() != history_before + 1
+        || last.action != EscrowAction::ReleasedToIssuer
+        || last.amount != amount
+    {
+        return Err(alloc::format!(
+            "history must append one ReleasedToIssuer entry of exactly {amount}"
+        ));
+    }
+    Ok(())
+}
+
+/// Deterministic sweep: every explicit `release_to_issuer` boundary runs on
+/// every test.
+#[test]
+fn test_release_to_issuer_i128_amount_boundary_sweep() {
+    for amount in RELEASE_TO_ISSUER_BOUNDARY_AMOUNTS {
+        check_release_to_issuer_boundary_case(amount)
+            .unwrap_or_else(|msg| panic!("amount {amount}: {msg}"));
+    }
+}
+
+/// Boundary-weighted `release_to_issuer` strategy (see the `lock` strategy
+/// for the three-arm rationale).
+fn release_to_issuer_i128_boundary_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        3 => (0u8..(RELEASE_TO_ISSUER_BOUNDARY_AMOUNTS.len() as u8))
+            .prop_map(|i| RELEASE_TO_ISSUER_BOUNDARY_AMOUNTS[i as usize]),
+        2 => 0u128..=I128_MAX_U128,
+        1 => OVER_I128_MAX..=u128::MAX,
+    ]
+}
+
+#[test]
+fn prop_release_to_issuer_amounts_respect_i128_token_boundary() {
+    let mut config = ProptestConfig::with_cases(16);
+    config.rng_seed = RngSeed::Fixed(1018);
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(
+            &release_to_issuer_i128_boundary_amount_strategy(),
+            |amount| {
+                let outcome = check_release_to_issuer_boundary_case(amount);
+                prop_assert!(outcome.is_ok(), "amount {amount}: {outcome:?}");
+                Ok(())
+            },
+        )
+        .unwrap();
 }

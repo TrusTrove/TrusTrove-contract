@@ -1,7 +1,12 @@
 #![cfg(test)]
 
+// The test helpers below format their failure messages with `std::format!`;
+// the crate itself is `#![no_std]`, so `std` must be linked explicitly
+// (mirrors `contracts/pool/src/test.rs`).
+extern crate std;
+
 use proptest::prelude::*;
-use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+use proptest::test_runner::{Config as ProptestConfig, RngSeed, TestRunner};
 use soroban_sdk::vec;
 use soroban_sdk::{
     contract, contractimpl, contracttype,
@@ -6162,4 +6167,251 @@ fn test_extend_issuer_and_buyer_index_duplicate_append_is_noop() {
         client.get_by_buyer(&buyer, &0, &20).get(1).unwrap().id,
         second
     );
+}
+
+// ===========================================================================
+// ISSUE #1018: u128 → i128 TOKEN AMOUNT BOUNDARIES ON repay_partial
+// ===========================================================================
+//
+// `repay_partial` takes a `u128` amount and hands it to the SEP-41 token as
+// an `i128` (`amount as i128`). The conversion is only reachable behind the
+// `amount > invoice.remaining_balance` gate, and `remaining_balance <=
+// face_value <= MAX_FACE_VALUE = u128::MAX / 10_000 < i128::MAX` — so every
+// amount above `i128::MAX` is necessarily above the remaining balance and is
+// rejected earlier with the typed `RepaymentExceedsBalance` (#25) error.
+// These tests pin exactly that classification: out-of-range amounts are NOT
+// conversion or overflow failures (the conversion is never reached), while
+// zero is its own `InvalidAmount` (#16), and every rejection leaves invoice
+// state plus all token balances untouched.
+
+/// `i128::MAX` widened to `u128` (2^127 - 1): the largest amount representable
+/// as a token `i128`.
+const I128_MAX_U128: u128 = i128::MAX as u128;
+/// 2^127 — the first `u128` that cannot round-trip through `i128`.
+/// Constructed in `u128` so the test code itself never computes
+/// `i128::MAX + 1` as an `i128`.
+const OVER_I128_MAX: u128 = I128_MAX_U128 + 1;
+
+/// The explicit boundary set, always exercised by the deterministic sweep
+/// below rather than left for the random sampler to discover: zero, small
+/// positives, both sides of the remaining balance, both sides of `i128::MAX`,
+/// and `u128::MAX`.
+const REPAY_BOUNDARY_AMOUNTS: [u128; 11] = [
+    0,                      // zero — InvalidAmount (#16)
+    1,                      // smallest installment
+    7,                      // small positive
+    DEFAULT_FACE_VALUE - 1, // partial repayment below the balance
+    DEFAULT_FACE_VALUE,     // exact settlement of the balance
+    DEFAULT_FACE_VALUE + 1, // first amount above the balance (representable)
+    I128_MAX_U128 - 1,      // largest representable amount above the balance
+    I128_MAX_U128,          // largest representable amount
+    OVER_I128_MAX,          // first unrepresentable amount
+    OVER_I128_MAX + 1,      // second unrepresentable amount
+    u128::MAX,              // largest unrepresentable amount
+];
+
+/// Fresh confirmed-invoice fixture with the buyer funded for exactly one full
+/// repayment — the same shape the existing repay tests use — returning
+/// `(env, client, buyer, invoice_id, escrow, pool, usdc)`.
+fn repay_boundary_fixture() -> (
+    Env,
+    InvoiceContractClient<'static>,
+    Address,
+    BytesN<32>,
+    Address,
+    Address,
+    Address,
+) {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let usdc = client.get_funding_asset(&invoice_id);
+    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+    (env, client, buyer, invoice_id, escrow, pool, usdc)
+}
+
+/// Runs one `repay_partial` of `amount` against a fresh fixture and checks
+/// the full outcome: exact transfer plus recorded accounting on success, the
+/// typed error plus untouched state on rejection. Returns a message instead
+/// of panicking so the proptest wrapper can report it per case.
+fn check_repay_partial_case(amount: u128) -> Result<(), std::string::String> {
+    let (env, client, buyer, invoice_id, escrow, pool, usdc) = repay_boundary_fixture();
+    let token = MockTokenClient::new(&env, &usdc);
+
+    let inv_before = client.get(&invoice_id);
+    let buyer_before = token.balance(&buyer);
+    let escrow_before = token.balance(&escrow);
+    let pool_before = token.balance(&pool);
+    let events_before = env.events().all().len();
+    let remaining = inv_before.remaining_balance; // == DEFAULT_FACE_VALUE here
+
+    let result = client.try_repay_partial(&invoice_id, &amount);
+
+    if amount != 0 && amount <= remaining {
+        // ---- Accepted: exact transfer and exact recorded accounting. ----
+        match result {
+            Ok(Ok(true)) => {}
+            other => {
+                return Err(std::format!(
+                    "repay_partial of {amount} (balance {remaining}) must succeed, got {other:?}"
+                ))
+            }
+        }
+
+        if token.balance(&buyer) != buyer_before - amount as i128 {
+            return Err(std::format!(
+                "buyer must pay exactly {amount}, balance is now {}",
+                token.balance(&buyer)
+            ));
+        }
+
+        let inv = client.get(&invoice_id);
+        if amount < remaining {
+            // Partial: funds sit in escrow, the pool is untouched, and the
+            // invoice keeps its status while the balances move by exactly
+            // `amount`.
+            if token.balance(&escrow) != escrow_before + amount as i128 {
+                return Err(std::format!(
+                    "escrow must receive exactly {amount}, balance is now {}",
+                    token.balance(&escrow)
+                ));
+            }
+            if token.balance(&pool) != pool_before {
+                return Err(std::format!(
+                    "pool must be untouched by a partial repayment, balance is now {}",
+                    token.balance(&pool)
+                ));
+            }
+            if inv.status != InvoiceStatus::Confirmed
+                || inv.remaining_balance != remaining - amount
+                || inv.repaid_amount != inv_before.repaid_amount + amount
+            {
+                return Err(std::format!(
+                    "partial repayment accounting wrong: status {:?}, remaining {}, repaid {}",
+                    inv.status,
+                    inv.remaining_balance,
+                    inv.repaid_amount
+                ));
+            }
+        } else {
+            // Full settlement: the buyer's payment passes through escrow and
+            // lands in the pool (MockEscrow.release_to_pool), so escrow nets
+            // zero and the invoice settles.
+            if token.balance(&escrow) != escrow_before
+                || token.balance(&pool) != pool_before + amount as i128
+            {
+                return Err(std::format!(
+                    "settlement must move exactly {amount} through escrow into the pool, escrow {}, pool {}",
+                    token.balance(&escrow),
+                    token.balance(&pool)
+                ));
+            }
+            if inv.status != InvoiceStatus::Repaid
+                || inv.remaining_balance != 0
+                || inv.repaid_amount != inv_before.repaid_amount + amount
+            {
+                return Err(std::format!(
+                    "settlement accounting wrong: status {:?}, remaining {}, repaid {}",
+                    inv.status,
+                    inv.remaining_balance,
+                    inv.repaid_amount
+                ));
+            }
+        }
+        return Ok(());
+    }
+
+    // ---- Rejected: typed error and nothing changed. ----
+    let expected = if amount == 0 {
+        InvoiceError::InvalidAmount
+    } else {
+        // Covers representable amounts above the balance *and* every amount
+        // above i128::MAX: because remaining <= MAX_FACE_VALUE < i128::MAX,
+        // the balance gate always fires first. RepaymentExceedsBalance is
+        // the actual typed error of that gate — deliberately not an
+        // overflow/conversion error, which this path never reaches.
+        InvoiceError::RepaymentExceedsBalance
+    };
+    let typed = result.err().and_then(|e| e.ok());
+    if typed != Some(expected.into()) {
+        return Err(std::format!(
+            "repay_partial of {amount} (balance {remaining}) must fail with typed {expected:?}, got {typed:?}"
+        ));
+    }
+
+    let inv_after = client.get(&invoice_id);
+    if inv_after.status != inv_before.status
+        || inv_after.remaining_balance != inv_before.remaining_balance
+        || inv_after.repaid_amount != inv_before.repaid_amount
+        || inv_after.repaid_at != inv_before.repaid_at
+    {
+        return Err(std::format!(
+            "invoice state changed after rejected repay_partial of {amount}"
+        ));
+    }
+    if token.balance(&buyer) != buyer_before
+        || token.balance(&escrow) != escrow_before
+        || token.balance(&pool) != pool_before
+    {
+        return Err(std::format!(
+            "token balances changed after rejected repay_partial of {amount}"
+        ));
+    }
+    if env.events().all().len() != events_before {
+        return Err(std::format!(
+            "events emitted by rejected repay_partial of {amount}"
+        ));
+    }
+    Ok(())
+}
+
+/// Compile-time proof of the invariant that makes every `amount as i128` in
+/// this crate safe: invoice face values (and therefore remaining balances)
+/// can never exceed the convertible range, so for any out-of-range amount
+/// the `amount > remaining_balance` gate fires before the conversion.
+const _: () = assert!(
+    crate::MAX_FACE_VALUE < I128_MAX_U128,
+    "MAX_FACE_VALUE must stay strictly inside the i128 range"
+);
+
+/// Deterministic sweep: every explicit boundary amount is exercised on every
+/// run, independent of proptest's sampling.
+#[test]
+fn test_repay_partial_i128_amount_boundary_sweep() {
+    for amount in REPAY_BOUNDARY_AMOUNTS {
+        check_repay_partial_case(amount).unwrap_or_else(|msg| panic!("amount {amount}: {msg}"));
+    }
+}
+
+/// Boundary-weighted strategy: every edge in `REPAY_BOUNDARY_AMOUNTS` stays
+/// reachable, plus samples from both the representable range [0, i128::MAX]
+/// and the non-representable range [i128::MAX + 1, u128::MAX].
+///
+/// Note: `prop_oneof!` stays at three arms on purpose — with ten or more
+/// arms it falls back to a `vec![]`-building expansion, and `vec!` would
+/// resolve to the `soroban_sdk::vec` imported at the top of this file.
+fn repay_i128_boundary_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        3 => (0u8..(REPAY_BOUNDARY_AMOUNTS.len() as u8))
+            .prop_map(|i| REPAY_BOUNDARY_AMOUNTS[i as usize]),
+        2 => 0u128..=I128_MAX_U128,
+        1 => OVER_I128_MAX..=u128::MAX,
+    ]
+}
+
+/// Property: classification by zero / remaining-balance / unrepresentable
+/// ranges holds for every boundary value and for amounts sampled across
+/// both sides of the i128 limit.
+#[test]
+fn prop_repay_partial_amounts_classify_by_balance_not_conversion() {
+    // Fixed seed: the generated amounts must be identical on every run
+    // (issue #1018 requires reproducible generated cases).
+    let mut config = ProptestConfig::with_cases(16);
+    config.rng_seed = RngSeed::Fixed(1018);
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&repay_i128_boundary_amount_strategy(), |amount| {
+            let outcome = check_repay_partial_case(amount);
+            prop_assert!(outcome.is_ok(), "amount {amount}: {outcome:?}");
+            Ok(())
+        })
+        .unwrap();
 }
