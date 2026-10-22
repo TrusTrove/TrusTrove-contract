@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, map, panic_with_error, Address, BytesN, Env, Map, String, Vec,
+    contract, contractimpl, panic_with_error, Address, BytesN, Env, Map, String, Vec,
 };
 use trusttrove_pause::{require_not_paused, set_paused};
 
@@ -175,7 +175,7 @@ impl RegistryContract {
         let mut skipped: Vec<Address> = Vec::new(&env);
         let mut registered: u32 = 0;
         for entry in entries.iter() {
-            let (address, _metadata) = entry;
+            let (address, metadata) = entry;
             let key = DataKey::Profile(address.clone());
             if env.storage().persistent().has(&key) {
                 skipped.push_back(address.clone());
@@ -183,7 +183,7 @@ impl RegistryContract {
             }
 
             // #130: new profiles start unverified; admin must verify via verify_profile.
-            let profile = Profile::new(Role::Issuer, false, env.ledger().timestamp(), map![&env]);
+            let profile = Profile::new(Role::Issuer, false, env.ledger().timestamp(), metadata);
 
             env.storage().persistent().set(&key, &profile);
             env.storage()
@@ -504,15 +504,21 @@ impl RegistryContract {
     }
 
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
-        match env
-            .storage()
-            .persistent()
-            .get::<_, Profile>(&DataKey::Profile(address))
-        {
+        let key = DataKey::Profile(address);
+        match env.storage().persistent().get::<_, Profile>(&key) {
             None => VerificationStatus::Unregistered,
-            Some(p) if p.verified() => VerificationStatus::Verified,
-            Some(p) if p.revoked() => VerificationStatus::Revoked,
-            Some(_) => VerificationStatus::Pending,
+            Some(profile) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                if profile.verified() {
+                    VerificationStatus::Verified
+                } else if profile.revoked() {
+                    VerificationStatus::Revoked
+                } else {
+                    VerificationStatus::Pending
+                }
+            }
         }
     }
 
@@ -689,9 +695,10 @@ impl RegistryContract {
 
     /// Revokes a registered profile by setting its verification status to `false`.
     ///
-    /// This function is idempotent: calling it on an already-revoked profile
+    /// This function is idempotent: calling it on an already-unverified profile
     /// returns `true` without re-emitting the `address_revoked` event or
-    /// rewriting storage.
+    /// rewriting storage. The instance and profile TTLs are still extended so
+    /// repeated administrative reads cannot let the registry singleton age out.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -721,7 +728,13 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        if !profile.verified() {
+        if profile.revoked() {
+            // Only an already revoked profile is idempotent; Pending must transition.
+            // Extend TTLs so repeated admin reads don't let storage age out.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::extend_instance_ttl(&env);
             return true;
         }
         profile.set_verified(false);
@@ -809,6 +822,13 @@ impl RegistryContract {
     /// * `address` - The registered address whose verification changes.
     /// * `verify` - `true` to verify (also clears the revoked flag), `false`
     ///   to un-verify (also marks the profile revoked).
+    ///
+    /// # Repeated calls
+    /// Calling with the value the profile already holds is NOT an idempotent
+    /// no-op: storage is rewritten to the same state and a `profile_verified`
+    /// event is emitted on every call. Each call is an intentional audit
+    /// event, so indexers can count administrative decisions and must not
+    /// treat the event stream as a list of state changes (#987).
     ///
     /// # Auth
     /// * Requires `caller.require_auth()`, where `caller` is the admin or the

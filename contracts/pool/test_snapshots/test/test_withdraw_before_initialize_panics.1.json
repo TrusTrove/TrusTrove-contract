@@ -1,13 +1,16 @@
 {
   "generators": {
     "address": 2,
-    "nonce": 1
+    "nonce": 1,
+    "mux_id": 0
   },
   "auth": [
+    [],
+    [],
     []
   ],
   "ledger": {
-    "protocol_version": 21,
+    "protocol_version": 23,
     "sequence_number": 0,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -103,194 +106,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
-              },
-              {
-                "symbol": "withdraw"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
-                  "u128": {
-                    "hi": 0,
-                    "lo": 1000
-                  }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
-                }
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "string": "failing with contract error"
-                },
-                {
-                  "u32": 2
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
-                }
-              }
-            ],
-            "data": {
-              "string": "escalating error to panic"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
-                }
-              }
-            ],
-            "data": {
-              "string": "caught error from function"
-            }
-          }
-        }
-      },
-      "failed_call": true
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
-                }
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "string": "contract call failed"
-                },
-                {
-                  "symbol": "withdraw"
-                },
-                {
-                  "vec": [
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                    },
-                    {
-                      "u128": {
-                        "hi": 0,
-                        "lo": 1000
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "error"
-              },
-              {
-                "error": {
-                  "contract": 2
-                }
-              }
-            ],
-            "data": {
-              "string": "escalating error to panic"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }
