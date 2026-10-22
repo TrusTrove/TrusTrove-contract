@@ -2373,10 +2373,13 @@ impl PoolContract {
     ///    the LP yield slice (`amount - funded_amount - refund`) is never
     ///    negative; `receive_repayment` calls this with `refund = 0`, for which
     ///    the bound is trivially satisfied.
-    /// 3. Credits `yield_amount` to `TotalDeposits` / `TotalYieldDistributed`,
-    ///    removes the funded principal from `TotalFunded`, and decrements
-    ///    `ActiveInvoiceCount` (panicking with `ActiveCountUnderflow` if it
-    ///    would go negative).
+    /// 3. Credits `yield_amount` to `TotalDeposits` / `TotalYieldDistributed`
+    ///    with checked additions (panicking with `Overflow` if either total
+    ///    would wrap), removes the funded principal from `TotalFunded`, and
+    ///    decrements `ActiveInvoiceCount` (panicking with `ActiveCountUnderflow`
+    ///    if it would go negative). Every failure fires before the funded
+    ///    invoice entry is removed, so an overflowing settlement leaves no
+    ///    accounting and no persistent state behind (#967).
     /// 4. Removes the funded entry, emits `repayment_received`, and extends
     ///    the instance TTL.
     ///
@@ -2421,6 +2424,19 @@ impl PoolContract {
         let total_funded = totals.funded;
         let total_yield = totals.yield_distributed;
 
+        // Bound both yield credits up front (#967): `TotalDeposits` and
+        // `TotalYieldDistributed` grow by `lp_yield` through checked
+        // additions, so a boundary-seeded total surfaces the typed
+        // `PoolError::Overflow` instead of wrapping — and it does so before
+        // the treasury transfer below and before the funded invoice entry is
+        // removed, so a rejected settlement mutates nothing.
+        let new_total_deposits = total_deposits
+            .checked_add(lp_yield)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+        let new_total_yield = total_yield
+            .checked_add(lp_yield)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+
         if protocol_cut > 0 {
             if let Some(treasury) = env
                 .storage()
@@ -2441,13 +2457,14 @@ impl PoolContract {
             .checked_sub(funded_amount)
             .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
 
-        // Add LP yield (not full yield) to TotalDeposits and TotalYieldDistributed
+        // Add LP yield (not full yield) to TotalDeposits and
+        // TotalYieldDistributed; both values were checked above (#967).
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits + lp_yield));
+            .set(&DataKey::TotalDeposits, &new_total_deposits);
         env.storage()
             .instance()
-            .set(&DataKey::TotalYieldDistributed, &(total_yield + lp_yield));
+            .set(&DataKey::TotalYieldDistributed, &new_total_yield);
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &new_total_funded);

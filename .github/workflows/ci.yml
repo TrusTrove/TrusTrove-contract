@@ -53,6 +53,14 @@ jobs:
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
 
+      - name: Install cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
+
+      - name: Check cargo-deny advisories and licenses
+        run: cargo deny check
+
       # Issue #805: cargo audit covers RUSTSEC advisories, but nothing caught
       # dependencies that are declared and unused (which inflate compile time
       # and the audit surface). cargo-machete scans Cargo.toml declarations
