@@ -559,6 +559,17 @@ Emitted when locked funds are released back to the pool (on repayment).
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
 
+#### Partial Release and Residual Lock
+
+When `release_to_pool` is called with an amount less than the total locked amount, the following occurs:
+
+1. The `released_to_pool` event is emitted with the `repayment_amount` (the amount being repaid in this call).
+2. The escrow `Locked` record's `amount` is reduced by `repayment_amount` (preserving the original `locked_at` timestamp).
+3. The residual locked amount remains in escrow, and `get_locked()` will return the remaining balance.
+4. A subsequent `release_to_pool` call can repay the remaining amount, at which point the `Locked` record is fully removed.
+
+This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time.
+
 ---
 
 ### `default_resolved`

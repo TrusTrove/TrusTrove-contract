@@ -83,6 +83,16 @@ pub fn timeout_window_set(env: &Env, window: u64) {
         .publish((Symbol::new(env, "timeout_window_set"),), window);
 }
 
+/// Emitted by `set_invoice_contract` when the admin pins the invoice
+/// contract reference that `release_to_pool` validates against (#997).
+/// `admin` is indexed; the data is the pinned invoice contract address.
+pub fn invoice_contract_set(env: &Env, admin: &Address, invoice_contract: &Address) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_contract_set"), admin.clone()),
+        invoice_contract.clone(),
+    );
+}
+
 /// Emitted by `release_after_timeout` when a stale lock is returned to the pool.
 pub fn timeout_released(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amount: u128) {
     env.events().publish(
