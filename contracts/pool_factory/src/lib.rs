@@ -141,7 +141,7 @@ impl PoolFactoryContract {
         let pool_address = env
             .deployer()
             .with_current_contract(Self::asset_salt(&env, &asset))
-            .deploy(pool_wasm_hash);
+            .deploy_v2(pool_wasm_hash, ());
 
         Self::initialize_pool(
             &env,
