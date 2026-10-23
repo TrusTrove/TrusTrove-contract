@@ -50,6 +50,36 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - `pool.initialize` accepts three new arguments: `share_name`, `share_symbol`
   and `share_decimals`
+- `invoice`: **breaking, attestation wire format (v2).** `AttestationPayload`
+  gains `contract_address`, `network_id` and `valid_until`, and
+  `ATTESTATION_DOMAIN_SEPARATOR` is bumped from `…v1_` to `…v2_`. Agents in
+  the `underwrite-contract` repo must emit the new layout in lockstep;
+  v1-signed payloads no longer decode (#822, #823). See
+  `docs/AGENT_REGISTRY_INTERFACE.md` for the normative spec
+- `invoice`: `create` now rejects any `face_value < MIN_FACE_VALUE`
+  (100 000 stroops = 0.01 USDC) with `InvalidFaceValue`, instead of only
+  rejecting zero (#824)
+- `scripts/deploy.sh` / `scripts/verify.sh`: after every `initialize` the
+  deployer's own address is read back from the chain via `get_admin` and a
+  mismatch aborts the deployment; `verify.sh` now compares `get_admin`
+  against the deployer for registry, invoice, both pools and both escrows
+  instead of just printing it (#825)
+
+### Security
+
+- `invoice`: attestation signatures are now bound to the verifying contract
+  instance and network id, closing cross-deployment/cross-network replay of
+  attestations (`PayloadBindingMismatch`, new error #29) (#822)
+- `invoice`: attestations expire. `valid_until` (seconds, ledger timestamp)
+  is enforced at `submit_attestation` and again at
+  `list_for_financing`/`batch_list_for_financing` with the new
+  `AttestationExpired` error (#30) (#823)
+- `invoice`: dust face values that can never be funded (pool's
+  `funded_amount` rounds them to zero) can no longer be created to bloat
+  the issuer/buyer/status indexes (#824)
+- `scripts`: front-run initialization of freshly deployed contracts is
+  detected post-`initialize` by asserting on-chain `get_admin` equals the
+  deployer, with an explicit redeploy procedure on mismatch (#825)
 
 ### Testing
 

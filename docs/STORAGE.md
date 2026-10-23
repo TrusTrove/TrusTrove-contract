@@ -207,6 +207,21 @@ let status = if !profile_exists {
 |---------|------|-------------|
 | `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
 
+#### Supported Asset Allow-List
+
+| DataKey | Type | Description | TTL extended |
+|---------|------|-------------|--------------|
+| `SupportedAsset(Address)` | `bool` | Funding-asset allow-list marker | On write (`add_supported_asset`, including idempotent re-adds) and on use (`is_supported_asset`, `create`'s `SupportedAsset` check), issue #863 |
+
+The marker is persistent storage while `SupportedAssetCount` (above,
+instance storage) is re-bumped by every admin write. Without the write and
+use-time extensions the marker could lapse underneath a still-in-use
+asset; `remove_supported_asset` early-returns on a missing marker, so the
+lapse would leave `SupportedAssetCount` permanently out of sync with
+membership (issue #863). Keep-alive strategy: bump-on-write plus
+bump-on-use, the same policy as the index keys (#832) and `StatusCount`
+(#830).
+
 #### Invoice Structure
 
 ```
@@ -386,6 +401,7 @@ The `History` vector entries are never removed — they form an append-only log 
 | `ShareName` | `String` | SEP-41 `name()` of this pool's LP share token | `initialize()` |
 | `ShareSymbol` | `String` | SEP-41 `symbol()` of this pool's LP share token | `initialize()` |
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
+| `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 
 ### Persistent Storage
 

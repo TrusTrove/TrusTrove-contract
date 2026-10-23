@@ -133,3 +133,14 @@ pub fn allowance_approved(
         (spender.clone(), amount, expiration_ledger),
     );
 }
+
+/// Emitted by `set_min_discount` when the admin changes the pool's minimum
+/// discount floor (issue #829), mirroring `protocol_fee_updated`: the old
+/// value is included so an indexer can report what changed rather than only
+/// what it changed to. A rejected change emits nothing.
+pub fn min_discount_updated(env: &Env, old_min_bps: u32, new_min_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "min_discount_updated"),),
+        (old_min_bps, new_min_bps),
+    );
+}

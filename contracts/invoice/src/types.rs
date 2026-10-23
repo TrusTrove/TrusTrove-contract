@@ -151,6 +151,14 @@ pub struct Attestation {
     pub evidence_hash: BytesN<32>,
     /// Unix timestamp (seconds) at which the attestation was submitted.
     pub submitted_at: u64,
+    /// Unix timestamp (seconds, ledger timestamp) after which this
+    /// attestation no longer unlocks listing: `list_for_financing` panics
+    /// with [`crate::InvoiceError::AttestationExpired`] once
+    /// `env.ledger().timestamp() > valid_until`. Equality
+    /// (`timestamp == valid_until`) is still valid — the expiry check is
+    /// strict `>`. Copied from the signed [`AttestationPayload::valid_until`]
+    /// (issue #823).
+    pub valid_until: u64,
 }
 
 /// The signed payload an Underwrite agent produces off-chain and submits
@@ -160,22 +168,47 @@ pub struct Attestation {
 /// [`soroban_sdk::xdr::FromXdr`], and the *same* raw bytes are what get
 /// keccak256-hashed and checked against `signature`. The field order here
 /// therefore doubles as the wire format agents must sign over.
+///
+/// Layout v2 (issues #822 / #823): `contract_address`, `network_id`, and
+/// `valid_until` are new. The first two bind a signature to one deployed
+/// invoice contract on one network, so a payload signed for one deployment
+/// can never be replayed against another deployment that trusts the same
+/// agent key; the third bounds how long the risk assessment stays valid.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct AttestationPayload {
     /// Domain separator binding this signature to TrusTrove attestations
-    /// specifically, so a signature can't be replayed against an unrelated
-    /// contract or message scheme.
+    /// specifically (v2 layout), so a signature can't be replayed against
+    /// an unrelated contract or message scheme.
     pub domain_separator: BytesN<32>,
     /// The invoice this attestation is for. Must match the `invoice_id`
     /// argument passed to `submit_attestation`.
     pub invoice_id: BytesN<32>,
+    /// Address of the invoice contract this signature is bound to (issue
+    /// #822). `submit_attestation` rejects a payload whose
+    /// `contract_address` differs from `env.current_contract_address()`
+    /// with [`crate::InvoiceError::PayloadBindingMismatch`].
+    pub contract_address: Address,
+    /// Network this signature is bound to (issue #822), carried exactly as
+    /// `env.ledger().network_id()` returns it (a 32-byte network identifier
+    /// in this SDK — distinct values for testnet vs mainnet). A payload
+    /// whose `network_id` doesn't match the executing ledger is rejected
+    /// with [`crate::InvoiceError::PayloadBindingMismatch`].
+    pub network_id: BytesN<32>,
     pub risk_score: u32,
     pub evidence_hash: BytesN<32>,
     pub agent_id: Symbol,
     /// Caller-chosen nonce. Not separately tracked on-chain: the
     /// one-attestation-per-invoice storage check is the replay guard.
     pub nonce: u64,
+    /// Unix timestamp (seconds, ledger timestamp) until which this
+    /// attestation may unlock `list_for_financing` (issue #823).
+    /// `submit_attestation` rejects an already-expired payload and
+    /// `list_for_financing` panics with
+    /// [`crate::InvoiceError::AttestationExpired`] once
+    /// `env.ledger().timestamp() > valid_until`. Equality
+    /// (`timestamp == valid_until`) is still valid.
+    pub valid_until: u64,
 }
 
 /// Local mirror of the `Agent` record exposed by the agent-registry
