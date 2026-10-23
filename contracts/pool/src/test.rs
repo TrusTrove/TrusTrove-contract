@@ -1459,12 +1459,10 @@ fn test_get_stats_rejects_total_funded_exceeds_deposits() {
 // driven by injecting u128-scaled storage values — the same technique the
 // get_stats/get_utilization_rate/fund_invoice overflow tests use.
 
-// `usdc_amount * total_shares` overflows u128 when total_shares is inflated
-// to u128::MAX, so deposit must panic with Overflow (#13). The check runs
-// before the token transfer, so the depositor's USDC is never pulled.
+// The first overflowing product is 2 * (u128::MAX / 2 + 1). The failed
+// deposit must not move tokens or change pool accounting or LP shares.
 #[test]
-#[should_panic(expected = "Error(Contract, #13)")]
-fn test_deposit_rejects_share_price_overflow() {
+fn test_deposit_share_price_overflow_preserves_state_and_balances() {
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
 
@@ -1472,10 +1470,31 @@ fn test_deposit_rejects_share_price_overflow() {
         te.env
             .storage()
             .instance()
-            .set(&DataKey::TotalShares, &u128::MAX);
+            .set(&DataKey::TotalShares, &(u128::MAX / 2 + 1));
     });
 
-    te.pool.deposit(&te.lp, &10_000_000_000);
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+    let lp_balance_before = usdc.balance(&te.lp);
+    let pool_balance_before = usdc.balance(&te.pool_id);
+
+    let result = te.pool.try_deposit(&te.lp, &2);
+    let error = std::format!("{result:?}");
+    assert!(
+        error.contains("#13"),
+        "expected Overflow for the first overflowing product: {error}"
+    );
+
+    let stats_after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(position_after.usdc_value, position_before.usdc_value);
+    assert_eq!(position_after.deposit_count, position_before.deposit_count);
+    assert_eq!(usdc.balance(&te.lp), lp_balance_before);
+    assert_eq!(usdc.balance(&te.pool_id), pool_balance_before);
 }
 
 // Boundary complement: the largest representable product (2 * (u128::MAX / 2)
