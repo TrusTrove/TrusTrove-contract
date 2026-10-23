@@ -116,7 +116,7 @@ mod test {
     }
 
     fn harness(env: &Env) -> PauseHarnessClient<'_> {
-        let id = env.register_contract(None, PauseHarness);
+        let id = env.register(PauseHarness, ());
         PauseHarnessClient::new(env, &id)
     }
 

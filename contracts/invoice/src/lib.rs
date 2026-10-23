@@ -37,7 +37,15 @@ pub const MAX_INVOICE_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 /// the [`AttestationPayload`] they sign. Binds a signature to this
 /// contract's attestation scheme specifically, so it can't be replayed
 /// against an unrelated contract or message format.
-pub const ATTESTATION_DOMAIN_SEPARATOR: [u8; 32] = *b"TrusTrove.InvoiceAttestation.v1_";
+///
+/// v2 of the layout adds the `contract_address`, `network_id` and
+/// `valid_until` payload fields (issues #822 / #823): the separator
+/// version is bumped so agents and relayers can tell which layout a
+/// payload uses, and v1-signed payloads fail the separator check.
+/// Per-deployment and per-network binding is enforced on top of this by
+/// comparing those payload fields against `env.current_contract_address()`
+/// and `env.ledger().network_id()` in `submit_attestation`.
+pub const ATTESTATION_DOMAIN_SEPARATOR: [u8; 32] = *b"TrusTrove.InvoiceAttestation.v2_";
 
 /// Maximum number of invoices a single paginated `get_by_*` query may return.
 ///
@@ -534,6 +542,13 @@ impl InvoiceContract {
 
         let key = DataKey::SupportedAsset(asset.clone());
         if env.storage().persistent().has(&key) {
+            // Issue #863: re-adding an already-supported asset re-bumps the
+            // marker's liveness, so the admin's repeated write keeps the
+            // entry (and thus the `SupportedAssetCount` it backs) alive.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::extend_instance_ttl(&env);
             return;
         }
 
@@ -546,6 +561,15 @@ impl InvoiceContract {
             .instance()
             .set(&DataKey::SupportedAssetCount, &(count + 1));
         env.storage().persistent().set(&key, &true);
+        // Issue #863: without this the marker was left at the default
+        // persistence bump, could lapse while `SupportedAssetCount` (an
+        // instance entry re-extended by `extend_instance_ttl`) stayed high,
+        // and `remove_supported_asset`'s `has()` guard then early-returned
+        // forever — leaving the count permanently stale. Mirror the
+        // write-time extension used by the #830/#832 paths.
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
         events::supported_asset_added(&env, &asset);
     }
@@ -622,13 +646,14 @@ impl InvoiceContract {
     /// ```
     pub fn is_supported_asset(env: Env, asset: Address) -> bool {
         let key = DataKey::SupportedAsset(asset);
-        let store = env.storage().persistent();
-        if store.has(&key) {
-            store.extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-            true
-        } else {
-            false
+        let supported = env.storage().persistent().has(&key);
+        if supported {
+            // Issue #863 keep-alive: querying membership re-bumps the
+            // marker, matching the read-path bump introduced for the
+            // index keys in #832.
+            bump_persistent(&env, &key);
         }
+        supported
     }
 
     /// Returns the number of assets currently on the funding allow-list.
@@ -674,7 +699,11 @@ impl InvoiceContract {
     /// * `InvoiceError::NotFound` if the contract has not been initialized.
     /// * `InvoiceError::IssuerNotVerified` if the issuer is not verified in the registry.
     /// * `InvoiceError::BuyerNotVerified` if the buyer is not verified in the registry.
-    /// * `InvoiceError::InvalidFaceValue` if `face_value` is zero.
+    /// * `InvoiceError::InvalidFaceValue` if `face_value` is less than
+    ///   [`MIN_FACE_VALUE`] (zero included): dust face values can never be
+    ///   funded because the pool's `funded_amount` rounds to zero at high
+    ///   discounts, yet each created invoice still writes the issuer/buyer/
+    ///   status indexes (issue #824).
     /// * `InvoiceError::InvalidAmount` if `face_value` exceeds [`MAX_FACE_VALUE`].
     /// * `InvoiceError::InvalidDueDate` if `due_date` is not strictly in the
     ///   future. Requires `due_date > now`; the boundary comparator is `<=`,
@@ -734,15 +763,17 @@ impl InvoiceContract {
         require_verified(env, &registry_id, &issuer, InvoiceError::IssuerNotVerified);
         require_verified(env, &registry_id, &buyer, InvoiceError::BuyerNotVerified);
 
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::SupportedAsset(funding_asset.clone()))
-        {
+        let asset_key = DataKey::SupportedAsset(funding_asset.clone());
+        if !env.storage().persistent().has(&asset_key) {
             panic_with_error!(env, InvoiceError::UnsupportedAsset);
         }
+        // Issue #863 keep-alive (bump-on-use): every invoice actually
+        // created against an asset re-extends that asset's allow-list
+        // marker, so a marker cannot lapse underneath a still-in-use asset
+        // and strand `SupportedAssetCount` out of sync with membership.
+        bump_persistent(env, &asset_key);
 
-        if face_value == 0 {
+        if face_value < MIN_FACE_VALUE {
             panic_with_error!(env, InvoiceError::InvalidFaceValue);
         }
         if face_value > MAX_FACE_VALUE {
@@ -775,28 +806,19 @@ impl InvoiceContract {
         let issuer_xdr = issuer.clone().to_xdr(env);
         let buyer_xdr = buyer.clone().to_xdr(env);
 
-        // Safely append all XDR bytes without assuming a fixed length
-        for b in issuer_xdr.iter() {
-            hash_input.push_back(b);
-        }
-        for b in buyer_xdr.iter() {
-            hash_input.push_back(b);
-        }
-        for b in face_value.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        for b in due_date.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        for b in counter.to_be_bytes() {
-            hash_input.push_back(b);
-        }
-        {
-            let asset_xdr = funding_asset.clone().to_xdr(env);
-            for b in asset_xdr.iter() {
-                hash_input.push_back(b);
-            }
-        }
+        // Issue #834: build the preimage with bulk appends instead of one
+        // `push_back` host call per byte. Component order is unchanged from
+        // the previous byte-at-a-time loops:
+        // issuer_xdr || buyer_xdr || face_value_be || due_date_be ||
+        // counter_be || asset_xdr, so invoice ids are byte-for-byte stable
+        // (asserted by `test_create_invoice_id_matches_pre_refactor_preimage`).
+        hash_input.append(&issuer_xdr);
+        hash_input.append(&buyer_xdr);
+        hash_input.extend_from_array(&face_value.to_be_bytes());
+        hash_input.extend_from_array(&due_date.to_be_bytes());
+        hash_input.extend_from_array(&counter.to_be_bytes());
+        let asset_xdr = funding_asset.clone().to_xdr(env);
+        hash_input.append(&asset_xdr);
         let invoice_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
 
         let invoice = Invoice {
@@ -847,7 +869,8 @@ impl InvoiceContract {
     /// Each entry is `(buyer, face_value, due_date, funding_asset)`. Every
     /// entry is validated and persisted with the exact same checks as
     /// [`Self::create`] — verified issuer and buyer, distinct participants,
-    /// non-zero face value within [`MAX_FACE_VALUE`], a due date strictly in the
+    /// a face value of at least [`MIN_FACE_VALUE`] and at most
+    /// [`MAX_FACE_VALUE`], a due date strictly in the
     /// future and no more than [`MAX_INVOICE_LIFETIME_SECONDS`] ahead, and a
     /// supported funding asset — by delegating to `create_inner` per entry, so
     /// the two entry points cannot drift apart.
@@ -951,6 +974,10 @@ impl InvoiceContract {
     /// * `InvoiceError::NotFound` if the invoice does not exist.
     /// * `InvoiceError::VerificationRequired` if no Underwrite agent attestation has
     ///   been submitted for this invoice (see `submit_attestation`).
+    /// * `InvoiceError::AttestationExpired` if the submitted attestation's
+    ///   `valid_until` has passed, i.e. `env.ledger().timestamp() >
+    ///   valid_until`; equality on the boundary second is still valid
+    ///   (issue #823).
     /// * `InvoiceError::InvalidStatusTransition` if invoice status is not `Created`.
     /// * `InvoiceError::IssuerNotVerified` if the issuer's registry verification
     ///   has since been revoked.
@@ -973,12 +1000,16 @@ impl InvoiceContract {
             .persistent()
             .get(&inv_key)
             .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        if !env
+        // A missing attestation means verification is required; a present
+        // but expired one must not unlock listing (issue #823). One read
+        // covers both checks.
+        let attestation: Attestation = env
             .storage()
             .persistent()
-            .has(&DataKey::Attestation(invoice_id.clone()))
-        {
-            panic_with_error!(&env, InvoiceError::VerificationRequired);
+            .get(&DataKey::Attestation(invoice_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::VerificationRequired));
+        if env.ledger().timestamp() > attestation.valid_until {
+            panic_with_error!(&env, InvoiceError::AttestationExpired);
         }
         invoice.issuer.require_auth();
         if invoice.status != InvoiceStatus::Created {
@@ -1125,12 +1156,16 @@ impl InvoiceContract {
         let Some(mut invoice) = env.storage().persistent().get::<_, Invoice>(&inv_key) else {
             return false;
         };
-        if !env
+        let attestation: Option<Attestation> = env
             .storage()
             .persistent()
-            .has(&DataKey::Attestation(invoice_id.clone()))
-        {
-            return false;
+            .get(&DataKey::Attestation(invoice_id.clone()));
+        match attestation {
+            // Missing attestation, or one past `valid_until` (issue #823):
+            // a failed entry, not a panic, so the batch keeps going.
+            None => return false,
+            Some(a) if env.ledger().timestamp() > a.valid_until => return false,
+            Some(_) => {}
         }
         if !authorized.contains(&invoice.issuer) {
             invoice.issuer.require_auth();
@@ -1216,8 +1251,9 @@ impl InvoiceContract {
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice being attested.
-    /// * `payload` - XDR-encoded [`AttestationPayload`]: `domain_separator`,
-    ///   `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`.
+    /// * `payload` - XDR-encoded [`AttestationPayload`] (v2 layout):
+    ///   `domain_separator`, `invoice_id`, `contract_address`, `network_id`,
+    ///   `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`.
     ///   This is exactly the byte string the agent signed.
     /// * `signature` - A 65-byte recoverable secp256k1 signature over
     ///   `keccak256(payload)`: 64 bytes of `r || s` followed by a 1-byte
@@ -1236,6 +1272,14 @@ impl InvoiceContract {
     ///   `AttestationPayload`, if its `domain_separator` doesn't match this
     ///   contract's, or if its `invoice_id` doesn't match the `invoice_id`
     ///   argument.
+    /// * `InvoiceError::PayloadBindingMismatch` if the payload's
+    ///   `contract_address` is not this contract instance or its
+    ///   `network_id` is not `env.ledger().network_id()` — the guard
+    ///   against signatures replaying across deployments or networks
+    ///   (issue #822).
+    /// * `InvoiceError::AttestationExpired` if the ledger timestamp is
+    ///   already past the payload's `valid_until` (issue #823); equality
+    ///   on the boundary second is accepted.
     /// * `InvoiceError::UntrustedSigner` if the recovered signer is not an
     ///   active agent in the agent-registry, or its registered pubkey
     ///   doesn't match the recovered key.
@@ -1274,6 +1318,24 @@ impl InvoiceContract {
         if decoded.invoice_id != invoice_id {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
+        // Cross-deployment / cross-network replay guard (issue #822): the
+        // payload must name *this* contract instance on *this* network.
+        // `invoice_id` alone is not enough — it is a deterministic hash of
+        // (issuer, buyer, face_value, due_date, counter, asset) and the
+        // counter restarts at 0 on every fresh deployment, so identical
+        // inputs give identical ids on testnet vs mainnet and on redeploys.
+        if decoded.contract_address != env.current_contract_address()
+            || decoded.network_id != env.ledger().network_id()
+        {
+            panic_with_error!(&env, InvoiceError::PayloadBindingMismatch);
+        }
+        // Staleness guard (issue #823): refuse to record an attestation
+        // whose risk assessment is already past its validity window. The
+        // same check runs again against the stored record at listing time,
+        // because submission and listing happen at different timestamps.
+        if env.ledger().timestamp() > decoded.valid_until {
+            panic_with_error!(&env, InvoiceError::AttestationExpired);
+        }
 
         // Split the 65-byte recoverable signature into its 64-byte r||s
         // component and 1-byte recovery id for `secp256k1_recover`.
@@ -1305,6 +1367,7 @@ impl InvoiceContract {
             risk_score: decoded.risk_score,
             evidence_hash: decoded.evidence_hash,
             submitted_at: env.ledger().timestamp(),
+            valid_until: decoded.valid_until,
         };
         env.storage()
             .persistent()
@@ -1366,14 +1429,6 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::NotAuthorized);
         }
         pool_address.require_auth();
-        let configured_pool: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PoolContract)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
-        if pool_address != configured_pool {
-            panic_with_error!(&env, InvoiceError::NotAuthorized);
-        }
 
         if funded_amount == 0 {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
@@ -1393,9 +1448,6 @@ impl InvoiceContract {
         }
         if asset_address != invoice.funding_asset {
             panic_with_error!(&env, InvoiceError::UnsupportedAsset);
-        }
-        if funded_amount > invoice.face_value {
-            panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
 
         invoice.status = InvoiceStatus::Funded;

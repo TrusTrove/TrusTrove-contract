@@ -1,9 +1,11 @@
 {
   "generators": {
     "address": 3,
-    "nonce": 0
+    "nonce": 0,
+    "mux_id": 0
   },
   "auth": [
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -39,18 +41,18 @@
                   "map": [
                     {
                       "key": {
-                        "string": "L"
+                        "string": "_S1_c_P"
                       },
                       "val": {
-                        "string": "i_94Bv__"
+                        "string": "_Eu8mUqh4fIlc7P7"
                       }
                     },
                     {
                       "key": {
-                        "string": "_5FEw_wYA"
+                        "string": "key_1"
                       },
                       "val": {
-                        "string": "2vXu_8MYzKUI_4ncaUrm"
+                        "string": "value_1"
                       }
                     },
                     {
@@ -71,18 +73,10 @@
                     },
                     {
                       "key": {
-                        "string": "key_12"
+                        "string": "key_2"
                       },
                       "val": {
-                        "string": "value_12"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_13"
-                      },
-                      "val": {
-                        "string": "value_13"
+                        "string": "value_2"
                       }
                     },
                     {
@@ -140,14 +134,6 @@
                       "val": {
                         "string": "value_9"
                       }
-                    },
-                    {
-                      "key": {
-                        "string": "yz23_"
-                      },
-                      "val": {
-                        "string": "2xA4z9Rjhp2lQ"
-                      }
                     }
                   ]
                 }
@@ -161,7 +147,7 @@
     []
   ],
   "ledger": {
-    "protocol_version": 21,
+    "protocol_version": 23,
     "sequence_number": 0,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
@@ -215,18 +201,18 @@
                         "map": [
                           {
                             "key": {
-                              "string": "L"
+                              "string": "_S1_c_P"
                             },
                             "val": {
-                              "string": "i_94Bv__"
+                              "string": "_Eu8mUqh4fIlc7P7"
                             }
                           },
                           {
                             "key": {
-                              "string": "_5FEw_wYA"
+                              "string": "key_1"
                             },
                             "val": {
-                              "string": "2vXu_8MYzKUI_4ncaUrm"
+                              "string": "value_1"
                             }
                           },
                           {
@@ -247,18 +233,10 @@
                           },
                           {
                             "key": {
-                              "string": "key_12"
+                              "string": "key_2"
                             },
                             "val": {
-                              "string": "value_12"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_13"
-                            },
-                            "val": {
-                              "string": "value_13"
+                              "string": "value_2"
                             }
                           },
                           {
@@ -316,14 +294,6 @@
                             "val": {
                               "string": "value_9"
                             }
-                          },
-                          {
-                            "key": {
-                              "string": "yz23_"
-                            },
-                            "val": {
-                              "string": "2xA4z9Rjhp2lQ"
-                            }
                           }
                         ]
                       }
@@ -341,10 +311,122 @@
                         "symbol": "registered_at"
                       },
                       "val": {
-                        "u64": 0
+                        "u64": "0"
                       }
                     }
                   ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ProfileCount"
+                },
+                {
+                  "vec": [
+                    {
+                      "symbol": "Issuer"
+                    }
+                  ]
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ProfileCount"
+                    },
+                    {
+                      "vec": [
+                        {
+                          "symbol": "Issuer"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u32": 1
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ProfileIndex"
+                },
+                {
+                  "vec": [
+                    {
+                      "symbol": "Issuer"
+                    }
+                  ]
+                },
+                {
+                  "u32": 0
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ProfileIndex"
+                    },
+                    {
+                      "vec": [
+                        {
+                          "symbol": "Issuer"
+                        }
+                      ]
+                    },
+                    {
+                      "u32": 0
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 }
               }
             },
@@ -404,7 +486,7 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 801925984706572462
+                "nonce": "801925984706572462"
               }
             },
             "durability": "temporary"
@@ -419,7 +501,7 @@
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
                 "key": {
                   "ledger_key_nonce": {
-                    "nonce": 801925984706572462
+                    "nonce": "801925984706572462"
                   }
                 },
                 "durability": "temporary",
@@ -437,7 +519,7 @@
             "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
             "key": {
               "ledger_key_nonce": {
-                "nonce": 5541220902715666415
+                "nonce": "5541220902715666415"
               }
             },
             "durability": "temporary"
@@ -452,7 +534,7 @@
                 "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M",
                 "key": {
                   "ledger_key_nonce": {
-                    "nonce": 5541220902715666415
+                    "nonce": "5541220902715666415"
                   }
                 },
                 "durability": "temporary",
@@ -487,451 +569,5 @@
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
-              },
-              {
-                "symbol": "initialize"
-              }
-            ],
-            "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "contract_initialized"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-              }
-            ],
-            "data": "void"
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "initialize"
-              }
-            ],
-            "data": "void"
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
-              },
-              {
-                "symbol": "register_issuer"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "L"
-                      },
-                      "val": {
-                        "string": "i_94Bv__"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_5FEw_wYA"
-                      },
-                      "val": {
-                        "string": "2vXu_8MYzKUI_4ncaUrm"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_10"
-                      },
-                      "val": {
-                        "string": "value_10"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_11"
-                      },
-                      "val": {
-                        "string": "value_11"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_12"
-                      },
-                      "val": {
-                        "string": "value_12"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_13"
-                      },
-                      "val": {
-                        "string": "value_13"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_3"
-                      },
-                      "val": {
-                        "string": "value_3"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_4"
-                      },
-                      "val": {
-                        "string": "value_4"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_5"
-                      },
-                      "val": {
-                        "string": "value_5"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_6"
-                      },
-                      "val": {
-                        "string": "value_6"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_7"
-                      },
-                      "val": {
-                        "string": "value_7"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_8"
-                      },
-                      "val": {
-                        "string": "value_8"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_9"
-                      },
-                      "val": {
-                        "string": "value_9"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "yz23_"
-                      },
-                      "val": {
-                        "string": "2xA4z9Rjhp2lQ"
-                      }
-                    }
-                  ]
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "issuer_registered"
-              },
-              {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-              }
-            ],
-            "data": "void"
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "register_issuer"
-              }
-            ],
-            "data": {
-              "bool": true
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": null,
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_call"
-              },
-              {
-                "bytes": "0000000000000000000000000000000000000000000000000000000000000001"
-              },
-              {
-                "symbol": "get_profile"
-              }
-            ],
-            "data": {
-              "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-            }
-          }
-        }
-      },
-      "failed_call": false
-    },
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "diagnostic",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "fn_return"
-              },
-              {
-                "symbol": "get_profile"
-              }
-            ],
-            "data": {
-              "map": [
-                {
-                  "key": {
-                    "symbol": "metadata"
-                  },
-                  "val": {
-                    "map": [
-                      {
-                        "key": {
-                          "string": "L"
-                        },
-                        "val": {
-                          "string": "i_94Bv__"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "_5FEw_wYA"
-                        },
-                        "val": {
-                          "string": "2vXu_8MYzKUI_4ncaUrm"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_10"
-                        },
-                        "val": {
-                          "string": "value_10"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_11"
-                        },
-                        "val": {
-                          "string": "value_11"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_12"
-                        },
-                        "val": {
-                          "string": "value_12"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_13"
-                        },
-                        "val": {
-                          "string": "value_13"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_3"
-                        },
-                        "val": {
-                          "string": "value_3"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_4"
-                        },
-                        "val": {
-                          "string": "value_4"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_5"
-                        },
-                        "val": {
-                          "string": "value_5"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_6"
-                        },
-                        "val": {
-                          "string": "value_6"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_7"
-                        },
-                        "val": {
-                          "string": "value_7"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_8"
-                        },
-                        "val": {
-                          "string": "value_8"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "key_9"
-                        },
-                        "val": {
-                          "string": "value_9"
-                        }
-                      },
-                      {
-                        "key": {
-                          "string": "yz23_"
-                        },
-                        "val": {
-                          "string": "2xA4z9Rjhp2lQ"
-                        }
-                      }
-                    ]
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "packed_flags"
-                  },
-                  "val": {
-                    "u32": 0
-                  }
-                },
-                {
-                  "key": {
-                    "symbol": "registered_at"
-                  },
-                  "val": {
-                    "u64": 0
-                  }
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

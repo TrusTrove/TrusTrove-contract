@@ -122,4 +122,10 @@ pub enum DataKey {
     /// `docs/SEP41_DESIGN.md` requires shares to carry the funding asset's
     /// decimals, and under the factory model each instance has its own.
     ShareDecimals,
+    /// Admin-configured minimum invoice discount floor (yield floor), in
+    /// basis points, enforced by `fund_invoice` (issue #829). Defaults to `0`
+    /// — no floor — so behavior is unchanged until an admin opts in.
+    /// Appended last, per the comment above `RegistryContract`: new variants
+    /// must keep being appended so existing storage keys are never re-encoded.
+    MinDiscountBps,
 }

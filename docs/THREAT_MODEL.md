@@ -355,6 +355,61 @@ panics with `RegistryError::BatchSizeExceeded` otherwise.
 
 ---
 
+## Atomicity Assumptions
+
+Funding, repayment, and default rely on Soroban transaction rollback across
+nested contract calls. The protocol's threat model must clarify which state
+writes must remain atomic when a downstream call fails. This section documents
+the rollback expectations and residual-risk assumptions.
+
+### Cross-Contract Rollback Expectations
+
+| Sequence | Writes That Must Roll Back on Failure | Residual-Risk Assumption |
+|----------|-------------------------------------|--------------------------|
+| `invoice::create` → `pool::fund_invoice` → `escrow::lock` | All invoice, pool, and escrow state written during the chain | If `escrow::lock` fails, `pool::fund_invoice` rolls back, leaving no
+funded invoice entry and no LP share movement. The pool's `total_funded`
+and `active_invoice_count` are restored to their pre-chain values.
+|
+| `pool::receive_repayment` → `invoice::update_status` | Invoice `funded_amount`, status index, and pool `total_funded`/`active_invoice_count` | If the invoice's status update fails after repayment is received, the pool
+retains the funds but the invoice status lags. This is an accepted
+risk because the pool's accounting (`total_funded`) and the invoice's
+`funded_amount` are always synchronized at the two re-check points
+(`list_for_financing` and `fund_invoice`).
+|
+| `pool::handle_default` → `escrow::handle_default` → fund return to pool | `Locked` record removal, `IssuerReleased` marker consumption, pool
+`total_funded`/`active_invoice_count` reduction | If `escrow::handle_default` fails or returns `false`, the pool does not
+release funds and the default is not processed. The pool's state is left
+unchanged — no partial default can occur. This is guaranteed by the
+`handle_default` function's single-call atomicity in escrow.
+|
+| `escrow::lock` → `pool::fund_invoice` (partial path) | Escrow lock record and any partial pool state | If `pool::fund_invoice` is called without a preceding successful
+`invoice::list_for_financing`, or if the invoice is not in `Listed` status,
+the pool reverts with `InvoiceNotListed`. The escrow `lock` call is
+guarded by the pool's validation, so a failed fund_invoice does not leave
+a stale lock record.
+|
+
+### Residual-Risk Assumptions for External Contract Interfaces
+
+- **External contract interface changes:** The contracts trust the addresses
+  stored during `initialize()`. If a downstream contract is upgraded or
+  replaced at the same address, its behavior may differ, and the protocol's
+  atomicity guarantees no longer apply. This is why the admin key must be
+  protected with multi-sig (see [Centralization Risks](#centralization-risks)).
+
+- **Upgrade-induced behavior changes:** When a contract is upgraded via
+  `env.deployer().update_current_contract_wasm`, the new Wasm must maintain
+  the same storage layout and atomicity guarantees. An upgrade that changes
+  the rollback behavior can introduce state corruption across the
+  invoice-pool-escrow chain.
+
+- **Mock/test escrow in tests:** Tests use mock escrows (e.g.,
+  `MockFailingEscrowDefault`) that panic on `handle_default`. The pool's
+  `handle_default` function checks the return value and aborts the default
+  if the escrow returns `false`, ensuring no partial state changes.
+
+---
+
 ## Centralization Risks
 
 | Risk | Current State | Planned Mitigation |

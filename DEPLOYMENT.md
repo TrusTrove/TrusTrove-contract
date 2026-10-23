@@ -10,7 +10,8 @@ smart contracts on Stellar.
 |------|---------|---------|
 | Rust | 1.85.0 | `rustup toolchain install 1.85.0` |
 | wasm32v1-none target | — | `rustup target add wasm32v1-none --toolchain 1.85.0` |
-| Stellar CLI | latest | See [Stellar CLI docs](https://github.com/stellar/stellar-cli) |
+| Soroban SDK | 23.5.3 (protocol 23) | Pinned in `Cargo.toml`; nothing to install |
+| Stellar CLI | v23 or newer (protocol 23 support) | See [Stellar CLI docs](https://github.com/stellar/stellar-cli) |
 | jq | latest | Required by `scripts/maintainer/update-readme-addresses.sh`, run automatically at the end of `deploy.sh`. See [jq docs](https://jqlang.github.io/jq/download/) |
 
 The repo ships `rust-toolchain.toml` pinning channel `1.85.0` and
@@ -271,11 +272,51 @@ Or on Windows (PowerShell):
 powershell ./scripts/verify.ps1
 ```
 
-This checks each contract responds to a read-only query
-(`get_admin`, `get_counts`, `get_stats`, `get_locked`) and that the
+This checks every initialized contract's on-chain `get_admin` equals the
+deployer address (see [Front-run Initialization
+Detection](#front-run-initialization-detection-issue-825) below) and that
+each contract responds to a read-only query
+(`get_admin`, `get_counts`, `get_stats`, `get_locked`), and that the
 invoice contract's post-deploy wiring is in place
 (`get_escrow_contract`, `get_agent_registry_contract`,
 `is_supported_asset`).
+
+## Front-run Initialization Detection (Issue #825)
+
+Every contract's `initialize` only requires auth from the `admin` address
+passed as an argument, so between `deploy.sh`'s *deploy* transaction and its
+*initialize* transaction anyone can initialize a freshly deployed,
+not-yet-initialized contract with **their own** admin. Our initialize then
+fails with `AlreadyInitialized` — and the attacker owns the admin slot.
+Because deploy and initialize are separate transactions, this window always
+exists; `deploy.sh` therefore detects it two ways:
+
+1. `invoke_init` distinguishes an `AlreadyInitialized` failure ("already
+   initialized — possibly by someone else; rerunning cannot fix it") from
+   transient errors ("rerun will retry").
+2. After every `initialize` step, `verify_admin` reads `get_admin` back from
+   the contract and **aborts the deployment** unless it equals the deployer
+   address resolved from `DEPLOYER_ACCOUNT`. `scripts/verify.sh` performs
+   the same comparison for the registry, invoice, both pools, and both
+   escrows (`verify_admin_match`), so a resumed or previously-deployed
+   setup can be re-audited at any time.
+
+If you see `POSSIBLE FRONT-RUN INITIALIZATION`:
+
+1. Do **not** use those addresses — the admin (and every later admin-gated
+   operation: wiring, upgrades, pausing) belongs to whoever initialized
+   first.
+2. Redeploy the affected contracts from a clean state:
+   `./scripts/deploy.sh --fresh` (or `--only <contract>` per contract).
+   `--fresh` wipes `.deployed-addresses`, so deploy *and* initialize run
+   again against new instances; the post-initialize `get_admin` assertion
+   runs again automatically.
+3. Re-run `bash scripts/verify.sh` and confirm every
+   `[PASS] <contract> admin is the deployer` line before wiring anything
+   downstream.
+
+Permanent fix tracked separately (constructor-based initialization); this
+detection is the interim control.
 
 You can also verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet).
 

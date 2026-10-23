@@ -17,6 +17,11 @@ ignore = [
   # upstream replacement available to this workspace, and upgrading is gated
   # on soroban-sdk.
   { id = "RUSTSEC-2024-0436", reason = "transitive via soroban-sdk; unmaintained, not vulnerable" },
+  # derivative is an unmaintained derive helper reached only through
+  # soroban-env-host 23.0.1 -> ark-ff / ark-ec 0.4.2. RUSTSEC-2024-0388 states
+  # explicitly that no safe upgrade is available (upstream is archived), so the
+  # only route out is an upstream ark-* release picked up by soroban-env-host.
+  { id = "RUSTSEC-2024-0388", reason = "transitive via soroban-env-host 23.0.1 -> ark-ff/ark-ec; no fixed version exists" },
 ]
 
 [licenses]
@@ -40,15 +45,29 @@ confidence-threshold = 0.8
 
 [bans]
 # Fail if two versions of the same third-party crate ever enter the graph.
-# The current lockfile resolves to a single version of every external crate,
-# so this stays a hard gate.
+# Kept as a hard gate: the entries below are the complete, justified set of
+# duplicates the soroban-sdk 21 -> 23 upgrade cannot unify, so anything new
+# still fails.
 multiple-versions = "deny"
-# Pre-existing transitive duplicates that cannot be unified without an
-# upstream release; skipping them keeps the check failing on anything new.
+# Transitive duplicates that cannot be unified without an upstream release.
 skip = [
   # soroban-sdk -> bytes-lit still requires syn 2, while a newer dependency
   # tree resolves syn 3. Both are proc-macro-only builds.
   { crate = "syn@2.0.117", reason = "pinned by bytes-lit via soroban-sdk; syn 3 is also in the graph" },
+  # ark-ff-asm 0.4.2 (via soroban-env-host 23.0.1) is still on syn 1.
+  { crate = "syn@1.0.109", reason = "pinned by ark-ff-asm 0.4.2 via soroban-env-host; proc-macro only" },
+  # soroban-sdk-macros 23.5.3 pins darling 0.20 while serde_with 3.17 (also
+  # pulled in by soroban-sdk) resolves darling 0.21. darling_core and
+  # darling_macro follow the same split as their parent.
+  { crate = "darling@0.20.11", reason = "pinned by soroban-sdk-macros 23.5.3; serde_with 3.17 requires 0.21" },
+  { crate = "darling_core@0.20.11", reason = "same darling 0.20/0.21 split as darling" },
+  { crate = "darling_macro@0.20.11", reason = "same darling 0.20/0.21 split as darling" },
+  # ark-ec 0.4.2 (via soroban-env-host 23.0.1) is on hashbrown 0.13 while the
+  # rest of the graph resolves 0.14.
+  { crate = "hashbrown@0.13.2", reason = "pinned by ark-ec 0.4.2 via soroban-env-host; 0.14 is also in the graph" },
+  # soroban-env-host and stellar-xdr 23.0 pin stellar-strkey 0.0.13 while
+  # soroban-sdk 23.5.3 moved to 0.0.16; unifying requires an env-host release.
+  { crate = "stellar-strkey@0.0.13", reason = "pinned by soroban-env-host + stellar-xdr 23.0; soroban-sdk 23.5.3 uses 0.0.16" },
 ]
 # Wildcard requirements are allowed only because every workspace crate is
 # referenced by path with no version requirement (`{ path = "../pause" }` or

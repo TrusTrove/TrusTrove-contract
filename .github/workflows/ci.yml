@@ -86,8 +86,14 @@ jobs:
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
 
-      - name: Test
+      - name: Test (default features)
         run: cargo test --workspace
+
+      - name: Test (all features)
+        run: cargo test --workspace --all-features
+
+      - name: Build documentation (warnings as errors)
+        run: cargo doc --workspace --no-deps --all-features
 
       - name: Check wasm size budget
         run: |
