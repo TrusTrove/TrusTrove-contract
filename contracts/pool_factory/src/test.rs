@@ -5,7 +5,9 @@ use std::process::Command;
 use std::sync::OnceLock;
 
 use soroban_sdk::{
-    testutils::{Address as _, Events as _, Ledger as _},
+    testutils::{
+        storage::Instance as _, storage::Persistent as _, Address as _, Events as _, Ledger as _,
+    },
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, Map, String, Symbol, TryFromVal,
 };
@@ -431,7 +433,7 @@ fn test_register_existing_pool() {
         let stored_pool: Address = te
             .env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::PoolForAsset(te.asset.clone()))
             .unwrap();
         assert_eq!(stored_pool, pool_address);
@@ -447,7 +449,7 @@ fn test_register_existing_pool() {
         let indexed_asset: Address = te
             .env
             .storage()
-            .instance()
+            .persistent()
             .get(&DataKey::AssetIndex(0))
             .unwrap();
         assert_eq!(indexed_asset, te.asset);
@@ -1013,4 +1015,208 @@ fn test_get_aggregate_stats_skips_pool_when_stats_call_fails() {
     let aggregate = te.factory.get_aggregate_stats();
     assert_eq!(aggregate.len(), 1);
     assert_eq!(aggregate.get(0).unwrap().0, valid_pool);
+}
+
+// --------------- ISSUE #866: instance TTL + persistent per-asset registry ---------------
+// Before #866 the factory never extended any TTL and its per-asset registry
+// (`AssetIndex(u32)` / `PoolForAsset(Address)`) lived in instance storage, so
+// every registered asset grew the single instance ledger entry. The fix keeps
+// the registry in persistent storage (own entry, own TTL, refreshed on read)
+// and extends the instance TTL on every state-changing entry point. Reads
+// lazily migrate pre-#866 instance-storage copies so a deployed factory never
+// forgets a pool it registered.
+
+/// Simulates deployed state written by a pre-#866 build: the registry keys
+/// exist ONLY in the instance map. Reads must still resolve them (lazy
+/// migration), write them through to persistent storage, and drop the
+/// instance copy so it stops inflating the instance ledger entry.
+#[test]
+fn test_legacy_instance_registry_is_resolved_and_migrated_on_read() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let factory_id = env.register_contract(None, PoolFactoryContract);
+    let factory_client = PoolFactoryContractClient::new(&env, &factory_id);
+
+    let admin = Address::generate(&env);
+    factory_client.initialize(&admin);
+
+    let asset = Address::generate(&env);
+    let legacy_pool = Address::generate(&env);
+    env.as_contract(&factory_id, || {
+        env.storage().instance().set(&DataKey::AssetCount, &1u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::AssetIndex(0), &asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::PoolForAsset(asset.clone()), &legacy_pool);
+    });
+
+    // The pool registered under the OLD location is still resolvable.
+    assert_eq!(
+        factory_client.get_pool_for_asset(&asset),
+        Some(legacy_pool.clone())
+    );
+
+    // ...and the read migrated it: present in persistent, gone from instance.
+    env.as_contract(&factory_id, || {
+        assert!(env
+            .storage()
+            .persistent()
+            .has(&DataKey::PoolForAsset(asset.clone())));
+        assert!(!env
+            .storage()
+            .instance()
+            .has(&DataKey::PoolForAsset(asset.clone())));
+    });
+
+    // list_assets migrates the index entry through the same fallback.
+    let assets = factory_client.list_assets();
+    assert_eq!(assets.len(), 1);
+    assert_eq!(assets.get(0), Some(asset.clone()));
+    env.as_contract(&factory_id, || {
+        assert!(env.storage().persistent().has(&DataKey::AssetIndex(0)));
+        assert!(!env.storage().instance().has(&DataKey::AssetIndex(0)));
+    });
+}
+
+/// The duplicate-registration guard must see legacy instance mappings too, so
+/// an asset that only still exists in the old location cannot be registered a
+/// second time and silently repointed at a new pool.
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_register_existing_pool_rejects_asset_with_legacy_instance_mapping() {
+    let te = setup();
+    let legacy_asset = Address::generate(&te.env);
+    let legacy_pool = Address::generate(&te.env);
+    te.env.as_contract(&te.factory_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::PoolForAsset(legacy_asset.clone()), &legacy_pool);
+    });
+    te.factory
+        .register_existing_pool(&legacy_asset, &Address::generate(&te.env));
+}
+
+/// #866: registering an asset puts the per-asset entries in persistent storage
+/// with their own extended TTL, and leaves the instance map free of any
+/// per-asset key - the instance entry no longer grows per registered asset.
+#[test]
+fn test_registry_entries_live_in_persistent_with_own_ttl() {
+    let te = setup();
+    let pool = register_asset(&te, &te.asset.clone());
+
+    te.env.as_contract(&te.factory_id, || {
+        assert!(!te
+            .env
+            .storage()
+            .instance()
+            .has(&DataKey::PoolForAsset(te.asset.clone())));
+        assert!(!te.env.storage().instance().has(&DataKey::AssetIndex(0)));
+
+        let pool_ttl: u32 = te
+            .env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::PoolForAsset(te.asset.clone()));
+        let index_ttl: u32 = te
+            .env
+            .storage()
+            .persistent()
+            .get_ttl(&DataKey::AssetIndex(0));
+        assert!(
+            pool_ttl >= crate::TTL_THRESHOLD,
+            "write path should extend PoolForAsset ttl, got {pool_ttl}"
+        );
+        assert!(
+            index_ttl >= crate::TTL_THRESHOLD,
+            "write path should extend AssetIndex ttl, got {index_ttl}"
+        );
+    });
+    assert_ne!(pool, te.asset);
+}
+
+/// #866 AC: driving the ledger so the factory instance TTL falls below
+/// `TTL_THRESHOLD` and then registering a pool must bump it back toward
+/// `TTL_EXTEND_TO` (previously no factory call extended any TTL at all; the
+/// `ttl_before >= TTL_THRESHOLD` check below is itself the delta against the
+/// old code, where `initialize` left the instance at its ~4096 default).
+///
+/// Uses `register_existing_pool` rather than `register_asset` for the bump:
+/// the drain jump archives the test-uploaded pool Wasm *code* entry
+/// (test-host-only artifact; production has no jumps), which `deploy` reads.
+/// The existing-pool path registers through the same `record_pool` write and
+/// touches only mock-registered contracts, whose code entries survive.
+#[test]
+fn test_register_existing_pool_extends_instance_ttl_when_below_threshold() {
+    let te = setup();
+    let pool = new_initialized_pool(&te, &te.asset);
+
+    let ttl_before: u32 = te
+        .env
+        .as_contract(&te.factory_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_before >= crate::TTL_THRESHOLD,
+        "setup()'s initialize should already extend the instance ttl, got {ttl_before}"
+    );
+
+    // Advance the ledger until only 100 ledgers remain: below the threshold,
+    // but still alive, so the call itself does not fail with StorageExpired.
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + ttl_before - 100);
+    let ttl_drained: u32 = te
+        .env
+        .as_contract(&te.factory_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_drained < crate::TTL_THRESHOLD,
+        "instance ttl should be below threshold after drain, got {ttl_drained}"
+    );
+
+    te.factory.register_existing_pool(&te.asset, &pool);
+
+    let ttl_after: u32 = te
+        .env
+        .as_contract(&te.factory_id, || te.env.storage().instance().get_ttl());
+    assert!(
+        ttl_after >= 1_999_000,
+        "register_existing_pool should extend the instance ttl close to EXTEND_TO, got {ttl_after}"
+    );
+}
+
+/// #866 AC: `get_pool_for_asset` is the documented read-refresh path - a hit
+/// extends the registry entry's TTL back toward `TTL_EXTEND_TO` even when no
+/// write happened.
+#[test]
+fn test_get_pool_for_asset_refreshes_persistent_ttl_on_read() {
+    let te = setup();
+    let pool = register_asset(&te, &te.asset.clone());
+    let key = DataKey::PoolForAsset(te.asset.clone());
+
+    let ttl_before: u32 = te.env.as_contract(&te.factory_id, || {
+        te.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(ttl_before >= crate::TTL_THRESHOLD);
+
+    te.env
+        .ledger()
+        .set_sequence_number(te.env.ledger().sequence() + ttl_before - 100);
+    let ttl_drained: u32 = te.env.as_contract(&te.factory_id, || {
+        te.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl_drained < crate::TTL_THRESHOLD,
+        "entry ttl should be below threshold after ledger drain, got {ttl_drained}"
+    );
+
+    assert_eq!(te.factory.get_pool_for_asset(&te.asset), Some(pool));
+
+    let ttl_after: u32 = te.env.as_contract(&te.factory_id, || {
+        te.env.storage().persistent().get_ttl(&key)
+    });
+    assert!(
+        ttl_after >= 1_999_000,
+        "read should refresh registry entry ttl, got {ttl_after}"
+    );
 }
