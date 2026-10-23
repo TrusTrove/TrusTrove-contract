@@ -1,3 +1,9 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
 pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
@@ -125,5 +131,16 @@ pub fn allowance_approved(
     env.events().publish(
         (Symbol::new(env, "allowance_approved"), from.clone()),
         (spender.clone(), amount, expiration_ledger),
+    );
+}
+
+/// Emitted by `set_min_discount` when the admin changes the pool's minimum
+/// discount floor (issue #829), mirroring `protocol_fee_updated`: the old
+/// value is included so an indexer can report what changed rather than only
+/// what it changed to. A rejected change emits nothing.
+pub fn min_discount_updated(env: &Env, old_min_bps: u32, new_min_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "min_discount_updated"),),
+        (old_min_bps, new_min_bps),
     );
 }

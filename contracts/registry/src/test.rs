@@ -20,7 +20,7 @@ use soroban_sdk::{
 fn setup() -> (Env, RegistryContractClient<'static>) {
     let env = Env::default();
     env.mock_all_auths();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
     (env, client)
 }
@@ -30,11 +30,12 @@ fn test_initialize() {
     let (env, client) = setup();
     let admin = Address::generate(&env);
     client.initialize(&admin);
-    assert_eq!(client.get_admin(), admin);
-
-    // Assert the contract_initialized event was emitted
+    // Assert the contract_initialized event was emitted. Capture before the
+    // get_admin query: sdk >=22 test Envs reset the event buffer at every
+    // top-level invocation.
     let all_events = env.events().all();
     assert_eq!(all_events.len(), 1);
+    assert_eq!(client.get_admin(), admin);
 }
 
 #[test]
@@ -173,6 +174,7 @@ fn test_revoke_already_revoked_returns_true_no_reemit() {
 
     // First revoke transitions Pending to Revoked.
     let result = client.revoke(&issuer);
+    let events_first_revoke = env.events().all();
     assert!(result);
     assert!(!client.is_verified(&issuer));
     assert_eq!(
@@ -183,13 +185,23 @@ fn test_revoke_already_revoked_returns_true_no_reemit() {
     // Second revoke on already-unverified profile — should succeed
     // without panic and without altering state.
     let result2 = client.revoke(&issuer);
+    let events_second_revoke = env.events().all();
     assert!(result2);
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
         VerificationStatus::Revoked
     );
-    assert_eq!(count_events_named(&env, "address_revoked"), 1);
+    // soroban-sdk 22+ exposes only the last invocation's events, so the
+    // transition and the no-op are each counted from their own capture.
+    assert_eq!(
+        count_named_in(&env, &events_first_revoke, "address_revoked"),
+        1
+    );
+    assert_eq!(
+        count_named_in(&env, &events_second_revoke, "address_revoked"),
+        0
+    );
 }
 
 #[test]
@@ -206,7 +218,7 @@ fn test_revoke_unregistered_panics() {
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_revoke_wrong_auth_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -287,32 +299,14 @@ fn test_reinstate_restores_verified_and_emits_event() {
 
     let result = client.reinstate(&issuer);
     assert!(result);
+    let events_after_call = env.events().all();
     assert!(client.is_verified(&issuer));
 
+    // sdk >=22: the buffer holds exactly the reinstate call's own events.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "profile_verified"), issuer.clone()).into_val(&env),
-                true.into_val(&env),
-            ),
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "address_revoked"), issuer.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "address_reinstated"), issuer.clone()).into_val(&env),
@@ -326,7 +320,7 @@ fn test_reinstate_restores_verified_and_emits_event() {
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_reinstate_wrong_auth_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -372,16 +366,17 @@ fn test_reinstate_on_pending_profile_does_not_verify() {
     // The profile is Pending: never verified, never revoked. `reinstate` is
     // the inverse of `revoke` and must not act as an undocumented alternate
     // path to verify a Pending profile (#606).
-    let events_before = env.events().all().len();
     let result = client.reinstate(&issuer);
     assert!(result);
+    let events_after_call = env.events().all();
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
         VerificationStatus::Pending
     );
-    // No `address_reinstated` event and no other emission: the call is a no-op.
-    assert_eq!(env.events().all().len(), events_before);
+    // No `address_reinstated` event and no other emission: the call is a
+    // no-op. sdk >=22 buffers only this call's own events.
+    assert_eq!(events_after_call.len(), 0);
 }
 
 #[test]
@@ -395,14 +390,15 @@ fn test_reinstate_on_verified_profile_is_idempotent_noop() {
 
     // Already Verified (never revoked): reinstate must not rewrite storage or
     // re-emit `address_reinstated`, mirroring `revoke`'s idempotency guard (#606).
-    let events_before = env.events().all().len();
     assert!(client.reinstate(&issuer));
+    let events_after_call = env.events().all();
     assert!(client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
         VerificationStatus::Verified
     );
-    assert_eq!(env.events().all().len(), events_before);
+    // Idempotent no-op: the reinstate call emits nothing of its own.
+    assert_eq!(events_after_call.len(), 0);
 }
 
 // ============== REINSTATE STATE CONSTRAINTS AND EVENT BEHAVIOR (#983) ==============
@@ -423,17 +419,19 @@ fn assert_profiles_equivalent(before: &Profile, after: &Profile) {
     assert_eq!(after.metadata, before.metadata);
 }
 
+/// Events captured from a single top-level invocation.
+type CapturedEvents = Vec<(Address, Vec<Val>, Val)>;
+
 /// Counts the events whose first topic symbol is `name`.
 ///
 /// Used to assert how many times a specific event was published, which the
 /// "no event" and "exactly one event" assertions below need. The topic is
 /// decoded back into a `Symbol` because `Val` itself is not comparable.
-fn count_events_named(env: &Env, name: &str) -> u32 {
+fn count_named_in(env: &Env, events: &CapturedEvents, name: &str) -> u32 {
     let expected = Symbol::new(env, name);
-    let all_events = env.events().all();
     let mut count = 0u32;
-    for i in 0..all_events.len() {
-        let event = all_events.get(i).expect("event index in range");
+    for i in 0..events.len() {
+        let event = events.get(i).expect("event index in range");
         let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
             Ok(t) => t,
             Err(_) => continue,
@@ -450,6 +448,14 @@ fn count_events_named(env: &Env, name: &str) -> u32 {
         }
     }
     count
+}
+
+/// `count_named_in` over whatever the Env currently exposes: the events of the
+/// last top-level invocation only. Since soroban-sdk 22 the buffer is reset
+/// before every call, so a test that spans several calls has to capture with
+/// `env.events().all()` right after the call it is measuring.
+fn count_events_named(env: &Env, name: &str) -> u32 {
+    count_named_in(env, &env.events().all(), name)
 }
 
 /// A `reinstate` call against a `Pending` profile is rejected as a state
@@ -690,13 +696,18 @@ fn test_reinstate_emits_exactly_one_address_reinstated_event() {
     // Revoking does not reinstate anything.
     assert_eq!(count_events_named(&env, "address_reinstated"), 0);
 
+    // sdk >=22 test Envs reset the event buffer at every top-level
+    // invocation, so each assertion below inspects the buffer of the call it
+    // just made, rather than a cumulative stream. The "exactly once per real
+    // transition" property is preserved: the reinstate that changes state
+    // emits one, the no-op reinstate emits none of its own.
     assert!(client.reinstate(&issuer));
     assert_eq!(count_events_named(&env, "address_reinstated"), 1);
 
     // The profile is `Verified` now, so the second call takes the no-op path
     // and must not publish a second event.
     assert!(client.reinstate(&issuer));
-    assert_eq!(count_events_named(&env, "address_reinstated"), 1);
+    assert_eq!(count_events_named(&env, "address_reinstated"), 0);
 }
 
 #[test]
@@ -743,7 +754,7 @@ fn test_update_metadata_unregistered_panics() {
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_update_metadata_wrong_auth_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
 
     let issuer = Address::generate(&env);
@@ -970,26 +981,18 @@ fn test_update_profile_happy_path() {
     ];
     let result = client.update_profile(&issuer, &updated_metadata);
     assert!(result);
+    let events_after_call = env.events().all();
 
     let profile = client.get_profile(&issuer);
     assert_eq!(profile.metadata, updated_metadata);
     assert_eq!(profile.role(), crate::Role::Issuer);
     assert!(!profile.verified());
 
+    // sdk >=22: only the update_profile call's own events are buffered.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "profile_updated"), issuer.clone()).into_val(&env),
@@ -1003,7 +1006,7 @@ fn test_update_profile_happy_path() {
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_update_profile_wrong_auth_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
 
     let issuer = Address::generate(&env);
@@ -1065,7 +1068,7 @@ fn test_duplicate_registration_panics() {
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_register_issuer_then_buyer_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1093,19 +1096,16 @@ fn test_register_issuer_then_buyer_panics() {
         },
     }]);
     client.register_issuer(&issuer, &metadata);
+    let events_after_call = env.events().all();
 
     assert!(!client.is_verified(&issuer));
     assert_eq!(client.get_profile(&issuer).role(), Role::Issuer);
 
+    // sdk >=22: the register call's own buffer holds exactly its event.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
@@ -1130,7 +1130,7 @@ fn test_register_issuer_then_buyer_panics() {
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_register_buyer_then_issuer_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1158,19 +1158,16 @@ fn test_register_buyer_then_issuer_panics() {
         },
     }]);
     client.register_buyer(&buyer, &metadata);
+    let events_after_call = env.events().all();
 
     assert!(!client.is_verified(&buyer));
     assert_eq!(client.get_profile(&buyer).role(), Role::Buyer);
 
+    // sdk >=22: the register call's own buffer holds exactly its event.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "buyer_registered"), buyer.clone()).into_val(&env),
@@ -2422,7 +2419,7 @@ fn test_transfer_admin_changes_admin() {
 #[test]
 fn test_transfer_admin_bypasses_transfer_ownership_dual_auth() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, RegistryContract);
+    let contract_id = env.register(RegistryContract, ());
     let client = RegistryContractClient::new(&env, &contract_id);
     let admin = Address::generate(&env);
     let new_admin = Address::generate(&env);
@@ -2488,15 +2485,11 @@ fn test_transfer_admin_emits_event() {
     let new_admin = Address::generate(&env);
     client.initialize(&admin);
     client.transfer_admin(&new_admin);
+    // sdk >=22: the buffer holds exactly the transfer_admin call's events.
     assert_eq!(
         env.events().all(),
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "admin_transferred"), admin.clone()).into_val(&env),
@@ -2923,6 +2916,9 @@ fn test_register_issuer_emits_event() {
     let issuer = Address::generate(&env);
 
     client.register_issuer(&issuer, &map![&env]);
+    // Capture before the is_verified query: sdk >=22 test Envs reset the
+    // event buffer at every top-level invocation.
+    let events_after_call = env.events().all();
 
     // State after: the issuer is registered but not yet verified.
     assert!(!client.is_verified(&issuer));
@@ -2930,14 +2926,9 @@ fn test_register_issuer_emits_event() {
     // Registration emits exactly one `issuer_registered` event carrying the
     // issuer address in the topics and an empty data payload.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
@@ -2955,6 +2946,9 @@ fn test_register_buyer_emits_event() {
     let buyer = Address::generate(&env);
 
     client.register_buyer(&buyer, &map![&env]);
+    // Capture before the is_verified query: sdk >=22 test Envs reset the
+    // event buffer at every top-level invocation.
+    let events_after_call = env.events().all();
 
     // State after: the buyer is registered but not yet verified.
     assert!(!client.is_verified(&buyer));
@@ -2962,14 +2956,9 @@ fn test_register_buyer_emits_event() {
     // Registration emits exactly one `buyer_registered` event carrying the
     // buyer address in the topics and an empty data payload.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "buyer_registered"), buyer.clone()).into_val(&env),
@@ -2989,30 +2978,18 @@ fn test_revoke_emits_event() {
     client.verify_profile(&admin, &issuer, &true);
 
     client.revoke(&issuer);
+    // Capture before the is_verified query: sdk >=22 test Envs reset the
+    // event buffer at every top-level invocation.
+    let events_after_call = env.events().all();
 
     // State after: verification has been revoked.
     assert!(!client.is_verified(&issuer));
 
-    // The full event stream: registration, admin verification, then revoke.
+    // The revoke call emits exactly one `address_revoked` event.
     assert_eq!(
-        env.events().all(),
+        events_after_call,
         vec![
             &env,
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "contract_initialized"), admin.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
-                ().into_val(&env),
-            ),
-            (
-                client.address.clone(),
-                (Symbol::new(&env, "profile_verified"), issuer.clone()).into_val(&env),
-                true.into_val(&env),
-            ),
             (
                 client.address.clone(),
                 (Symbol::new(&env, "address_revoked"), issuer.clone()).into_val(&env),
@@ -3511,10 +3488,16 @@ fn batch_entry_plan() -> impl Strategy<Value = BatchEntryPlan> {
     })
 }
 
-/// Asserts that the most recent `batch_registered` event carries exactly
-/// `expected_registered` and `expected_skipped` in its data payload.
-fn assert_batch_event_counts(env: &Env, expected_registered: u32, expected_skipped: u32) {
-    let all_events = env.events().all();
+/// Asserts that the `batch_registered` event carried by the batch call's own
+/// per-invocation event buffer (captured by the caller and passed in — sdk
+/// 22+ test Envs clear their buffer at every top-level invocation) carries
+/// exactly `expected_registered` and `expected_skipped` in its data payload.
+fn assert_batch_event_counts(
+    env: &Env,
+    all_events: &Vec<(Address, Vec<Val>, Val)>,
+    expected_registered: u32,
+    expected_skipped: u32,
+) {
     let mut found = false;
     for i in (0..all_events.len()).rev() {
         let event = all_events.get(i).expect("event index in range");
@@ -3588,6 +3571,7 @@ fn run_batch_register_prop_test(is_buyer: bool) {
                 } else {
                     client.batch_register_issuers(&entries)
                 };
+                let batch_events = env.events().all();
 
                 // Recompute the expected outcome from the plan.
                 let mut seen = std::collections::HashSet::new();
@@ -3641,7 +3625,12 @@ fn run_batch_register_prop_test(is_buyer: bool) {
                 }
 
                 // The emitted batch event carries the same counts.
-                assert_batch_event_counts(&env, expected_registered, expected_skipped.len());
+                assert_batch_event_counts(
+                    &env,
+                    &batch_events,
+                    expected_registered,
+                    expected_skipped.len(),
+                );
 
                 Ok(())
             },
@@ -3861,8 +3850,8 @@ fn test_transfer_ownership_blocked_while_paused() {
 fn test_pause_is_scoped_to_one_instance() {
     let env = Env::default();
     env.mock_all_auths();
-    let id_a = env.register_contract(None, RegistryContract);
-    let id_b = env.register_contract(None, RegistryContract);
+    let id_a = env.register(RegistryContract, ());
+    let id_b = env.register(RegistryContract, ());
     let admin = Address::generate(&env);
     let a = RegistryContractClient::new(&env, &id_a);
     let b = RegistryContractClient::new(&env, &id_b);
@@ -3910,9 +3899,10 @@ fn test_set_verifier_stores_and_emits_event() {
 
     let verifier = Address::generate(&env);
     client.set_verifier(&verifier);
-    assert_eq!(client.get_verifier(), Some(verifier.clone()));
-
+    // Capture before the get_verifier query: sdk >=22 test Envs reset the
+    // event buffer at every top-level invocation.
     let last = env.events().all().last().unwrap();
+    assert_eq!(client.get_verifier(), Some(verifier.clone()));
     assert_eq!(
         vec![&env, last],
         vec![
@@ -4163,9 +4153,13 @@ fn test_upgrade_before_initialize_panics() {
 
 /// Data payloads of every `profile_verified` event emitted for `address`, in
 /// emission order.
-fn profile_verified_payloads(env: &Env, address: &Address) -> std::vec::Vec<bool> {
+fn profile_verified_payloads(
+    env: &Env,
+    events: &Vec<(Address, Vec<Val>, Val)>,
+    address: &Address,
+) -> std::vec::Vec<bool> {
     let mut out = std::vec::Vec::new();
-    for event in env.events().all().iter() {
+    for event in events.iter() {
         let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
             Ok(t) => t,
             Err(_) => continue,
@@ -4208,6 +4202,7 @@ fn test_verify_profile_maintains_verified_and_revoked_flags() {
 
     // verify=true -> Verified, revoked cleared.
     client.verify_profile(&admin, &issuer, &true);
+    let events_after_verify = env.events().all();
     let verified = client.get_profile(&issuer);
     assert!(verified.verified());
     assert!(!verified.revoked());
@@ -4217,10 +4212,14 @@ fn test_verify_profile_maintains_verified_and_revoked_flags() {
         client.get_verification_status(&issuer),
         VerificationStatus::Verified
     );
-    assert_eq!(profile_verified_payloads(&env, &issuer), [true]);
+    assert_eq!(
+        profile_verified_payloads(&env, &events_after_verify, &issuer),
+        [true]
+    );
 
     // verify=false -> Revoked, verified cleared.
     client.verify_profile(&admin, &issuer, &false);
+    let events_after_unverify = env.events().all();
     let revoked = client.get_profile(&issuer);
     assert!(!revoked.verified());
     assert!(revoked.revoked());
@@ -4230,7 +4229,11 @@ fn test_verify_profile_maintains_verified_and_revoked_flags() {
         client.get_verification_status(&issuer),
         VerificationStatus::Revoked
     );
-    assert_eq!(profile_verified_payloads(&env, &issuer), [true, false]);
+    // Each call's own buffer carries only its own event (sdk >=22).
+    assert_eq!(
+        profile_verified_payloads(&env, &events_after_unverify, &issuer),
+        [false]
+    );
 }
 
 // #987: repeated verify_profile calls are INTENTIONAL AUDIT EVENTS, not
@@ -4246,28 +4249,45 @@ fn test_verify_profile_repeated_call_is_an_audit_event() {
     client.register_issuer(&issuer, &map![&env]);
 
     client.verify_profile(&admin, &issuer, &true);
+    let events_after_first = env.events().all();
     let after_first = client.get_profile(&issuer);
     assert!(client.verify_profile(&admin, &issuer, &true));
+    let events_after_second = env.events().all();
     let after_second = client.get_profile(&issuer);
 
     // Storage: unchanged by the repeat.
     assert_eq!(after_first.packed_flags, after_second.packed_flags);
     assert_eq!(after_first.registered_at, after_second.registered_at);
     assert_eq!(after_first.metadata, after_second.metadata);
-    // Events: one per call, not de-duplicated.
-    assert_eq!(profile_verified_payloads(&env, &issuer), [true, true]);
+    // Events: one per call, not de-duplicated. sdk >=22 exposes only each
+    // call's own buffer, so each repeat call is checked against its own
+    // capture — together they prove two distinct audit events were emitted.
+    assert_eq!(
+        profile_verified_payloads(&env, &events_after_first, &issuer),
+        [true]
+    );
+    assert_eq!(
+        profile_verified_payloads(&env, &events_after_second, &issuer),
+        [true]
+    );
 
     // Same rule in the un-verify direction.
     client.verify_profile(&admin, &issuer, &false);
+    let events_after_unverify1 = env.events().all();
     let revoked_first = client.get_profile(&issuer);
     client.verify_profile(&admin, &issuer, &false);
+    let events_after_unverify2 = env.events().all();
     assert_eq!(
         client.get_profile(&issuer).packed_flags,
         revoked_first.packed_flags
     );
     assert_eq!(
-        profile_verified_payloads(&env, &issuer),
-        [true, true, false, false]
+        profile_verified_payloads(&env, &events_after_unverify1, &issuer),
+        [false]
+    );
+    assert_eq!(
+        profile_verified_payloads(&env, &events_after_unverify2, &issuer),
+        [false]
     );
 }
 
@@ -4293,12 +4313,13 @@ fn test_batch_register_issuers_duplicate_accounting_and_event_counts() {
         (unique.clone(), map![&env]),
     ];
     let skipped = client.batch_register_issuers(&entries);
+    let batch_events = env.events().all();
 
     // The stored address is skipped first; the repeated address registers on
     // its first occurrence and is skipped on its second, so order follows the
     // input order.
     assert_eq!(skipped, vec![&env, existing.clone(), repeated.clone()]);
-    assert_batch_event_counts(&env, 2, 2);
+    assert_batch_event_counts(&env, &batch_events, 2, 2);
     assert_eq!(client.get_profile_count(&Role::Issuer), 3);
     assert_eq!(
         client.list_profiles(&Role::Issuer, &0, &10),
@@ -4394,7 +4415,13 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     );
     assert_eq!(count_events_named(&env, "address_revoked"), 0);
 
+    // soroban-sdk 22+ resets the event buffer before every top-level invocation,
+    // so the running total is accumulated from a count taken right after each
+    // revoke instead of read off a cumulative buffer.
+    let mut revoked_events = 0u32;
+
     assert!(client.revoke(&pending));
+    revoked_events += count_events_named(&env, "address_revoked");
     assert_eq!(
         client.get_verification_status(&pending),
         VerificationStatus::Revoked
@@ -4403,9 +4430,10 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     assert!(!pending_profile.verified());
     assert!(pending_profile.revoked());
     assert!(!client.is_verified(&pending));
-    assert_eq!(count_events_named(&env, "address_revoked"), 1);
+    assert_eq!(revoked_events, 1);
 
     assert!(client.revoke(&verified));
+    revoked_events += count_events_named(&env, "address_revoked");
     assert_eq!(
         client.get_verification_status(&verified),
         VerificationStatus::Revoked
@@ -4414,10 +4442,12 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     assert!(!verified_profile.verified());
     assert!(verified_profile.revoked());
     assert!(!client.is_verified(&verified));
-    assert_eq!(count_events_named(&env, "address_revoked"), 2);
+    assert_eq!(revoked_events, 2);
 
     assert!(client.revoke(&pending));
+    revoked_events += count_events_named(&env, "address_revoked");
     assert!(client.revoke(&verified));
+    revoked_events += count_events_named(&env, "address_revoked");
     assert_eq!(
         client.get_verification_status(&pending),
         VerificationStatus::Revoked
@@ -4426,5 +4456,5 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
         client.get_verification_status(&verified),
         VerificationStatus::Revoked
     );
-    assert_eq!(count_events_named(&env, "address_revoked"), 2);
+    assert_eq!(revoked_events, 2);
 }

@@ -296,7 +296,7 @@ impl EscrowContract {
         }
 
         let usdc = Self::usdc_client(&env);
-        usdc.transfer(&pool, &env.current_contract_address(), &(amount as i128));
+        usdc.transfer(&pool, env.current_contract_address(), &(amount as i128));
 
         let record = EscrowRecord {
             invoice_id: invoice_id.clone(),

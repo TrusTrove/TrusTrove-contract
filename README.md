@@ -24,7 +24,7 @@
     <img src="https://img.shields.io/codecov/c/github/TrusTrove/TrusTrove-contract?label=coverage" />
   </a>
   <img src="https://img.shields.io/badge/rust-1.85.0-orange" />
-  <img src="https://img.shields.io/badge/soroban--sdk-21.7.6-blueviolet" />
+  <img src="https://img.shields.io/badge/soroban--sdk-23.5.3-blueviolet" />
   <img src="https://img.shields.io/badge/network-Stellar%20Testnet-00c9a7" />
   <img src="https://img.shields.io/github/license/TrusTrove/TrusTrove-contract" />
 </p>
@@ -148,7 +148,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
-- Requires an active risk attestation from an authorized Underwrite agent.
+- Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -193,6 +193,8 @@ handle_default(invoice_id) → bool
 set_protocol_fee(fee_bps, treasury) → bool   ← admin only
 get_protocol_fee_bps() → u32
 get_treasury() → Address
+set_min_discount(bps) → bool               ← admin only, yield floor enforced in fund_invoice (#829)
+get_min_discount_bps() → u32
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
@@ -259,7 +261,7 @@ Pool ──[shares]──► LP
 The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
 
 
-Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
+Before listing, an Underwrite agent must sign an `AttestationPayload` (v2 layout: `domain_separator`, `invoice_id`, `contract_address`, `network_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`) off-chain with a secp256k1 key. `contract_address` and `network_id` bind the signature to one deployed invoice contract on one network, so attestations cannot replay across testnet/mainnet or redeploys (issue #822); `valid_until` (seconds, ledger timestamp) bounds how long the assessment unlocks listing (issue #823). Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice, and with `AttestationExpired` once the stored attestation's `valid_until` has passed. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
 
 ```
 No fund movement. Invoice status: Created → Listed.
@@ -312,6 +314,8 @@ Invoice status: → Repaid
 `repay_early` is restricted to `Confirmed` invoices strictly before `due_date`; `repay` accepts `Funded`, `Active`, or `Confirmed` at any time and also refunds the unearned discount before maturity. Partial installments accumulate in escrow and settle at the pool only when the final one clears the balance. See [Repayment Timing and Refund Math](./docs/LIMITATIONS.md#repayment-timing-and-refund-math) for the allowed statuses, formulas, and worked examples.
 
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
+
+**Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
@@ -369,12 +373,74 @@ Verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet)
 
 ---
 
-## Quick Start
+## Asset Decimals and Amount Conversion
+
+### Seven-Decimal USDC Assumption
+
+All contracts treat USDC as having **7 decimal places**: `1 USDC = 10_000_000 stroops`.
+This assumption is enforced at the contract level and is critical for correct
+amount interpretation.
+
+### Token Interface Amount Type
+
+All amount fields across the four contract crates use `u128` and are
+**denominated in stroops** (the base unit of the funding asset). The token
+client (e.g., `soroban_sdk::token::Client`) handles the conversion between
+human-readable units and stroops, but the contracts always work in stroops.
+
+Conversion rules:
+- **Human unit → stroops**: `amount_in_stroops = amount_in_human * 10_000_000`
+- **stroops → human unit**: `amount_in_human = amount_in_stroops / 10_000_000`
+- Rounding: integer division truncates (floor), so `1 stroop = 0.0000001 USDC`;
+the smallest representable human amount is `1 USDC = 10_000_000 stroops`.
+
+### Where Conversion Is Prohibited
+
+Conversion between human units and stroops must **not** be performed inside
+contract code. All contracts operate exclusively in stroops. Any conversion
+must happen off-chain (in wallet UI, indexer, or integration code). The
+contracts will reject amounts that would overflow `u128` or violate the
+protocol's arithmetic invariants.
+
+### Deployment and Test Examples
+
+The following examples show the same USDC amount expressed in both human
+units and stroops, for use in deployment scripts and test fixtures:
+
+| Human Amount | Stroops (u128) | Context |
+|-------------|----------------|---------|
+| `1 USDC` | `10_000_000` | `DEFAULT_MIN_INITIAL_DEPOSIT` in pool tests |
+| `100 USDC` | `1_000_000_000` | Typical test deposit amount |
+| `1_000_000 USDC` | `100_000_000_000_000` | Large deposit / share price testing |
+| `10_000_000 USDC` (1M) | `10_000_000_000_000_000` | Max test deposit |
+
+**Rust test example** (from `contracts/pool/src/test.rs`):
+
+```rust
+// Deposit 10_000_000_000 stroops (= 1000 USDC)
+let shares = te.pool.deposit(&te.lp, &10_000_000_000);
+```
+
+**Deployment example** (from `scripts/deploy.sh`):
+
+```bash
+# Fund the pool with 1_000_000 USDC (10_000_000_000_000 stroops)
+as_contract(&usdc_id, || {
+    env.storage().persistent().set(&lp_bal_key, &10_000_000_000_000_000i128);
+});
+```
+
+### Summary
+- USDC = 7 decimals → 1 USDC = 10_000_000 stroops
+- All contract amounts are `u128` in stroops
+- Convert human ↔ stroops off-chain only
+- Integer division truncates; smallest human unit = 1 USDC
+
 
 ### Prerequisites
 
 - Rust 1.85.0 (required — other versions either have WASM bugs or are blocked by Stellar CLI)
-- [Stellar CLI](https://github.com/stellar/stellar-cli) (latest)
+- [Stellar CLI](https://github.com/stellar/stellar-cli) v23 or newer (the contracts build against soroban-sdk 23 / protocol 23)
 - [jq](https://jqlang.github.io/jq/download/) (latest) — required by `scripts/maintainer/update-readme-addresses.sh`, which runs automatically at the end of `deploy.sh`
 
 ### 1. Install Rust 1.85.0
@@ -542,7 +608,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 3 | `NotAuthorized` | Caller lacks required authorization |
 | 4 | `IssuerNotVerified` | Issuer is not verified in the registry contract |
 | 5 | `BuyerNotVerified` | Buyer is not verified in the registry contract |
-| 6 | `InvalidFaceValue` | Face value is zero |
+| 6 | `InvalidFaceValue` | Face value below `MIN_FACE_VALUE` (dust, zero included) |
 | 7 | `InvalidDueDate` | Due date is in the past or exceeds maximum invoice lifetime |
 | 8 | `InvalidStatusTransition` | Status does not allow the requested operation |
 | 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
@@ -565,6 +631,8 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
 | 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
+| 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
+| 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |
 
 #### Pool Contract (`PoolError`)
 
