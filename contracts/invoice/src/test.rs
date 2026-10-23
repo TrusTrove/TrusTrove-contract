@@ -6684,3 +6684,38 @@ fn test_extend_issuer_and_buyer_index_duplicate_append_is_noop() {
         second
     );
 }
+
+#[test]
+fn test_add_supported_asset_twice_increments_count_once() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+    let before = client.get_supported_asset_count();
+
+    assert!(!client.is_supported_asset(&asset));
+    client.add_supported_asset(&asset);
+    client.add_supported_asset(&asset);
+
+    assert!(client.is_supported_asset(&asset));
+    assert_eq!(
+        client.get_supported_asset_count(),
+        before + 1,
+        "adding the same asset twice must increment the counter only once"
+    );
+}
+
+#[test]
+fn test_remove_supported_asset_twice_decrements_count_once() {
+    let (_env, client, _, _, _, usdc) = setup();
+    let before = client.get_supported_asset_count();
+
+    assert!(client.is_supported_asset(&usdc));
+    client.remove_supported_asset(&usdc);
+    client.remove_supported_asset(&usdc);
+
+    assert!(!client.is_supported_asset(&usdc));
+    assert_eq!(
+        client.get_supported_asset_count(),
+        before - 1,
+        "removing the same asset twice must decrement the counter only once"
+    );
+}
