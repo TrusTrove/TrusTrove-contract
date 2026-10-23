@@ -1,6 +1,10 @@
 #!/bin/bash
 # deploy.sh — Idempotent deployment script for TrusTrove contracts
 #
+# issue #827: every contract is deployed with its protocol `__constructor`
+# arguments, so a successful deploy is also a successful initialization —
+# there is no separate `initialize` transaction anymore.
+#
 # Usage:
 #   ./scripts/deploy.sh                         # Normal deploy (skips already-deployed contracts)
 #   ./scripts/deploy.sh --resume                # Explicit resume mode (same as default)
@@ -10,11 +14,20 @@
 #   ./scripts/deploy.sh --help                  # Show this help
 #
 # <contract> for --only must be one of:
-#   registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm
+#   registry, invoice, escrow_usdc, pool_usdc, usdc_pair,
+#   escrow_xlm, pool_xlm, xlm_pair
+#
+# Because escrow and pool each receive the OTHER's address in their
+# constructor, they are constructor-linked and must be redeployed together:
+# --only escrow_usdc / --only pool_usdc is promoted to usdc_pair (and the
+# XLM equivalents to xlm_pair).
 #
 # Deployed addresses are persisted to .deployed-addresses after each successful
 # deployment step.  Re-running the script after a partial failure will skip any
-# step whose address was already saved.
+# step whose address was already saved.  The pool deployment salt used to
+# pre-compute the pool address that escrow is constructed against is persisted
+# the same way (pool_usdc_salt / pool_xlm_salt), so a resumed run reconstructs
+# the identical prediction.
 
 set -euo pipefail
 
@@ -53,21 +66,31 @@ while [ $_i -lt ${#_args[@]} ]; do
       _i=$((_i + 1))
       if [ $_i -ge ${#_args[@]} ]; then
         echo "Error: --only requires a contract key argument."
-        echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm"
+        echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, usdc_pair, escrow_xlm, pool_xlm, xlm_pair"
         exit 1
       fi
       ONLY_CONTRACT="${_args[$_i]}"
       case "$ONLY_CONTRACT" in
-        registry|invoice|escrow_usdc|pool_usdc|escrow_xlm|pool_xlm) ;;
+        registry|invoice) ;;
+        escrow_usdc|pool_usdc)
+          # Constructor-linked pair: redeploying one requires redeploying the other.
+          echo "Note: --only $ONLY_CONTRACT promotes to --only usdc_pair (issue #827 constructor linkage)."
+          ONLY_CONTRACT="usdc_pair"
+          ;;
+        escrow_xlm|pool_xlm)
+          echo "Note: --only $ONLY_CONTRACT promotes to --only xlm_pair (issue #827 constructor linkage)."
+          ONLY_CONTRACT="xlm_pair"
+          ;;
+        usdc_pair|xlm_pair) ;;
         *)
           echo "Error: unknown contract key '$ONLY_CONTRACT' for --only."
-          echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm"
+          echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, usdc_pair, escrow_xlm, pool_xlm, xlm_pair"
           exit 1
           ;;
       esac
       ;;
     --help|-h)
-      sed -n '2,17p' "$0" | sed 's/^# //'
+      sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *)
@@ -173,65 +196,138 @@ wait_for_contract() {
 # 3. Core deployment helper
 # ---------------------------------------------------------------------------
 
-# deploy_contract <KEY> <WASM_PATH>
-# Deploys the wasm if KEY is not already in .deployed-addresses.
-# In dry-run mode, prints what would be done without deploying.
+# deploy_contract <KEY> <WASM_PATH> <SALT_HEX_OR_EMPTY> [CONSTRUCTOR_ARGS...]
+# Deploys the wasm if KEY is not already in .deployed-addresses, invoking the
+# contract's protocol `__constructor` with CONSTRUCTOR_ARGS in the SAME
+# transaction (issue #827: deploy and initialization are atomic; a deployed
+# contract is always constructed).
+# SALT_HEX_OR_EMPTY: optional 32-byte hex salt fixing the deploy address.
+# The stellar CLI derives a constructor deploy's contract id from
+# deployer+salt only, so passing a salt lets the address be predicted
+# up-front (see predict_contract_id) — used to construct escrow against the
+# pool address before the pool itself is deployed.
 # Prints the contract ID and saves it.
 deploy_contract() {
   local key="$1"
   local wasm="$2"
+  local salt="$3"
+  shift 3
 
   local existing
   existing=$(load_address "$key")
 
   if [ -n "$existing" ]; then
-    echo "  $key already deployed at $existing — skipping."
+    echo "  $key already deployed at $existing — skipping." 1>&2
     echo "$existing"
     return 0
   fi
 
   if [ "$DRY_RUN" = true ]; then
-    echo "  [DRY-RUN] Would deploy $key from $wasm"
+    {
+      echo "  [DRY-RUN] Would deploy $key from $wasm"
+      if [ -n "$salt" ]; then echo "  [DRY-RUN]   salt: $salt"; fi
+      echo "  [DRY-RUN]   __constructor args: $*"
+    } 1>&2
     echo "<dry-run>"
     return 0
   fi
 
   if [ ! -f "$wasm" ]; then
-    echo "ERROR: WASM file not found: $wasm"
-    echo "       Run 'stellar contract build' first, or check the build output."
+    echo "ERROR: WASM file not found: $wasm" 1>&2
+    echo "       Run 'stellar contract build' first, or check the build output." 1>&2
     return 1
   fi
 
-  echo "  Deploying $key from $wasm ..."
-  local contract_id
-  if ! contract_id=$("$STELLAR" contract deploy \
-      --wasm "$wasm" \
-      --source "$DEPLOYER_ACCOUNT" \
-      --network testnet 2>&1); then
-    echo "ERROR: Deploy failed for $key:"
-    echo "  $contract_id"
-    echo "  Fix the error above and rerun — already-deployed contracts will be skipped."
+  echo "  Deploying $key from $wasm ..." 1>&2
+  local -a cmd=("$STELLAR" contract deploy
+      --wasm "$wasm"
+      --source "$DEPLOYER_ACCOUNT"
+      --network testnet)
+  if [ -n "$salt" ]; then
+    cmd+=(--salt "$salt")
+  fi
+  if [ "$#" -gt 0 ]; then
+    # Positional args after `--` are forwarded verbatim to __constructor.
+    cmd+=(-- "$@")
+  fi
+
+  local output contract_id
+  if ! output=$("${cmd[@]}" 2>&1); then
+    {
+      echo "ERROR: Deploy failed for $key:"
+      echo "  $output"
+      echo "  Fix the error above and rerun — already-deployed contracts will be skipped."
+    } 1>&2
+    return 1
+  fi
+
+  # Extract the contract id from the CLI output (the CLI prints INFO noise on
+  # stderr which is merged above, so grep the strkey rather than trusting raw stdout).
+  contract_id=$(printf '%s\n' "$output" | grep -oE 'C[A-Z2-7]{55}' | tail -1)
+  if [ -z "$contract_id" ]; then
+    echo "ERROR: Deploy for $key succeeded but no contract id was found in output:" 1>&2
+    echo "  $output" 1>&2
     return 1
   fi
 
   # Confirm the contract is visible on-chain before saving
-  if ! wait_for_contract "$contract_id"; then
+  if ! wait_for_contract "$contract_id" 1>&2; then
     return 1
   fi
 
   save_address "$key" "$contract_id"
-  echo "  Saved: $key=$contract_id"
+  echo "  Saved: $key=$contract_id" 1>&2
   echo "$contract_id"
 }
 
 # ---------------------------------------------------------------------------
-# 4. Initialization helper
+# 3b. Address prediction for constructor-linked deploys (issue #827)
 # ---------------------------------------------------------------------------
 
-# invoke_init <LABEL> <CONTRACT_ID> [-- args...]
-# Runs `stellar contract invoke` and verifies the call succeeded.
-# Skips if the KEY_initialized flag is already set in .deployed-addresses.
-# In dry-run mode, prints what would be done without invoking.
+# get_or_create_salt <KEY>
+# Returns the persisted deploy salt for <KEY> (saved as <KEY>_salt in
+# .deployed-addresses), generating and persisting a fresh 32-byte hex salt
+# on first use.  Persisting BEFORE deploying escrow/pool is what makes a
+# resumed run reconstruct the same prediction.
+get_or_create_salt() {
+  local key="$1"
+  local salt
+  salt=$(load_address "${key}_salt")
+  if [ -z "$salt" ]; then
+    salt=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+    save_address "${key}_salt" "$salt"
+  fi
+  echo "$salt"
+}
+
+# predict_contract_id <SALT_HEX>
+# Computes the contract id that `deploy_contract ... <SALT_HEX> -- ...` with
+# the deployer account will produce.  Both the CLI's deploy and this call use
+# the same FROM_ADDRESS (deployer, salt) preimage; the constructor arguments
+# do NOT enter the id derivation, so this prediction is exact.
+predict_contract_id() {
+  local id
+  id=$("$STELLAR" contract id wasm \
+      --salt "$1" \
+      --source-account "$DEPLOYER_ADDRESS" \
+      --network testnet 2>/dev/null | grep -oE 'C[A-Z2-7]{55}' | tail -1)
+  if [ -z "$id" ]; then
+    echo "ERROR: could not predict contract id for salt $1" >&2
+    return 1
+  fi
+  echo "$id"
+}
+
+# ---------------------------------------------------------------------------
+# 4. Post-deploy wiring helper
+# ---------------------------------------------------------------------------
+
+# invoke_init <LABEL> <CONTRACT_ID> [-- fn args...]
+# Runs `stellar contract invoke` for a post-deploy wiring call (invoice
+# set_pool_contract / set_escrow_contract / add_supported_asset / ...).
+# Since issue #827 the constructor replaces initialize, so this helper is no
+# longer used for initialization — only for the optional wiring transactions,
+# with the <LABEL>_initialized marker retained for resume compatibility.
 invoke_init() {
   local label="$1"
   local contract_id="$2"
@@ -242,30 +338,32 @@ invoke_init() {
   existing=$(load_address "$init_key")
 
   if [ -n "$existing" ]; then
-    echo "  $label already initialized — skipping."
+    echo "  $label already applied — skipping."
     return 0
   fi
 
   if [ "$DRY_RUN" = true ]; then
-    echo "  [DRY-RUN] Would initialize $label ($contract_id) with: $*"
+    echo "  [DRY-RUN] Would invoke on $label ($contract_id): $*"
     return 0
   fi
 
-  echo "  Initializing $label ($contract_id) ..."
+  echo "  Invoking $label ($contract_id) ..."
   local output
   if ! output=$("$STELLAR" contract invoke \
       --id "$contract_id" \
       --source "$DEPLOYER_ACCOUNT" \
       --network testnet \
       "$@" 2>&1); then
-    echo "ERROR: Initialization failed for $label:"
+    echo "ERROR: Invocation failed for $label:"
     echo "  $output"
     # Issue #825: distinguish a front-run initialization from a transient
     # error. `initialize` panics with AlreadyInitialized (#1) if the
     # storage Admin key is set — and until this transaction lands, ANY
     # address can initialize a fresh deployment with their own admin. A
     # rerun can never win that race retroactively, so saying "rerun" here
-    # would be misleading.
+    # would be misleading. Constructor-migrated contracts (#827) reach this
+    # path only for the post-deploy wiring calls, so the generic branch
+    # speaks about the wiring step.
     case "$output" in
       *AlreadyInitialized*|*"Error(Contract, #1)"*)
         echo "  This contract was ALREADY INITIALIZED — possibly by someone"
@@ -276,7 +374,7 @@ invoke_init() {
         echo "  'Front-run initialization detection'."
         ;;
       *)
-        echo "  The contract is deployed but NOT initialized (transient error?)."
+        echo "  The contract is deployed but this wiring step did not complete."
         echo "  Fix the error and rerun — this step will be retried automatically."
         ;;
     esac
@@ -284,7 +382,7 @@ invoke_init() {
   fi
 
   save_address "$init_key" "true"
-  echo "  $label initialized successfully."
+  echo "  $label applied successfully."
 }
 
 # ---------------------------------------------------------------------------
@@ -387,7 +485,7 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
-# 7. Deploy & initialize all contracts
+# 7. Deploy all contracts (each deploy atomically runs its __constructor)
 # ---------------------------------------------------------------------------
 
 # In --only mode, load all existing saved addresses first so cross-contract
@@ -403,13 +501,35 @@ _load_or_deploy() {
 }
 
 if [ -n "$ONLY_CONTRACT" ]; then
-  echo "=== --only mode: redeploying single contract: $ONLY_CONTRACT ==="
-  # Clear the saved address + init flag for the targeted contract so
-  # deploy_contract / invoke_init will re-run it.
-  grep -v "^${ONLY_CONTRACT}=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
-  grep -v "^${ONLY_CONTRACT}_initialized=" "${ADDRESSES_FILE}.tmp" > "${ADDRESSES_FILE}.tmp2" 2>/dev/null || true
-  mv "${ADDRESSES_FILE}.tmp2" "$ADDRESSES_FILE"
-  rm -f "${ADDRESSES_FILE}.tmp"
+  echo "=== --only mode: redeploying: $ONLY_CONTRACT ==="
+  # Clear the saved addresses for the targeted step(s) so deploy_contract
+  # re-runs them.  Since issue #827 escrow+pool are constructor-linked (each
+  # receives the other's address), a pool/escrow redeploy clears the whole
+  # pair, its persisted pool salt, and the invoice wiring flags that point at
+  # the pair being replaced.  An invoice redeploy clears the wiring flags too
+  # (they belong to the old invoice instance).
+  _clear_keys=( "$ONLY_CONTRACT" )
+  case "$ONLY_CONTRACT" in
+    usdc_pair)
+      _clear_keys=( escrow_usdc pool_usdc pool_usdc_salt invoice_set_pool_initialized invoice_set_escrow_initialized )
+      ;;
+    xlm_pair)
+      _clear_keys=( escrow_xlm pool_xlm pool_xlm_salt invoice_set_pool_initialized invoice_set_escrow_initialized )
+      ;;
+    invoice)
+      _clear_keys=( invoice invoice_set_pool_initialized invoice_set_escrow_initialized \
+                    invoice_add_asset_usdc_initialized invoice_add_asset_xlm_initialized \
+                    invoice_set_agent_registry_initialized )
+      ;;
+  esac
+  # Also drop any legacy <key>_initialized markers left by pre-#827 runs.
+  for _k in "${_clear_keys[@]}"; do
+    _clear_keys+=("${_k}_initialized")
+  done
+  _pattern=$(printf '%s|' "${_clear_keys[@]}")
+  _pattern="${_pattern%|}"
+  grep -vE "^(${_pattern})=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
+  mv "${ADDRESSES_FILE}.tmp" "$ADDRESSES_FILE"
 
   # Load all surviving saved addresses into variables for cross-refs
   REGISTRY_ID=$(load_address "registry")
@@ -423,64 +543,105 @@ if [ -n "$ONLY_CONTRACT" ]; then
 fi
 
 # Helper: returns true if we should run this step.
-# In --only mode only the targeted step runs; otherwise all steps run.
+# In --only mode only the targeted step(s) run; otherwise all steps run.
+# escrow_usdc/pool_usdc share the usdc_pair gate (constructor linkage), as do
+# escrow_xlm/pool_xlm under xlm_pair.
 _should_run() {
-  [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "$1" ]
+  case "${1}" in
+    escrow_usdc|pool_usdc)
+      [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "usdc_pair" ]
+      ;;
+    escrow_xlm|pool_xlm)
+      [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "xlm_pair" ]
+      ;;
+    *)
+      [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "$1" ]
+      ;;
+  esac
 }
 
 if _should_run "registry"; then
-  echo "=== Deploying registry_contract ==="
-  REGISTRY_ID=$(deploy_contract "registry" "target/wasm32v1-none/release/trusttrove_registry.wasm")
+  echo "=== Deploying registry_contract (constructor runs inline) ==="
+  REGISTRY_ID=$(deploy_contract "registry" \
+    "target/wasm32v1-none/release/trusttrove_registry.wasm" \
+    "" \
+    --admin "$DEPLOYER_ADDRESS")
   echo "Registry: $REGISTRY_ID"
-
-  invoke_init "registry" "$REGISTRY_ID" \
-    -- initialize \
-    --admin "$DEPLOYER_ADDRESS"
   verify_admin "registry" "$REGISTRY_ID"
   echo ""
 fi
 
 if _should_run "invoice"; then
-  echo "=== Deploying invoice_contract ==="
-  INVOICE_ID=$(deploy_contract "invoice" "target/wasm32v1-none/release/trusttrove_invoice.wasm")
-  echo "Invoice: $INVOICE_ID"
-
-  invoke_init "invoice" "$INVOICE_ID" \
-    -- initialize \
+  echo "=== Deploying invoice_contract (constructor runs inline) ==="
+  if [ -z "${REGISTRY_ID:-}" ] && [ "$DRY_RUN" != true ]; then
+    echo "ERROR: invoice's constructor needs the registry address,"
+    echo "       but no registry deployment is recorded. Deploy registry first."
+    exit 1
+  fi
+  INVOICE_ID=$(deploy_contract "invoice" \
+    "target/wasm32v1-none/release/trusttrove_invoice.wasm" \
+    "" \
     --admin "$DEPLOYER_ADDRESS" \
-    --registry_contract "$REGISTRY_ID"
+    --registry_contract "$REGISTRY_ID")
+  echo "Invoice: $INVOICE_ID"
   verify_admin "invoice" "$INVOICE_ID"
   echo ""
 fi
 
-if _should_run "escrow_usdc"; then
-  echo "=== Deploying USDC escrow_contract ==="
-  ESCROW_USDC_ID=$(deploy_contract "escrow_usdc" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
-  echo "USDC Escrow: $ESCROW_USDC_ID"
-  echo ""
-fi
+# ---------------------------------------------------------------------------
+# 7b. USDC escrow/pool pair — constructor-linked via a pre-computed pool id
+#
+# escrow's constructor receives the pool address and pool's constructor
+# receives the escrow address.  The deploy address is derived from
+# (deployer, salt) and does not depend on the constructor args, so we persist
+# a salt for the pool, predict its future address, construct escrow against
+# that prediction, then deploy the pool AT that same salt/address.
+# ---------------------------------------------------------------------------
 
-if _should_run "pool_usdc"; then
-  echo "=== Deploying USDC pool_contract ==="
-  POOL_USDC_ID=$(deploy_contract "pool_usdc" "target/wasm32v1-none/release/trusttrove_pool.wasm")
-  echo "USDC Pool: $POOL_USDC_ID"
-  echo ""
-fi
-
-# escrow_usdc init depends on pool_usdc, so run after both are deployed
 if _should_run "escrow_usdc"; then
-  invoke_init "escrow_usdc" "$ESCROW_USDC_ID" \
-    -- initialize \
+  echo "=== Deploying USDC escrow_contract (constructed against predicted pool id) ==="
+  POOL_USDC_SALT=$(get_or_create_salt "pool_usdc")
+  if [ "$DRY_RUN" = true ]; then
+    POOL_USDC_TARGET_ID="<predicted-pool-usdc-id>"
+  else
+    POOL_USDC_TARGET_ID=$(load_address "pool_usdc")
+    if [ -z "$POOL_USDC_TARGET_ID" ]; then
+      POOL_USDC_TARGET_ID=$(predict_contract_id "$POOL_USDC_SALT")
+    fi
+  fi
+  ESCROW_USDC_ID=$(deploy_contract "escrow_usdc" \
+    "target/wasm32v1-none/release/trusttrove_escrow.wasm" \
+    "" \
     --admin "$DEPLOYER_ADDRESS" \
-    --pool_contract "$POOL_USDC_ID" \
-    --usdc_asset "$USDC_ISSUER"
+    --pool_contract "$POOL_USDC_TARGET_ID" \
+    --usdc_asset "$USDC_ISSUER")
+  echo "USDC Escrow: $ESCROW_USDC_ID"
   verify_admin "escrow_usdc" "$ESCROW_USDC_ID"
+  echo ""
 fi
 
-
 if _should_run "pool_usdc"; then
-  invoke_init "pool_usdc" "$POOL_USDC_ID" \
-    -- initialize \
+  echo "=== Deploying USDC pool_contract (single step, no separate init) ==="
+  if [ -z "${POOL_USDC_SALT:-}" ]; then
+    # pool-only redeploy without the escrow step above (e.g. --only usdc_pair
+    # where escrow was skipped is impossible since the pair gate runs both,
+    # but the variables may be unset if this block runs standalone).
+    POOL_USDC_SALT=$(get_or_create_salt "pool_usdc")
+    POOL_USDC_TARGET_ID=$(load_address "pool_usdc")
+    if [ -z "$POOL_USDC_TARGET_ID" ] && [ "$DRY_RUN" != true ]; then
+      POOL_USDC_TARGET_ID=$(predict_contract_id "$POOL_USDC_SALT")
+    fi
+  fi
+  if [ "$DRY_RUN" != true ] && [ -z "${ESCROW_USDC_ID:-}" ]; then
+    ESCROW_USDC_ID=$(load_address "escrow_usdc")
+    if [ -z "$ESCROW_USDC_ID" ]; then
+      echo "ERROR: pool's constructor needs the escrow address, but none is recorded."
+      exit 1
+    fi
+  fi
+  POOL_USDC_ID=$(deploy_contract "pool_usdc" \
+    "target/wasm32v1-none/release/trusttrove_pool.wasm" \
+    "$POOL_USDC_SALT" \
     --admin "$DEPLOYER_ADDRESS" \
     --invoice_contract "$INVOICE_ID" \
     --escrow_contract "$ESCROW_USDC_ID" \
@@ -490,36 +651,62 @@ if _should_run "pool_usdc"; then
     --min_initial_deposit 10000000 \
     --share_name '"TrusTrove USDC Pool Shares"' \
     --share_symbol '"TT-USDC"' \
-    --share_decimals 7
+    --share_decimals 7)
+  # The pool MUST land on the address escrow was constructed against.
+  if [ "$DRY_RUN" != true ] && [ -n "${POOL_USDC_TARGET_ID:-}" ] \
+     && [ "$POOL_USDC_ID" != "$POOL_USDC_TARGET_ID" ]; then
+    echo "ERROR: pool_usdc deployed at $POOL_USDC_ID but escrow_usdc was"
+    echo "       constructed against $POOL_USDC_TARGET_ID. Aborting before"
+    echo "       saving inconsistent addresses. Investigate the salt in"
+    echo "       $ADDRESSES_FILE (pool_usdc_salt) and redeploy the pair."
+    exit 1
+  fi
+  echo "USDC Pool: $POOL_USDC_ID"
   verify_admin "pool_usdc" "$POOL_USDC_ID"
+  echo ""
 fi
 
 if _should_run "escrow_xlm"; then
-  echo ""
-  echo "=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
-  ESCROW_XLM_ID=$(deploy_contract "escrow_xlm" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
-  echo "XLM Escrow: $ESCROW_XLM_ID"
-fi
-
-if _should_run "pool_xlm"; then
-  echo ""
-  echo "=== Deploying XLM pool_contract (EXPERIMENTAL) ==="
-  POOL_XLM_ID=$(deploy_contract "pool_xlm" "target/wasm32v1-none/release/trusttrove_pool.wasm")
-  echo "XLM Pool: $POOL_XLM_ID"
-fi
-
-if _should_run "escrow_xlm"; then
-  invoke_init "escrow_xlm" "$ESCROW_XLM_ID" \
-    -- initialize \
+  echo "=== Deploying XLM escrow_contract (EXPERIMENTAL, constructed against predicted pool id) ==="
+  POOL_XLM_SALT=$(get_or_create_salt "pool_xlm")
+  if [ "$DRY_RUN" = true ]; then
+    POOL_XLM_TARGET_ID="<predicted-pool-xlm-id>"
+  else
+    POOL_XLM_TARGET_ID=$(load_address "pool_xlm")
+    if [ -z "$POOL_XLM_TARGET_ID" ]; then
+      POOL_XLM_TARGET_ID=$(predict_contract_id "$POOL_XLM_SALT")
+    fi
+  fi
+  ESCROW_XLM_ID=$(deploy_contract "escrow_xlm" \
+    "target/wasm32v1-none/release/trusttrove_escrow.wasm" \
+    "" \
     --admin "$DEPLOYER_ADDRESS" \
-    --pool_contract "$POOL_XLM_ID" \
-    --usdc_asset "$XLM_ASSET"
+    --pool_contract "$POOL_XLM_TARGET_ID" \
+    --usdc_asset "$XLM_ASSET")
+  echo "XLM Escrow: $ESCROW_XLM_ID"
   verify_admin "escrow_xlm" "$ESCROW_XLM_ID"
+  echo ""
 fi
 
 if _should_run "pool_xlm"; then
-  invoke_init "pool_xlm" "$POOL_XLM_ID" \
-    -- initialize \
+  echo "=== Deploying XLM pool_contract (EXPERIMENTAL, single step, no separate init) ==="
+  if [ -z "${POOL_XLM_SALT:-}" ]; then
+    POOL_XLM_SALT=$(get_or_create_salt "pool_xlm")
+    POOL_XLM_TARGET_ID=$(load_address "pool_xlm")
+    if [ -z "$POOL_XLM_TARGET_ID" ] && [ "$DRY_RUN" != true ]; then
+      POOL_XLM_TARGET_ID=$(predict_contract_id "$POOL_XLM_SALT")
+    fi
+  fi
+  if [ "$DRY_RUN" != true ] && [ -z "${ESCROW_XLM_ID:-}" ]; then
+    ESCROW_XLM_ID=$(load_address "escrow_xlm")
+    if [ -z "$ESCROW_XLM_ID" ]; then
+      echo "ERROR: pool's constructor needs the escrow address, but none is recorded."
+      exit 1
+    fi
+  fi
+  POOL_XLM_ID=$(deploy_contract "pool_xlm" \
+    "target/wasm32v1-none/release/trusttrove_pool.wasm" \
+    "$POOL_XLM_SALT" \
     --admin "$DEPLOYER_ADDRESS" \
     --invoice_contract "$INVOICE_ID" \
     --escrow_contract "$ESCROW_XLM_ID" \
@@ -529,11 +716,21 @@ if _should_run "pool_xlm"; then
     --min_initial_deposit 10000000 \
     --share_name '"TrusTrove XLM Pool Shares"' \
     --share_symbol '"TT-XLM"' \
-    --share_decimals 7
+    --share_decimals 7)
+  if [ "$DRY_RUN" != true ] && [ -n "${POOL_XLM_TARGET_ID:-}" ] \
+     && [ "$POOL_XLM_ID" != "$POOL_XLM_TARGET_ID" ]; then
+    echo "ERROR: pool_xlm deployed at $POOL_XLM_ID but escrow_xlm was"
+    echo "       constructed against $POOL_XLM_TARGET_ID. Aborting before"
+    echo "       saving inconsistent addresses. Investigate the salt in"
+    echo "       $ADDRESSES_FILE (pool_xlm_salt) and redeploy the pair."
+    exit 1
+  fi
+  echo "XLM Pool: $POOL_XLM_ID"
   verify_admin "pool_xlm" "$POOL_XLM_ID"
+  echo ""
 fi
 
-if [ -z "$ONLY_CONTRACT" ]; then
+if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "usdc_pair" ]; then
   echo ""
   echo "=== Wiring USDC pool_contract into invoice_contract ==="
   invoke_init "invoice_set_pool" "$INVOICE_ID" \

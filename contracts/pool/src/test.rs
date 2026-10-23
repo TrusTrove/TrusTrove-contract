@@ -40,9 +40,9 @@ const DEFAULT_DISCOUNT_BPS: u32 = 200;
 const DEFAULT_FUNDED_AMOUNT: u128 =
     DEFAULT_FACE_VALUE * (10000 - DEFAULT_DISCOUNT_BPS as u128) / 10000;
 
-// SEP-41 share metadata every test initializer passes to `initialize` (issue
+// SEP-41 share metadata every test initializer passes to the constructor (issue
 // #757). Kept as constants so the assertions in the metadata tests and the
-// `initialize` call sites cannot drift apart.
+// constructor call sites cannot drift apart.
 const TEST_SHARE_NAME: &str = "TrusTrove USDC Pool Shares";
 const TEST_SHARE_SYMBOL: &str = "TT-USDC";
 const DEFAULT_YIELD_AMOUNT: u128 = DEFAULT_FACE_VALUE * DEFAULT_DISCOUNT_BPS as u128 / 10000;
@@ -464,29 +464,37 @@ fn setup() -> TestEnv {
             .set(&buyer_bal_key, &100_000_000_000_000i128);
     });
 
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
-    let pool_id = env.register(PoolContract, ());
+    // #827: deploy and init are atomic — every protocol instance is seeded
+    // by its constructor. The pool's address is pre-generated so the escrow
+    // can be constructed with its pool wiring first.
+    let pool_id = Address::generate(&env);
+
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
 
     let invoice = RealInvoiceClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
+    let _escrow = RealEscrowClient::new(&env, &escrow_id);
 
-    let escrow = RealEscrowClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
-
-    let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, TEST_SHARE_NAME),
+            String::from_str(&env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
+    let pool = PoolContractClient::new(&env, &pool_id);
 
     invoice.add_supported_asset(&usdc_id);
     invoice.add_supported_asset(&xlm_id);
@@ -522,6 +530,73 @@ fn setup() -> TestEnv {
         buyer,
         lp,
     }
+}
+
+/// #827: deployment is atomic — a pool instance is seeded by the protocol
+/// constructor. The pre-#827 "uninitialized" tests targeted a deployed but
+/// unconfigured instance; the equivalent state is reproduced here by
+/// constructing the pool with valid mock wiring and evicting the instance
+/// keys the constructor seeds.
+fn deploy_pool_with_evicted_config() -> (Env, Address, PoolContractClient<'static>) {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = Address::generate(&env);
+    let registry_id = env.register(MockRegistry, ());
+    let usdc_id = env.register(MockToken, ());
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+
+    let pool_id = Address::generate(&env);
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
+
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, TEST_SHARE_NAME),
+            String::from_str(&env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
+    );
+
+    env.as_contract(&pool_id, || {
+        for key in [
+            DataKey::Admin,
+            DataKey::InvoiceContract,
+            DataKey::EscrowContract,
+            DataKey::FundingAsset,
+            DataKey::RegistryContract,
+            DataKey::TotalShares,
+            DataKey::TotalDeposits,
+            DataKey::TotalFunded,
+            DataKey::TotalYieldDistributed,
+            DataKey::ActiveInvoiceCount,
+            DataKey::MaxUtilizationBps,
+            DataKey::FeeBps,
+            DataKey::TotalLossRealised,
+            DataKey::ProtocolFeeBps,
+            DataKey::TreasuryAddress,
+            DataKey::MinInitialDeposit,
+            DataKey::ShareName,
+            DataKey::ShareSymbol,
+            DataKey::ShareDecimals,
+        ] {
+            env.storage().instance().remove(&key);
+        }
+    });
+
+    let pool = PoolContractClient::new(&env, &pool_id);
+    (env, pool_id, pool)
 }
 
 fn create_and_list(te: &TestEnv, funding_asset: &Address) -> BytesN<32> {
@@ -929,7 +1004,7 @@ fn test_two_pool_instances_enforce_their_own_configured_minimum() {
     assert!(pool_b.try_deposit(&lp, &high_min).is_ok());
 }
 
-/// Deploys and initializes a fresh pool instance funding `asset`, configured
+/// Deploys a fresh constructed pool instance funding `asset`, configured
 /// with `min_initial_deposit`.
 fn build_pool_with_min_deposit(
     env: &Env,
@@ -938,25 +1013,28 @@ fn build_pool_with_min_deposit(
     registry_id: &Address,
     min_initial_deposit: u128,
 ) -> Address {
-    let invoice_id = env.register(RealInvoice, ());
-    RealInvoiceClient::new(env, &invoice_id).initialize(admin, registry_id);
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
 
-    let pool_id = env.register(PoolContract, ());
-    let escrow_id = env.register(RealEscrow, ());
-    RealEscrowClient::new(env, &escrow_id).initialize(admin, &pool_id, asset);
+    // #827: pre-generate the pool address so the escrow wiring can point at
+    // it before the pool instance exists; the constructor seeds the pool.
+    let pool_id = Address::generate(env);
+    let escrow_id = env.register(RealEscrow, (admin.clone(), pool_id.clone(), asset.clone()));
 
-    let pool = PoolContractClient::new(env, &pool_id);
-    pool.initialize(
-        admin,
-        &invoice_id,
-        &escrow_id,
-        asset,
-        registry_id,
-        admin,
-        &min_initial_deposit,
-        &String::from_str(env, TEST_SHARE_NAME),
-        &String::from_str(env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            asset.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            min_initial_deposit,
+            String::from_str(env, TEST_SHARE_NAME),
+            String::from_str(env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
     pool_id
 }
@@ -1364,14 +1442,12 @@ fn test_get_stats_initial_state() {
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_stats_panics_on_uninitialized_pool() {
-    // A freshly deployed contract (no initialize() call) must not silently
-    // return zero-filled stats — that would let callers mistake an uninitialized
+    // A pool whose config keys are missing must not silently return
+    // zero-filled stats — that would let callers mistake an uninitialized
     // pool for an empty-but-healthy one. Instead get_stats() must panic with
-    // NotInitialized (#2).
-    let env = Env::default();
-    env.mock_all_auths();
-    let pool_id = env.register(crate::PoolContract, ());
-    let pool = crate::PoolContractClient::new(&env, &pool_id);
+    // NotInitialized (#2). Post-#827 deploy is atomic, so the missing-config
+    // state is reproduced by evicting the constructor's instance keys.
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
     let _ = pool.get_stats();
 }
 
@@ -1673,30 +1749,35 @@ fn test_utilization_rate_calculates_correctly() {
 //  MAX UTILIZATION TESTS
 #[test]
 fn test_default_max_utilization_in_stats() {
-    // Fresh pool without setup override to verify initialize default is 8500
+    // Fresh pool without setup override to verify the constructor default is 8500
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
     let registry_id = env.register(MockRegistry, ());
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
     let usdc_id = env.register(MockToken, ());
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-    let pool_id = env.register(PoolContract, ());
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
-    let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
     );
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, TEST_SHARE_NAME),
+            String::from_str(&env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
     let stats = pool.get_stats();
     assert_eq!(stats.max_utilization_bps, 8500);
 }
@@ -1766,9 +1847,7 @@ fn test_get_funding_asset_returns_configured_asset() {
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_usdc_asset_panics_when_uninitialized() {
-    let env = Env::default();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
     pool.get_usdc_asset();
 }
 
@@ -1777,9 +1856,7 @@ fn test_get_usdc_asset_panics_when_uninitialized() {
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_funding_asset_panics_when_uninitialized() {
-    let env = Env::default();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
     pool.get_funding_asset();
 }
 
@@ -3883,12 +3960,12 @@ fn test_withdraw_after_repayment_returns_more_than_deposited() {
     );
 }
 
-//  ISSUE #263: INITIALIZE ADDRESS COLLISION GUARD
-// A fresh, valid initialize() with four distinct addresses must keep working;
+//  ISSUE #263: CONSTRUCTION ADDRESS COLLISION GUARD
+// A fresh, valid construction with four distinct addresses must keep working;
 // `setup()` (used throughout this file) already exercises this path, but this
 // test makes the positive case explicit for the collision guard added below.
 #[test]
-fn test_initialize_accepts_distinct_addresses() {
+fn test_constructor_accepts_distinct_addresses() {
     let te = setup();
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_shares, 0);
@@ -3899,18 +3976,11 @@ fn test_initialize_accepts_distinct_addresses() {
 // usdc_asset, registry_contract) must be rejected with InvalidConfiguration
 // (#15) so the handle_default gate can never collide with the admin path.
 #[test]
-fn test_initialize_rejects_each_pairwise_address_collision() {
-    let env = Env::default();
-    env.mock_all_auths();
-
-    let base = [
-        Address::generate(&env), // admin
-        Address::generate(&env), // invoice_contract
-        Address::generate(&env), // escrow_contract
-        Address::generate(&env), // usdc_asset
-        Address::generate(&env), // registry_contract
-    ];
-
+fn test_constructor_rejects_each_pairwise_address_collision() {
+    // #827: the collision guard now runs inside the protocol constructor, so
+    // a rejected deployment surfaces as a panic from `register_at` — the
+    // guard fires before any cross-contract wiring is read, so placeholder
+    // addresses are fine here.
     let pairs = [
         (0, 1),
         (0, 2),
@@ -3924,64 +3994,87 @@ fn test_initialize_rejects_each_pairwise_address_collision() {
         (3, 4),
     ];
     for (i, j) in pairs {
-        let mut addrs = base.clone();
-        addrs[j] = addrs[i].clone();
-
-        let pool_id = env.register(PoolContract, ());
-        let pool = PoolContractClient::new(&env, &pool_id);
-        let res = pool.try_initialize(
-            &addrs[0],
-            &addrs[1],
-            &addrs[2],
-            &addrs[3],
-            &addrs[4],
-            &addrs[0],
-            &DEFAULT_MIN_INITIAL_DEPOSIT,
-            &String::from_str(&env, TEST_SHARE_NAME),
-            &String::from_str(&env, TEST_SHARE_SYMBOL),
-            &DEFAULT_SHARE_DECIMALS,
-        );
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let env = Env::default();
+            env.mock_all_auths();
+            let mut addrs = [
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+            ];
+            let colliding = addrs[i].clone();
+            addrs[j] = colliding;
+            env.register_at(
+                &Address::generate(&env),
+                PoolContract,
+                (
+                    addrs[0].clone(),
+                    addrs[1].clone(),
+                    addrs[2].clone(),
+                    addrs[3].clone(),
+                    addrs[4].clone(),
+                    addrs[0].clone(),
+                    DEFAULT_MIN_INITIAL_DEPOSIT,
+                    String::from_str(&env, TEST_SHARE_NAME),
+                    String::from_str(&env, TEST_SHARE_SYMBOL),
+                    DEFAULT_SHARE_DECIMALS,
+                ),
+            );
+        }))
+        .is_err();
         assert!(
-            res.is_err(),
-            "collision between initialize() params {i} and {j} should be rejected"
+            rejected,
+            "collision between constructor params {i} and {j} should be rejected"
         );
     }
 }
 
 #[test]
-fn test_initialize_rejects_treasury_aliases() {
-    let te = setup();
-    let invoice_id = te.invoice.address.clone();
-    let registry_id = te.registry.address.clone();
-
+fn test_constructor_rejects_treasury_aliases() {
     // Each attempt gets a fresh pool address so the test covers treasury
-    // aliases to the pool, invoice, escrow, registry, and funding asset.
-    for role in 0..5 {
-        let pool_id = te.env.register(PoolContract, ());
-        let treasury = match role {
-            0 => pool_id.clone(),
-            1 => invoice_id.clone(),
-            2 => te.escrow_id.clone(),
-            3 => registry_id.clone(),
-            _ => te.usdc_id.clone(),
-        };
-        let pool = PoolContractClient::new(&te.env, &pool_id);
-        let result = pool.try_initialize(
-            &te.admin,
-            &invoice_id,
-            &te.escrow_id,
-            &te.usdc_id,
-            &registry_id,
-            &treasury,
-            &DEFAULT_MIN_INITIAL_DEPOSIT,
-            &String::from_str(&te.env, TEST_SHARE_NAME),
-            &String::from_str(&te.env, TEST_SHARE_SYMBOL),
-            &DEFAULT_SHARE_DECIMALS,
-        );
-        assert!(
-            result.is_err(),
-            "treasury alias for role {role} was accepted"
-        );
+    // aliases to the pool, invoice, escrow, registry, and funding asset. The
+    // alias guard runs inside the constructor (before the escrow
+    // cross-check), so a rejected deployment surfaces as a panic.
+    for role in 0..5u8 {
+        let rejected = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let env = Env::default();
+            env.mock_all_auths();
+            let addrs = [
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+                Address::generate(&env),
+            ];
+            let pool_id = Address::generate(&env);
+            let treasury = match role {
+                0 => pool_id.clone(),
+                1 => addrs[1].clone(),
+                2 => addrs[2].clone(),
+                3 => addrs[4].clone(),
+                _ => addrs[3].clone(),
+            };
+            env.register_at(
+                &pool_id,
+                PoolContract,
+                (
+                    addrs[0].clone(),
+                    addrs[1].clone(),
+                    addrs[2].clone(),
+                    addrs[3].clone(),
+                    addrs[4].clone(),
+                    treasury,
+                    DEFAULT_MIN_INITIAL_DEPOSIT,
+                    String::from_str(&env, TEST_SHARE_NAME),
+                    String::from_str(&env, TEST_SHARE_SYMBOL),
+                    DEFAULT_SHARE_DECIMALS,
+                ),
+            );
+        }))
+        .is_err();
+        assert!(rejected, "treasury alias for role {role} was accepted");
     }
 }
 
@@ -4086,51 +4179,48 @@ fn test_fund_invoice_after_default_panics() {
 // Every state-changing entrypoint must extend the contract's instance TTL so
 // an active pool never expires. New instance storage entries start with a
 // small default ttl (well above the extend_ttl threshold), so the
-// initialize()/set_max_utilization() calls in `setup()` are no-ops for the
+// constructor/set_max_utilization() calls in `setup()` are no-ops for the
 // ttl bump. Drive the ttl down below the threshold here, then confirm a
 // state-changing call (deposit) bumps it back up close to the configured
 // extend-to window.
 #[test]
 fn test_deposit_extends_instance_ttl_when_below_threshold() {
     // The default instance TTL (4096) is below TTL_THRESHOLD (500_000),
-    // so initialize() extends it to ~TTL_EXTEND_TO. Verify the extension
-    // happens by checking TTL before and after initialization.
+    // so the constructor extends it to ~TTL_EXTEND_TO. #827 made deploy and
+    // init atomic, so there is no observable pre-initialize instance to read
+    // from — the assertion below pins that construction extended the TTL.
     let env = Env::default();
     env.mock_all_auths();
 
     let admin = Address::generate(&env);
     let registry_id = env.register(MockRegistry, ());
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
     let usdc_id = env.register(MockToken, ());
 
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-
-    let pool_id = env.register(PoolContract, ());
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
-
-    // Before initialize: TTL is the default of ~4096 ledgers.
-    let ttl_before = env.as_contract(&pool_id, || env.storage().instance().get_ttl());
-    assert!(
-        ttl_before < TTL_THRESHOLD,
-        "default instance ttl should be below TTL_THRESHOLD, got {ttl_before}"
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
     );
 
-    let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, TEST_SHARE_NAME),
+            String::from_str(&env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
 
-    // After initialize: TTL should be bumped to ~TTL_EXTEND_TO.
+    // After construction: TTL should be bumped to ~TTL_EXTEND_TO.
     let ttl_after = env.as_contract(&pool_id, || env.storage().instance().get_ttl());
     assert!(
         ttl_after >= 1_999_000,
@@ -4334,149 +4424,20 @@ fn test_withdraw_extends_instance_ttl_after_ledger_drain() {
     );
 }
 
-//  ISSUE #273: INITIALIZATION & AUTH REGRESSION COVERAGE
-#[test]
-#[should_panic(expected = "Error(Contract, #1)")]
-fn test_double_initialize_panics() {
-    let env = Env::default();
-
-    let admin = Address::generate(&env);
-    let registry_id = env.register(MockRegistry, ());
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
-    let usdc_id = env.register(MockToken, ());
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
-
-    // Initialize invoice with explicit auth
-    env.mock_auths(&[MockAuth {
-        address: &admin,
-        invoke: &MockAuthInvoke {
-            contract: &invoice_id,
-            fn_name: "initialize",
-            args: (admin.clone(), registry_id.clone()).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-
-    // Initialize escrow with explicit auth
-    env.mock_auths(&[MockAuth {
-        address: &admin,
-        invoke: &MockAuthInvoke {
-            contract: &escrow_id,
-            fn_name: "initialize",
-            args: (admin.clone(), pool_id.clone(), usdc_id.clone()).into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
-
-    // First pool initialize — succeeds with explicit auth
-    env.mock_auths(&[MockAuth {
-        address: &admin,
-        invoke: &MockAuthInvoke {
-            contract: &pool_id,
-            fn_name: "initialize",
-            args: (
-                admin.clone(),
-                invoice_id.clone(),
-                escrow_id.clone(),
-                usdc_id.clone(),
-                registry_id.clone(),
-                admin.clone(),
-                DEFAULT_MIN_INITIAL_DEPOSIT,
-                String::from_str(&env, TEST_SHARE_NAME),
-                String::from_str(&env, TEST_SHARE_SYMBOL),
-                DEFAULT_SHARE_DECIMALS,
-            )
-                .into_val(&env),
-            sub_invokes: &[],
-        },
-    }]);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
-    );
-
-    // Verify storage state after first initialize
-    env.as_contract(&pool_id, || {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
-        assert_eq!(stored_admin, admin);
-        let stored_invoice: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::InvoiceContract)
-            .unwrap();
-        assert_eq!(stored_invoice, invoice_id);
-        let stored_escrow: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::EscrowContract)
-            .unwrap();
-        assert_eq!(stored_escrow, escrow_id);
-        let stored_funding_asset: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::FundingAsset)
-            .unwrap();
-        assert_eq!(stored_funding_asset, usdc_id);
-        let stored_fee: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::ProtocolFeeBps)
-            .unwrap();
-        assert_eq!(stored_fee, 0);
-        let stored_treasury: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::TreasuryAddress)
-            .unwrap();
-        assert_eq!(stored_treasury, admin);
-    });
-
-    // Second initialize — panics with AlreadyInitialized (#1)
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
-    );
-}
-
+//  ISSUE #273: MISSING-CONFIG REGRESSION COVERAGE
+// (#827: `test_double_initialize_panics` was removed — with deploy and init
+// atomic there is no second initialization to reject; `AlreadyInitialized`
+// is unreachable by construction.)
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_deposit_before_initialize_panics() {
-    let env = Env::default();
-
-    let usdc_id = env.register(MockToken, ());
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    // #827: deploy is atomic; the missing-config state this test targets is
+    // reproduced by evicting the constructor's instance keys.
+    let (env, pool_id, pool) = deploy_pool_with_evicted_config();
     let lp = Address::generate(&env);
 
-    // Give LP a balance in the mock USDC token
-    let lp_bal_key = TKey(lp.clone());
-    env.as_contract(&usdc_id, || {
-        env.storage()
-            .persistent()
-            .set(&lp_bal_key, &100_000_000_000_000i128);
-    });
-
-    // Mock LP auth but pool is not initialized → should panic with NotInitialized (#2)
+    // Mock LP auth but the pool config is missing → must panic with
+    // NotInitialized (#2).
     env.mock_auths(&[MockAuth {
         address: &lp,
         invoke: &MockAuthInvoke {
@@ -4492,13 +4453,11 @@ fn test_deposit_before_initialize_panics() {
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_withdraw_before_initialize_panics() {
-    let env = Env::default();
-
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (env, pool_id, pool) = deploy_pool_with_evicted_config();
     let lp = Address::generate(&env);
 
-    // Mock LP auth but pool is not initialized → should panic with NotInitialized (#2)
+    // Mock LP auth but the pool config is missing → must panic with
+    // NotInitialized (#2).
     env.mock_auths(&[MockAuth {
         address: &lp,
         invoke: &MockAuthInvoke {
@@ -4514,13 +4473,10 @@ fn test_withdraw_before_initialize_panics() {
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_fund_invoice_before_initialize_panics() {
-    let env = Env::default();
-
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (env, _pool_id, pool) = deploy_pool_with_evicted_config();
     let invoice_id = BytesN::from_array(&env, &[0u8; 32]);
 
-    // Pool is not initialized → should panic with NotInitialized (#2)
+    // The pool config is missing → must panic with NotInitialized (#2).
     pool.fund_invoice(&invoice_id);
 }
 
@@ -4552,9 +4508,9 @@ mod real_registry_integration {
         let lp = Address::generate(&env);
 
         // --- Deploy the real registry and drive register -> verify ---
-        let registry_id = env.register(RealRegistry, ());
+        // #827: the registry is deployed already constructed.
+        let registry_id = env.register(RealRegistry, (admin.clone(),));
         let registry = RealRegistryClient::new(&env, &registry_id);
-        registry.initialize(&admin);
 
         let metadata: Map<String, String> = map![
             &env,
@@ -4598,29 +4554,34 @@ mod real_registry_integration {
                 .set(&buyer_bal_key, &100_000_000_000_000i128);
         });
 
-        let invoice_id_addr = env.register(RealInvoice, ());
-        let escrow_id = env.register(RealEscrow, ());
-        let pool_id = env.register(PoolContract, ());
+        let pool_id = Address::generate(&env);
+
+        let invoice_id_addr = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+        let escrow_id = env.register(
+            RealEscrow,
+            (admin.clone(), pool_id.clone(), usdc_id.clone()),
+        );
 
         let invoice = RealInvoiceClient::new(&env, &invoice_id_addr);
-        invoice.initialize(&admin, &registry_id);
+        let _escrow = RealEscrowClient::new(&env, &escrow_id);
 
-        let escrow = RealEscrowClient::new(&env, &escrow_id);
-        escrow.initialize(&admin, &pool_id, &usdc_id);
-
-        let pool = PoolContractClient::new(&env, &pool_id);
-        pool.initialize(
-            &admin,
-            &invoice_id_addr,
-            &escrow_id,
-            &usdc_id,
-            &registry_id,
-            &admin,
-            &DEFAULT_MIN_INITIAL_DEPOSIT,
-            &String::from_str(&env, TEST_SHARE_NAME),
-            &String::from_str(&env, TEST_SHARE_SYMBOL),
-            &DEFAULT_SHARE_DECIMALS,
+        env.register_at(
+            &pool_id,
+            PoolContract,
+            (
+                admin.clone(),
+                invoice_id_addr.clone(),
+                escrow_id.clone(),
+                usdc_id.clone(),
+                registry_id.clone(),
+                admin.clone(),
+                DEFAULT_MIN_INITIAL_DEPOSIT,
+                String::from_str(&env, TEST_SHARE_NAME),
+                String::from_str(&env, TEST_SHARE_SYMBOL),
+                DEFAULT_SHARE_DECIMALS,
+            ),
         );
+        let pool = PoolContractClient::new(&env, &pool_id);
 
         invoice.add_supported_asset(&usdc_id);
         invoice.set_pool_contract(&pool_id);
@@ -4831,13 +4792,18 @@ mod real_registry_integration {
         let issuer = Address::generate(&env);
         let buyer = Address::generate(&env);
 
-        let registry_id = env.register(RealRegistry, ());
-        // Registry intentionally left uninitialized.
+        let registry_id = env.register(RealRegistry, (admin.clone(),));
+        // #827: deploy is atomic, so the registry's missing-config state is
+        // reproduced by evicting the key the constructor seeds.
+        env.as_contract(&registry_id, || {
+            env.storage()
+                .instance()
+                .remove(&trusttrove_registry::DataKey::Admin);
+        });
 
         let usdc_id = env.register(MockToken, ());
-        let invoice_id_addr = env.register(RealInvoice, ());
+        let invoice_id_addr = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
         let invoice = RealInvoiceClient::new(&env, &invoice_id_addr);
-        invoice.initialize(&admin, &registry_id);
         invoice.add_supported_asset(&usdc_id);
 
         let due_date = env.ledger().timestamp() + 86400;
@@ -4902,34 +4868,39 @@ fn test_fund_invoice_prevents_double_funding_via_funded_key_check() {
     assert!(result.is_err());
 }
 
-//  INITIALIZE EVENT TESTS (issue #575)
+//  CONSTRUCTION EVENT TESTS (issue #575)
 #[test]
-fn test_initialize_emits_pool_initialized_event() {
+fn test_constructor_emits_pool_initialized_event() {
     let env = Env::default();
     env.mock_all_auths_allowing_non_root_auth();
 
     let admin = Address::generate(&env);
     let registry_id = env.register(MockRegistry, ());
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
     let usdc_id = env.register(MockToken, ());
+    let pool_addr = Address::generate(&env);
 
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-    let pool_addr = env.register(PoolContract, ());
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_addr, &usdc_id);
-
-    let pool = PoolContractClient::new(&env, &pool_addr);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
+    // #827: the constructor emits `pool_initialized` as part of the
+    // deployment transaction; the test env retains constructor events.
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_addr.clone(), usdc_id.clone()),
+    );
+    env.register_at(
+        &pool_addr,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, TEST_SHARE_NAME),
+            String::from_str(&env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
 
     let events = env.events().all();
@@ -4985,47 +4956,37 @@ fn test_get_escrow_contract_returns_correct_address() {
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_admin_panics_when_uninitialized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
     let _ = pool.get_admin();
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_invoice_contract_panics_when_uninitialized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
     let _ = pool.get_invoice_contract();
 }
 
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_escrow_contract_panics_when_uninitialized() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
     let _ = pool.get_escrow_contract();
 }
 
 //  ISSUE #441: TYPED NotInitialized ERRORS //
 // Every instance-storage read in the pool contract must fail with the typed
-// `PoolError::NotInitialized` (#2) when the contract has not been initialized,
-// never an untyped host panic. These tests cover the remaining entry points
+// `PoolError::NotInitialized` (#2) when the config keys are missing, never an
+// untyped host panic. These tests cover the remaining entry points
 // and views after the bare `unwrap()` / `expect()` reads were replaced
 // (`get_admin`, `get_invoice_contract`, `get_escrow_contract` and
 // `get_usdc_asset` are pinned alongside; `deposit`, `withdraw` and
 // `fund_invoice` already had typed-error tests).
 
 fn uninitialized_pool() -> (Env, PoolContractClient<'static>) {
-    let env = Env::default();
-    env.mock_all_auths();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+    // #827: constructed-then-evicted config (see deploy_pool_with_evicted_config)
+    // stands in for the pre-#827 never-initialized deployment.
+    let (env, _pool_id, pool) = deploy_pool_with_evicted_config();
     (env, pool)
 }
 
@@ -5445,7 +5406,7 @@ fn prop_repayment_increases_deposits_by_yield_and_clears_funded() {
 
 //  ISSUE #771: NONZERO PROTOCOL FEE SPLITS
 #[test]
-fn test_freshly_initialized_pool_has_zero_protocol_fee() {
+fn test_freshly_constructed_pool_has_zero_protocol_fee() {
     let te = setup();
     assert_eq!(te.pool.get_protocol_fee_bps(), 0);
     assert_eq!(te.pool.get_treasury(), te.admin);
@@ -5813,7 +5774,7 @@ fn test_default_zero_protocol_fee_preserves_refunded_repayment_accounting_unchan
 #[test]
 fn test_protocol_fee_storage_initialized_to_zero_and_admin_treasury() {
     let te = setup();
-    // Freshly initialized pool must read back fee_bps == 0 and treasury == admin
+    // Freshly constructed pool must read back fee_bps == 0 and treasury == admin
     assert_eq!(te.pool.get_protocol_fee_bps(), 0);
     assert_eq!(te.pool.get_treasury(), te.admin);
 }
@@ -5836,29 +5797,33 @@ fn test_protocol_fee_storage_initialized_with_custom_treasury() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
     let usdc_id = env.register(MockToken, ());
     let registry_id = env.register(MockRegistry, ());
     let custom_treasury = Address::generate(&env);
 
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-    let pool_id = env.register(PoolContract, ());
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
-
-    let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &custom_treasury,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, TEST_SHARE_NAME),
-        &String::from_str(&env, TEST_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
     );
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            custom_treasury.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, TEST_SHARE_NAME),
+            String::from_str(&env, TEST_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
 
     assert_eq!(pool.get_protocol_fee_bps(), 0);
     assert_eq!(pool.get_treasury(), custom_treasury);
@@ -6080,7 +6045,7 @@ fn test_approve_emits_allowance_approved_event() {
 
 //  ISSUE #757: SEP-41 SHARE METADATA
 #[test]
-fn test_share_metadata_comes_from_initialize() {
+fn test_share_metadata_comes_from_constructor() {
     let te = setup();
     assert_eq!(te.pool.name(), String::from_str(&te.env, TEST_SHARE_NAME));
     assert_eq!(
@@ -6088,10 +6053,10 @@ fn test_share_metadata_comes_from_initialize() {
         String::from_str(&te.env, TEST_SHARE_SYMBOL)
     );
     // Shares are denominated in the funding asset's base units, so the value
-    // configured at `initialize` is what `decimals()` reports.
+    // configured at construction is what `decimals()` reports.
     assert_eq!(te.pool.decimals(), DEFAULT_SHARE_DECIMALS);
 
-    // Metadata lives on the instance, written once by initialize.
+    // Metadata lives on the instance, written once by the constructor.
     te.env.as_contract(&te.pool_id, || {
         let stored_name: String = te
             .env
@@ -6110,7 +6075,7 @@ fn test_share_metadata_comes_from_initialize() {
     });
 }
 
-// The per-asset `pool_factory` model is the reason metadata is an initializer
+// The per-asset `pool_factory` model is the reason metadata is a constructor
 // argument instead of a constant: two pool instances are two different share
 // tokens and must not render identically in a wallet.
 #[test]
@@ -6118,28 +6083,33 @@ fn test_share_metadata_is_scoped_to_the_pool_instance() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
     let usdc_id = env.register(MockToken, ());
     let registry_id = env.register(MockRegistry, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
 
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
-
-    let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove XLM Pool Shares"),
-        &String::from_str(&env, "TT-XLM"),
-        &12,
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
     );
+
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove XLM Pool Shares"),
+            String::from_str(&env, "TT-XLM"),
+            12u32,
+        ),
+    );
+    let pool = PoolContractClient::new(&env, &pool_id);
 
     assert_eq!(
         pool.name(),
@@ -6152,38 +6122,44 @@ fn test_share_metadata_is_scoped_to_the_pool_instance() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #15)")]
-fn test_initialize_rejects_empty_share_symbol() {
+fn test_constructor_rejects_empty_share_symbol() {
     let env = Env::default();
     env.mock_all_auths();
     let admin = Address::generate(&env);
-    let invoice_id = env.register(RealInvoice, ());
-    let escrow_id = env.register(RealEscrow, ());
     let usdc_id = env.register(MockToken, ());
     let registry_id = env.register(MockRegistry, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
 
-    RealInvoiceClient::new(&env, &invoice_id).initialize(&admin, &registry_id);
-    RealEscrowClient::new(&env, &escrow_id).initialize(&admin, &pool_id, &usdc_id);
+    let invoice_id = env.register(RealInvoice, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        RealEscrow,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
 
-    PoolContractClient::new(&env, &pool_id).initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, ""),
-        &DEFAULT_SHARE_DECIMALS,
+    // The empty-symbol guard runs inside the constructor, so the deployment
+    // itself must fail with InvalidConfiguration (#15).
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, ""),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
 }
 
 #[test]
-fn test_share_metadata_unreadable_before_initialize() {
-    let env = Env::default();
-    let pool_id = env.register(PoolContract, ());
-    let pool = PoolContractClient::new(&env, &pool_id);
+fn test_share_metadata_unreadable_without_config() {
+    // #827: missing-config state reproduced by evicting the constructor keys.
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
 
     assert!(pool.try_name().is_err());
     assert!(pool.try_symbol().is_err());

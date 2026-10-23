@@ -517,3 +517,22 @@ unchanged, and an `upgraded` event carrying the new Wasm hash is emitted. Calls
 from any address other than the stored admin fail authorization. Protect the admin
 with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
 document for the redeployment rollback procedure.
+
+### Construction vs. upgrade (issue #827)
+
+Initialization and upgrades are now distinct mechanisms:
+
+* **Fresh deploys.** Each contract's configuration keys (`Admin`, the wired
+  contract references, and the asset/metadata entries) are seeded exactly once
+  by a protocol `__constructor`, which runs automatically inside the deploy
+  transaction (`CreateContractV2` with `CreateContractArgsV2`). Deploy and
+  initialization are atomic: a contract address that exists on-chain is always fully constructed
+  and admin-authenticated, and there is no window in which a deployed contract
+  is uninitialized and exploitable. The former `initialize()` entry points no
+  longer exist; the `AlreadyInitialized` error codes remain defined but are
+  unreachable, retained only as reserved discriminants.
+* **Upgrades.** `upgrade` swaps the Wasm in place and does **not** re-run the
+  constructor — constructor arguments are part of neither the contract address
+  nor the stored configuration after deployment. Any storage migration a new
+  Wasm version requires must therefore be done explicitly (e.g. an admin-gated
+  migration entry point) rather than by re-initializing.

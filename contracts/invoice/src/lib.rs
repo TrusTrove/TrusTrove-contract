@@ -115,7 +115,11 @@ impl InvoiceContract {
             .extend_ttl(&inv_key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
-    /// Initializes the invoice contract with admin and registry references.
+    /// Constructs the invoice contract with admin and registry references.
+    ///
+    /// Runs atomically at deploy time (Soroban protocol constructor, #827):
+    /// there is no window in which the instance exists without its admin and
+    /// registry wiring, so no one can front-run initialization.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -126,22 +130,24 @@ impl InvoiceContract {
     /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `InvoiceError::AlreadyInitialized` if the contract has already been initialized.
     /// * `InvoiceError::InvalidConfiguration` if the registry address equals
-    ///   the admin or this invoice contract.
+    ///   the admin or this invoice contract. A panic here aborts the
+    ///   deployment transaction, so no partially wired instance is ever
+    ///   created.
+    ///   `InvoiceError::AlreadyInitialized` is unreachable from this entry
+    ///   point (the protocol invokes the constructor exactly once) and is
+    ///   kept only for error-code stability.
     ///
     /// # Returns
     /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin, &registry_address);
+    /// // Deploy-and-construct in a single operation:
+    /// // env.register(InvoiceContract, (admin, registry_address))
     /// ```
-    pub fn initialize(env: Env, admin: Address, registry_contract: Address) {
+    pub fn __constructor(env: Env, admin: Address, registry_contract: Address) {
         require_not_paused(&env);
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, InvoiceError::AlreadyInitialized);
-        }
         admin.require_auth();
         Self::assert_valid_wiring_address(&env, &registry_contract, &admin, None, Vec::new(&env));
         env.storage().instance().set(&DataKey::Admin, &admin);
