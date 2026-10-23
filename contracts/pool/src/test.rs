@@ -3,7 +3,7 @@
 extern crate std;
 
 use proptest::prelude::*;
-use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+use proptest::test_runner::{Config as ProptestConfig, RngSeed, TestRunner};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype,
     testutils::{
@@ -8715,4 +8715,207 @@ fn test_fund_invoice_view_failure_preserves_accounting() {
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT);
     assert_eq!(stats.active_invoice_count, 1);
+}
+
+// ===========================================================================
+// ISSUE #1018: u128 → i128 TOKEN AMOUNT BOUNDARIES ON deposit
+// ===========================================================================
+//
+// `deposit` accepts a `u128` but hands it to the SEP-41 token as an `i128`
+// (`usdc_amount as i128`). Everything below pins the boundary between the
+// representable range [0, i128::MAX] and the values that cannot survive the
+// conversion ([i128::MAX + 1, u128::MAX]): the latter must be rejected with
+// the typed `InvalidAmount` (#4) error and leave pool storage, accounting,
+// and both token balances untouched.
+
+/// `i128::MAX` widened to `u128` (2^127 - 1): the largest deposit that is
+/// representable as a token `i128` amount.
+const I128_MAX_U128: u128 = i128::MAX as u128;
+/// 2^127 — the first `u128` that cannot round-trip through `i128`.
+/// Constructed in `u128` so the test code itself never computes
+/// `i128::MAX + 1` (or any boundary value) as an `i128`.
+const OVER_I128_MAX: u128 = I128_MAX_U128 + 1;
+
+/// The explicit boundary set, always exercised by the deterministic sweep
+/// below rather than left for the random sampler to discover: zero, small
+/// positives, both sides of the configured minimum, both sides of
+/// `i128::MAX`, and `u128::MAX`.
+const DEPOSIT_BOUNDARY_AMOUNTS: [u128; 9] = [
+    0,
+    1,
+    DEFAULT_MIN_INITIAL_DEPOSIT - 1,
+    DEFAULT_MIN_INITIAL_DEPOSIT,
+    I128_MAX_U128 - 1,
+    I128_MAX_U128,
+    OVER_I128_MAX,
+    OVER_I128_MAX + 1,
+    u128::MAX,
+];
+
+/// Whether `deposit` accepts `amount` against the fresh, empty pool that
+/// every case below starts from.
+///
+/// Rejections come from two independent rules that both surface as the typed
+/// `InvalidAmount` (#4) error: zero / sub-minimum dust (the initial-deposit
+/// rule, unrelated to any conversion) and amounts above `i128::MAX` (the
+/// #1018 conversion guard — the value could not survive `as i128`).
+fn deposit_within_bounds(amount: u128) -> bool {
+    amount != 0 && (DEFAULT_MIN_INITIAL_DEPOSIT..=I128_MAX_U128).contains(&amount)
+}
+
+/// Runs one deposit of `amount` against a fresh empty pool and checks the
+/// full outcome: exact shares plus balance/accounting changes on success,
+/// the typed error plus untouched state on rejection. Returns a message
+/// instead of panicking so the proptest wrapper can report it per case.
+fn check_deposit_boundary_case(amount: u128) -> Result<(), std::string::String> {
+    let te = setup();
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+
+    let stats_before = te.pool.get_stats();
+    let shares_before = te.pool.balance(&te.lp);
+    let lp_before = usdc.balance(&te.lp);
+    let pool_before = usdc.balance(&te.pool_id);
+
+    // The read-only preview runs the same share math (and the same #1018
+    // guard), so it must agree with the mutating entry point for every
+    // amount — otherwise a caller could preview a deposit that cannot happen.
+    let preview = te.pool.try_preview_deposit(&amount);
+    let result = te.pool.try_deposit(&te.lp, &amount);
+
+    if !deposit_within_bounds(amount) {
+        for (what, err) in [
+            ("deposit", result.err().and_then(|e| e.ok())),
+            ("preview_deposit", preview.err().and_then(|e| e.ok())),
+        ] {
+            if err != Some(PoolError::InvalidAmount.into()) {
+                return Err(std::format!(
+                    "{what} of {amount} must fail with the typed InvalidAmount (#4) error, got {err:?}"
+                ));
+            }
+        }
+
+        // Nothing may move: aggregate accounting, the LP share balance, and
+        // both sides of the token transfer all stay exactly as they were.
+        let stats_after = te.pool.get_stats();
+        if stats_after.total_shares != stats_before.total_shares
+            || stats_after.total_deposits != stats_before.total_deposits
+        {
+            return Err(std::format!(
+                "pool accounting changed after rejected deposit of {amount}"
+            ));
+        }
+        if te.pool.balance(&te.lp) != shares_before {
+            return Err(std::format!(
+                "LP share balance changed after rejected deposit of {amount}"
+            ));
+        }
+        if usdc.balance(&te.lp) != lp_before || usdc.balance(&te.pool_id) != pool_before {
+            return Err(std::format!(
+                "token balances changed after rejected deposit of {amount}"
+            ));
+        }
+        return Ok(());
+    }
+
+    // Accepted: an empty pool mints shares 1:1 and moves exactly `amount`
+    // from the LP to the pool contract.
+    let shares = match result {
+        Ok(Ok(shares)) => shares,
+        other => {
+            return Err(std::format!(
+                "deposit of {amount} must succeed, got {other:?}"
+            ))
+        }
+    };
+    if shares != amount {
+        return Err(std::format!(
+            "empty pool must mint shares 1:1: amount {amount} minted {shares}"
+        ));
+    }
+    match preview {
+        Ok(Ok(previewed)) if previewed == amount => {}
+        other => {
+            return Err(std::format!(
+                "preview_deposit of {amount} must agree with deposit, got {other:?}"
+            ))
+        }
+    }
+
+    let stats_after = te.pool.get_stats();
+    if stats_after.total_shares != amount || stats_after.total_deposits != amount {
+        return Err(std::format!(
+            "expected total_shares == total_deposits == {amount}, got {} / {}",
+            stats_after.total_shares,
+            stats_after.total_deposits
+        ));
+    }
+    // `get_lp_position` is deliberately not read here: for amounts near
+    // i128::MAX its documented `lp_shares * total_deposits` product overflows
+    // `u128` (PoolError::Overflow) — an independent constraint of that view,
+    // not of the deposit itself. The SEP-41 share balance reports the minted
+    // shares directly.
+    if te.pool.balance(&te.lp) != amount as i128 {
+        return Err(std::format!(
+            "share balance must equal the deposited amount {amount}, got {}",
+            te.pool.balance(&te.lp)
+        ));
+    }
+    if usdc.balance(&te.pool_id) != pool_before + amount as i128 {
+        return Err(std::format!(
+            "pool token balance must increase by exactly {amount}"
+        ));
+    }
+    if usdc.balance(&te.lp) != lp_before - amount as i128 {
+        return Err(std::format!(
+            "LP token balance must decrease by exactly {amount}"
+        ));
+    }
+    Ok(())
+}
+
+/// Deterministic sweep: every explicit boundary amount is exercised on every
+/// run, independent of proptest's sampling.
+#[test]
+fn test_deposit_i128_amount_boundary_sweep() {
+    for amount in DEPOSIT_BOUNDARY_AMOUNTS {
+        check_deposit_boundary_case(amount).unwrap_or_else(|msg| panic!("amount {amount}: {msg}"));
+    }
+}
+
+/// Boundary-weighted strategy: the explicit edges are always reachable, plus
+/// samples drawn from both the representable range [0, i128::MAX] and the
+/// non-representable range [i128::MAX + 1, u128::MAX].
+///
+/// Note: `prop_oneof!` keeps to three arms on purpose — with ten or more
+/// arms it falls back to a `vec![]`-building expansion, and `vec!` would
+/// resolve to the `soroban_sdk::vec` imported at the top of this file.
+fn i128_boundary_amount_strategy() -> impl Strategy<Value = u128> {
+    prop_oneof![
+        // Explicit boundaries: every edge in DEPOSIT_BOUNDARY_AMOUNTS stays
+        // reachable (the deterministic sweep above always runs all of them).
+        3 => (0u8..(DEPOSIT_BOUNDARY_AMOUNTS.len() as u8))
+            .prop_map(|i| DEPOSIT_BOUNDARY_AMOUNTS[i as usize]),
+        // Additional values sampled across the representable range ...
+        2 => 0u128..=I128_MAX_U128,
+        // ... and across the non-representable range.
+        1 => OVER_I128_MAX..=u128::MAX,
+    ]
+}
+
+/// Property: the same expectations hold for every boundary value and for
+/// amounts sampled across both sides of the i128 limit.
+#[test]
+fn prop_deposit_amounts_respect_i128_token_boundary() {
+    // Fixed seed: the generated amounts must be identical on every run
+    // (issue #1018 requires reproducible generated cases).
+    let mut config = ProptestConfig::with_cases(16);
+    config.rng_seed = RngSeed::Fixed(1018);
+    let mut runner = TestRunner::new(config);
+    runner
+        .run(&i128_boundary_amount_strategy(), |amount| {
+            let outcome = check_deposit_boundary_case(amount);
+            prop_assert!(outcome.is_ok(), "amount {amount}: {outcome:?}");
+            Ok(())
+        })
+        .unwrap();
 }

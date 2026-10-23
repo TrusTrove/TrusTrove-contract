@@ -19,4 +19,5 @@ trusttrove-registry = { workspace = true }
 trusttrove-invoice = { workspace = true }
 trusttrove-escrow = { workspace = true }
 trusttrove-pool = { workspace = true }
+trusttrove-test-utils = { workspace = true }
 k256 = { version = "0.13.1", default-features = false, features = ["ecdsa"] }

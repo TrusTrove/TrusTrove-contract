@@ -70,6 +70,13 @@ cargo test --workspace
 Add positive and negative tests where applicable. New public functions must include
 rustdoc for arguments, authorization, panics, and return values.
 
+Every `pub fn` inside a `#[contractimpl]` block is a contract entry point, even
+when it was meant to be an internal helper. `docs/api-surface.txt` pins the
+exported methods of `registry`, `invoice`, `escrow`, and `pool`; the
+`api_surface` integration test fails when they drift. If a surface change is
+intentional, update the affected block and replace the manifest's
+`review_note:` with the issue/PR that justifies it.
+
 CI also measures line coverage with [cargo-tarpaulin](https://github.com/xd009642/tarpaulin).
 It never fails the build on a coverage number, but you can reproduce the report
 locally to check that new code is exercised:

@@ -89,6 +89,37 @@ jobs:
       - name: Test
         run: cargo test --workspace
 
+      # Issue #1016: `#[contractimpl]` silently exports every public helper as
+      # a contract entry point. Pin the four core contracts' exported method
+      # lists in docs/api-surface.txt and fail this named step when the surface
+      # drifts without a deliberate manifest + review_note update.
+      - name: Check public Soroban API surface
+        run: cargo test -p trusttrove-integration-tests --test api_surface -- --nocapture
+
+      # Issue #1016: the manifest test proves the snapshot matches the source,
+      # but a developer could still accept a new entry point by regenerating
+      # the manifest without recording why. On pull requests, require the
+      # `review_note:` line to change whenever the manifest changes.
+      - name: Check API surface manifest review note
+        if: github.event_name == 'pull_request'
+        run: |
+          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+          if git diff --quiet FETCH_HEAD -- docs/api-surface.txt; then
+            echo "API surface manifest unchanged; no review note update needed."
+            exit 0
+          fi
+          old_note=$(git show FETCH_HEAD:docs/api-surface.txt 2>/dev/null | grep -m1 '^review_note:' || true)
+          new_note=$(grep -m1 '^review_note:' docs/api-surface.txt || true)
+          if [ -z "$new_note" ]; then
+            echo "::error::docs/api-surface.txt has no review_note line."
+            exit 1
+          fi
+          if [ "$old_note" = "$new_note" ]; then
+            echo "::error::docs/api-surface.txt changed but its review_note did not. Explain the new entry point and cite its issue/PR."
+            exit 1
+          fi
+        shell: bash
+
       - name: Check wasm size budget
         run: |
           echo "=== WASM Size Report ==="

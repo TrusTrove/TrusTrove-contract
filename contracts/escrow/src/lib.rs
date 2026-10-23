@@ -882,6 +882,14 @@ impl EscrowContract {
 
     /// Returns the history of escrow events for an invoice.
     ///
+    /// Reading a live history entry also renews its persistent TTL (issue
+    /// #1010). History is only written by lock/release/default paths, so an
+    /// invoice that has been settled and then only read by an indexer or a
+    /// dispute workflow would otherwise let its audit log become
+    /// archival-eligible even though the record is still needed. Missing
+    /// entries stay missing — only an existing key is extended, matching the
+    /// read-triggered TTL policy used by the pool's `get_lp_position`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice to query.
@@ -901,10 +909,17 @@ impl EscrowContract {
     /// ```
     pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
         let key = DataKey::History(invoice_id);
+        let Some(history) = env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) else {
+            return Vec::new(&env);
+        };
+        // Read-triggered TTL bump (#1010): indexers and dispute workflows read
+        // settled invoices long after the last write, so renew the audit log
+        // whenever it is still present. Extending a key that already has more
+        // than `TTL_THRESHOLD` remaining is a no-op on chain.
         env.storage()
             .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        history
     }
 
     fn append_history(
