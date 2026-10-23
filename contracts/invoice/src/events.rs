@@ -116,6 +116,11 @@ pub fn expiry_window_set(env: &Env, window: u64) {
         .publish((Symbol::new(env, "expiry_window_set"),), window);
 }
 
+pub fn default_grace_seconds_set(env: &Env, seconds: u64) {
+    env.events()
+        .publish((Symbol::new(env, "default_grace_seconds_set"),), seconds);
+}
+
 /// Emitted once per `batch_create` call, after the per-invoice
 /// `invoice_created` events, summarizing the batch outcome. `created` is the
 /// number of invoices persisted; `failed` is the number of rejected entries

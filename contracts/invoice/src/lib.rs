@@ -33,6 +33,9 @@ pub const MAX_FACE_VALUE: u128 = u128::MAX / 10_000;
 /// in the future). The value is ~10 years (10 * 365 * 24 * 60 * 60).
 pub const MAX_INVOICE_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 
+/// Default delay after an invoice's due date before it can be defaulted.
+pub const DEFAULT_GRACE_SECONDS: u64 = 24 * 60 * 60;
+
 /// Fixed 32-byte domain separator that Underwrite agents must include in
 /// the [`AttestationPayload`] they sign. Binds a signature to this
 /// contract's attestation scheme specifically, so it can't be replayed
@@ -1948,11 +1951,11 @@ impl InvoiceContract {
         true
     }
 
-    /// Triggers default on a past-due invoice.
+    /// Triggers default after an invoice's due date and grace period have passed.
     ///
-    /// Default is permitted once `now >= due_date` — the due date has been
-    /// reached or passed. This is consistent with the `create` check that
-    /// rejects `due_date <= now` (due dates must be in the future).
+    /// Default is permitted only when `now > due_date + default_grace_seconds`.
+    /// The grace period defaults to [`DEFAULT_GRACE_SECONDS`] and can be
+    /// changed by the contract admin with `set_default_grace_seconds`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1960,14 +1963,15 @@ impl InvoiceContract {
     ///
     /// # Auth
     /// No authorization is required. Anyone may trigger a default once the due
-    /// date has passed. This removes the single-point-of-failure risk of an
-    /// admin-only gate and ensures LP loss recognition is timely.
+    /// date and configured grace period have passed. This removes the
+    /// single-point-of-failure risk of an admin-only gate and ensures LP loss
+    /// recognition is timely.
     ///
     /// # Panics
     /// * `InvoiceError::NotFound` if the invoice or funding pool cannot be found.
     /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
-    ///   has not yet been reached.
+    /// * `InvoiceError::DueDateNotPassed` if `now <= due_date + default_grace_seconds`.
+    /// * `InvoiceError::MathOverflow` if adding the grace period to the due date overflows.
     /// * `InvoiceError::CrossContractCallFailed` if the pool returns `false` from
     ///   `handle_default`.
     ///
@@ -1978,23 +1982,6 @@ impl InvoiceContract {
     /// ```ignore
     /// client.trigger_default(&invoice_id);
     /// ```
-    ///
-    /// # Coupling with escrow's minimum lock window
-    /// This function's due-date gate (`now >= due_date`) is independent of,
-    /// and has no awareness of, the escrow contract's own
-    /// `DEFAULT_MIN_LOCK_SECONDS` grace period (60s from the escrow lock
-    /// timestamp, roughly `funded_at`). If `due_date` is reached less than
-    /// that window after the invoice was funded, the downstream default call
-    /// may panic from the escrow constraint. The whole transaction reverts, so
-    /// the invoice remains unchanged. The call transitively invokes
-    /// `escrow.handle_default()` (via `pool.handle_default`), which may panic
-    /// with `EscrowError::NotAuthorized`. The whole transaction reverts, so
-    /// there is no persistent state inconsistency, but the caller sees a
-    /// revert originating from a constraint this contract does not itself
-    /// enforce or expose. See
-    /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed`
-    /// for a pinned repro.
-    ///
     pub fn trigger_default(env: Env, invoice_id: BytesN<32>) -> bool {
         require_not_paused(&env);
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -2010,7 +1997,16 @@ impl InvoiceContract {
         if !valid_transition {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        if env.ledger().timestamp() < invoice.due_date {
+        let grace_seconds: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(DEFAULT_GRACE_SECONDS);
+        let default_after = invoice
+            .due_date
+            .checked_add(grace_seconds)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+        if env.ledger().timestamp() <= default_after {
             panic_with_error!(&env, InvoiceError::DueDateNotPassed);
         }
 
@@ -2041,6 +2037,55 @@ impl InvoiceContract {
             events::invoice_defaulted(&env, &invoice_id);
         }
         true
+    }
+
+    /// Sets the delay after an invoice's due date before it may be defaulted.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `seconds` - The grace period in seconds.
+    ///
+    /// # Auth
+    /// Requires authorization from the contract admin.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotInitialized` if the contract admin is unavailable.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    pub fn set_default_grace_seconds(env: Env, seconds: u64) {
+        require_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultGraceSeconds, &seconds);
+        events::default_grace_seconds_set(&env, seconds);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the configured delay after an invoice's due date before it may be defaulted.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u64` - The grace period in seconds, or [`DEFAULT_GRACE_SECONDS`] if unset.
+    pub fn get_default_grace_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(DEFAULT_GRACE_SECONDS)
     }
 
     /// Marks an invoice as defaulted, called by the pool contract during
