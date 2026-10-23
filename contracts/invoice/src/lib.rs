@@ -516,6 +516,8 @@ impl InvoiceContract {
     ///
     /// # Panics
     /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    /// * `InvoiceError::MathOverflow` if the supported-asset counter is already
+    ///   at `u32::MAX`. The asset is not written in that case.
     ///
     /// # Returns
     /// * `()` - No value is returned.
@@ -557,9 +559,12 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::SupportedAssetCount)
             .unwrap_or(0);
+        let next_count = count
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
         env.storage()
             .instance()
-            .set(&DataKey::SupportedAssetCount, &(count + 1));
+            .set(&DataKey::SupportedAssetCount, &next_count);
         env.storage().persistent().set(&key, &true);
         // Issue #863: without this the marker was left at the default
         // persistence bump, could lapse while `SupportedAssetCount` (an
