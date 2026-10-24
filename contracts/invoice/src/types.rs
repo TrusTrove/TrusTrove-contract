@@ -129,6 +129,7 @@ pub enum DataKey {
     // Written by `extend_buyer_index` (issue #831). Appended after existing
     // variants so already-deployed key discriminants stay stable.
     BuyerMembership(Address, u64),
+    DefaultGraceSeconds,
 }
 
 /// A risk attestation recorded against an invoice by a registered

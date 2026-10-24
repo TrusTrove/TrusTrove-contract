@@ -3212,12 +3212,11 @@ fn test_trigger_default_drives_full_pool_and_escrow_chain() {
     assert_eq!(escrow_client.get_locked(&invoice_id), 0);
     assert!(escrow_client.was_released_to_issuer(&invoice_id));
 
-    // Advance past both the invoice's due_date (86400s from creation) and
-    // escrow's DEFAULT_MIN_LOCK_SECONDS grace period (60s from funding), so
-    // trigger_default's due-date gate and escrow's lock-age gate both pass.
-    te.env
-        .ledger()
-        .set_timestamp(te.env.ledger().timestamp() + 86401);
+    // Advance past the invoice's due date and default grace period, as well as
+    // escrow's DEFAULT_MIN_LOCK_SECONDS grace period (60s from funding).
+    te.env.ledger().set_timestamp(
+        te.env.ledger().timestamp() + 86400 + trusttrove_invoice::DEFAULT_GRACE_SECONDS + 1,
+    );
 
     // Drive the real production entry point instead of calling
     // pool.handle_default() directly. This panics with a re-entrancy error

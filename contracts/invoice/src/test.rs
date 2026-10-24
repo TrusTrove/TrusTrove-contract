@@ -14,8 +14,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, MAX_BATCH_SIZE,
-    MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE, TTL_EXTEND_TO, TTL_THRESHOLD,
+    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, DEFAULT_GRACE_SECONDS,
+    MAX_BATCH_SIZE, MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 // Default invoice parameters used across tests.
@@ -1188,7 +1188,8 @@ fn test_get_counts_tracks_every_lifecycle_transition() {
             mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
             assert!(client.repay(&invoice_id));
         } else {
-            env.ledger().set_timestamp(due_date);
+            env.ledger()
+                .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
             assert!(client.trigger_default(&invoice_id));
         }
         expected[InvoiceStatus::Confirmed as usize] -= 1;
@@ -1449,7 +1450,8 @@ fn test_revocation_after_mark_funded_does_not_block_lifecycle() {
     client.confirm_delivery(&invoice_id, &buyer);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
 
-    env.ledger().set_timestamp(due_date + 1);
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
     assert!(client.trigger_default(&invoice_id));
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
 }
@@ -1873,11 +1875,21 @@ fn test_trigger_default_requires_past_due_date() {
     client.confirm_delivery(&invoice_id, &issuer);
     client.confirm_delivery(&invoice_id, &buyer);
 
-    env.ledger().set_timestamp(due_date + 1);
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
 
     let result = client.trigger_default(&invoice_id);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
+}
+
+#[test]
+fn test_default_grace_seconds_can_be_configured() {
+    let (_env, client, _issuer, _buyer, _registry, _usdc) = setup();
+
+    assert_eq!(client.get_default_grace_seconds(), DEFAULT_GRACE_SECONDS);
+    client.set_default_grace_seconds(&3600);
+    assert_eq!(client.get_default_grace_seconds(), 3600);
 }
 
 // ============== ISSUE #211: trigger_default FROM INVALID STATUSES ==============
@@ -1939,9 +1951,7 @@ fn test_trigger_default_from_repaid_rejected() {
 }
 
 #[test]
-fn test_trigger_default_succeeds_at_exact_due_date() {
-    // Boundary test: default must be allowed when `now == due_date`
-    // (previously panicked due to `<=` comparison — issue #200)
+fn test_trigger_default_succeeds_after_grace_period() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
@@ -1955,12 +1965,23 @@ fn test_trigger_default_succeeds_at_exact_due_date() {
     client.confirm_delivery(&invoice_id, &issuer);
     client.confirm_delivery(&invoice_id, &buyer);
 
-    // Set ledger to exactly the due date
-    env.ledger().set_timestamp(due_date);
+    // Set ledger to just after the grace-window expiry.
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
 
     let result = client.trigger_default(&invoice_id);
     assert!(result);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_trigger_default_rejected_at_exact_grace_boundary() {
+    let (env, client, _buyer, invoice_id, _pool, _escrow) = setup_confirmed_invoice();
+    let due_date = client.get(&invoice_id).due_date;
+    env.ledger().set_timestamp(due_date + DEFAULT_GRACE_SECONDS);
+
+    client.trigger_default(&invoice_id);
 }
 
 #[test]
@@ -1990,7 +2011,7 @@ fn test_trigger_default_fails_before_due_date() {
 // explicit `mock_auths` + cross-contract call to `pool.handle_default` surfaced
 // `Error(Context, MissingValue)` regardless of `sub_invokes` shape. The same
 // happy-path is covered by `test_trigger_default_requires_past_due_date` and
-// `test_trigger_default_succeeds_at_exact_due_date` via `setup()`.
+// `test_trigger_default_succeeds_after_grace_period` via `setup()`.
 #[test]
 // `trigger_default` calls `admin.require_auth()` directly, so non-admin
 // callers are rejected by Soroban's native `Error(Auth, InvalidAction)`
@@ -2059,7 +2080,7 @@ fn test_trigger_default_stranger_panics() {
 // Note: `test_trigger_default_admin_succeeds_after_due_date_with_auth` was
 // removed as part of PR #363 (closing #314). The happy-path admin-trigger
 // behavior is already exercised by `test_trigger_default_requires_past_due_date`
-// and `test_trigger_default_succeeds_at_exact_due_date`, both of which rely
+// and `test_trigger_default_succeeds_after_grace_period`, both of which rely
 // on the shared `setup()` helper. Keeping this note here so future readers
 // know the gap was intentional and not an oversight.
 
@@ -2202,8 +2223,9 @@ fn test_status_membership_marker_written_on_create_and_rolled_on_transitions() {
         &invoice_id
     ));
 
-    // Confirmed -> Defaulted once the due date is reached.
-    env.ledger().set_timestamp(due_date);
+    // Confirmed -> Defaulted once the grace window has elapsed.
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
     client.trigger_default(&invoice_id);
     assert!(!raw_status_membership(
         &env,
@@ -3916,7 +3938,8 @@ fn test_trigger_default_rolls_back_when_pool_handle_default_fails() {
 
     MockPoolClient::new(&env, &pool).set_return_values(&false, &true);
     let due_date = client.get(&invoice_id).due_date;
-    env.ledger().set_timestamp(due_date);
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
 
     let result = env.try_invoke_contract::<bool, soroban_sdk::Error>(
         &client.address,
@@ -4117,7 +4140,8 @@ fn test_repay_from_defaulted_rejected() {
     client.confirm_delivery(&invoice_id, &issuer);
     client.confirm_delivery(&invoice_id, &buyer);
 
-    env.ledger().set_timestamp(due_date + 1);
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
     client.trigger_default(&invoice_id);
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
 

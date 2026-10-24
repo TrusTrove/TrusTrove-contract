@@ -785,7 +785,7 @@ fn test_cross_contract_partial_repayment_lifecycle() {
 }
 
 #[test]
-#[should_panic(expected = "Contract re-entry is not allowed")]
+#[should_panic(expected = "Error(Contract, #11)")]
 fn test_partial_repayment_then_default_lifecycle() {
     // Policy for the repaid portion:
     // - Buyer's partial repayments are real funds that have reached escrow.
