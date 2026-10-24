@@ -2617,7 +2617,7 @@ fn test_receive_repayment_with_refund_accepts_time_inconsistent_split() {
 // Happy path for receive_repayment_with_refund (#583): the buyer receives
 // exactly `refund` via the USDC transfer, only the remaining yield slice is
 // credited to the pool, and the repayment_received event carries
-// (amount, yield_amount).
+// (amount, lp_yield, protocol_cut).
 #[test]
 fn test_receive_repayment_with_refund_happy_path() {
     let te = setup();
@@ -2766,6 +2766,221 @@ fn test_receive_repayment_with_refund_zero_refund_matches_receive_repayment() {
     assert_eq!(
         <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
         (amount, DEFAULT_YIELD_AMOUNT, 0)
+    );
+}
+
+// -----------------------------------------------------------------------------
+// EVENT CATALOG SCHEMA TESTS (#1012): Verify documented repayment and default
+// event topics, schemas, and examples against contract assertions.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_doc_example_receive_repayment_no_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let amount = 10_000_000_000u128; // Face value
+    let gross_yield = 200_000_000u128; // 200 bps discount on 10_000_000_000
+    let protocol_cut = 0u128; // Fee disabled (0 bps)
+    let lp_yield = gross_yield - protocol_cut;
+
+    let ok = te.pool.receive_repayment(&invoice_id, &amount);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 200_000_000, 0)
+    );
+}
+
+#[test]
+fn test_doc_example_receive_repayment_with_protocol_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1_000u32; // 10% protocol fee
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+    let amount = 10_000_000_000u128; // Face value
+    let gross_yield = 200_000_000u128;
+    let protocol_cut = gross_yield * fee_bps as u128 / 10_000; // 20_000_000
+    let lp_yield = gross_yield - protocol_cut; // 180_000_000
+
+    let ok = te.pool.receive_repayment(&invoice_id, &amount);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 180_000_000, 20_000_000)
+    );
+}
+
+#[test]
+fn test_doc_example_receive_repayment_with_refund_no_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let amount = 10_000_000_000u128;
+    let refund = 120_000_000u128; // 12 USDC refunded to buyer
+    let net_yield = amount - DEFAULT_FUNDED_AMOUNT - refund; // 80_000_000
+    let protocol_cut = 0u128;
+    let lp_yield = net_yield;
+
+    let ok = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 80_000_000, 0)
+    );
+}
+
+#[test]
+fn test_doc_example_receive_repayment_with_refund_with_protocol_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1_000u32; // 10%
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+    let amount = 10_000_000_000u128;
+    let refund = 120_000_000u128;
+    let net_yield = amount - DEFAULT_FUNDED_AMOUNT - refund; // 80_000_000
+    let protocol_cut = net_yield * fee_bps as u128 / 10_000; // 8_000_000
+    let lp_yield = net_yield - protocol_cut; // 72_000_000
+
+    let ok = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 72_000_000, 8_000_000)
+    );
+}
+
+#[test]
+fn test_doc_example_handle_default_and_no_repayment_event() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86400 + 60);
+
+    let ok = te.pool.handle_default(&invoice_id);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let mut defaulted_event_found = false;
+    let mut repayment_event_found = false;
+
+    for (contract, topics, data) in events.iter() {
+        if contract == te.pool_id && !topics.is_empty() {
+            if let Ok(topic0) = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()) {
+                if topic0 == Symbol::new(&te.env, "invoice_defaulted") {
+                    defaulted_event_found = true;
+                    assert_eq!(
+                        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+                        invoice_id
+                    );
+                    assert_eq!(
+                        u128::try_from_val(&te.env, &data).unwrap(),
+                        DEFAULT_FUNDED_AMOUNT
+                    );
+                    assert_eq!(
+                        u128::try_from_val(&te.env, &data).unwrap(),
+                        9_800_000_000u128
+                    );
+                } else if topic0 == Symbol::new(&te.env, "repayment_received") {
+                    repayment_event_found = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        defaulted_event_found,
+        "invoice_defaulted event must be emitted"
+    );
+    assert!(
+        !repayment_event_found,
+        "handle_default must NOT emit repayment_received event"
     );
 }
 

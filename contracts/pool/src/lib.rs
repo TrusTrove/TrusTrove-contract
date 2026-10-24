@@ -1548,7 +1548,7 @@ impl PoolContract {
         funded
     }
 
-    /// Receives invoice repayment and updates pool liquidity metrics.
+    /// Receives invoice repayment, updates pool liquidity metrics, and emits `repayment_received`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1588,8 +1588,8 @@ impl PoolContract {
         true
     }
 
-    /// Receives invoice repayment with a partial refund to the buyer and updates
-    /// pool liquidity metrics.
+    /// Receives invoice repayment with a partial refund to the buyer, updates
+    /// pool liquidity metrics, and emits `repayment_received`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1754,14 +1754,14 @@ impl PoolContract {
     ///    band and `EscrowDefaultNotReleased` trips (#21).
     /// 2. Calls `invoice.mark_defaulted()` to persist the `Defaulted` status
     ///    on the invoice record, update the status index, and emit the
-    ///    `invoice_defaulted` event.
-    /// 3. Updates the pool's local accounting and removes the funded invoice
-    ///    entry. When escrow returned the principal (`true`), only
-    ///    `TotalFunded`, `TotalLossRealised`, and `ActiveInvoiceCount`
-    ///    change — `TotalDeposits` is left untouched because the recovered
-    ///    principal backs it (issue #439). When the principal was already
-    ///    with the issuer, `TotalDeposits` additionally shrinks by the funded
-    ///    amount so deposit accounting keeps matching the pool's token
+    ///    invoice contract's `invoice_defaulted` event.
+    /// 3. Updates the pool's local accounting, removes the funded invoice
+    ///    entry, and emits the pool's `invoice_defaulted` event. When escrow returned
+    ///    the principal (`true`), only `TotalFunded`, `TotalLossRealised`, and
+    ///    `ActiveInvoiceCount` change — `TotalDeposits` is left untouched because
+    ///    the recovered principal backs it (issue #439). When the principal was
+    ///    already with the issuer, `TotalDeposits` additionally shrinks by the
+    ///    funded amount so deposit accounting keeps matching the pool's token
     ///    balance; shares are not burned, the loss surfaces as a lower share
     ///    price.
     ///

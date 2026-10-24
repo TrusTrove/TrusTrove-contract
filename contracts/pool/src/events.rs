@@ -6,11 +6,13 @@
 #![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
+/// Emitted by `upgrade` when the pool contract WASM bytecode is updated.
 pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
     env.events()
         .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());
 }
 
+/// Emitted by `__constructor` when the pool contract is deployed and initialized.
 pub fn pool_initialized(
     env: &Env,
     admin: &Address,
@@ -30,6 +32,7 @@ pub fn pool_initialized(
     );
 }
 
+/// Emitted by `deposit` when an LP deposits USDC and receives pool shares.
 pub fn lp_deposited(env: &Env, lp: &Address, usdc_amount: u128, shares_issued: u128) {
     env.events().publish(
         (Symbol::new(env, "lp_deposited"), lp.clone()),
@@ -37,6 +40,7 @@ pub fn lp_deposited(env: &Env, lp: &Address, usdc_amount: u128, shares_issued: u
     );
 }
 
+/// Emitted by `withdraw` when an LP redeems pool shares for USDC.
 pub fn lp_withdrawn(env: &Env, lp: &Address, usdc_amount: u128, shares_burned: u128) {
     env.events().publish(
         (Symbol::new(env, "lp_withdrawn"), lp.clone()),
@@ -55,6 +59,7 @@ pub fn shares_transferred(env: &Env, from: &Address, to: &Address, amount: i128)
     );
 }
 
+/// Emitted by `fund_invoice` when the pool funds an invoice.
 pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_funded"), invoice_id.clone()),
@@ -62,6 +67,14 @@ pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     );
 }
 
+/// Emitted by `settle_repayment` during repayment processing (`receive_repayment`
+/// and `receive_repayment_with_refund`). Topics index the event name and the
+/// repaid `invoice_id`. Data payload is a 3-tuple `(amount, lp_yield, protocol_cut)`:
+/// - `amount`: Total repaid face value / payment amount in USDC stroops.
+/// - `lp_yield`: Yield distributed to liquidity providers (`TotalDeposits` and `TotalYieldDistributed`).
+/// - `protocol_cut`: Treasury cut routed to the protocol fee recipient (0 if fee is disabled).
+///
+/// Note: Defaults do NOT emit this event; `handle_default` emits `invoice_defaulted` instead.
 pub fn repayment_received(
     env: &Env,
     invoice_id: &BytesN<32>,
@@ -75,6 +88,10 @@ pub fn repayment_received(
     );
 }
 
+/// Emitted by `handle_default` when an invoice defaults and the funded principal
+/// is absorbed by the pool as a realized capital loss. Topics index the event name
+/// and the defaulted `invoice_id`. Data payload is `loss_amount` (the funded principal
+/// in USDC stroops that was lost).
 pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_defaulted"), invoice_id.clone()),
@@ -82,7 +99,7 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
     );
 }
 
-/// Publish the old and new utilization caps as the event data tuple.
+/// Emitted by `set_max_utilization` when the admin updates the pool utilization cap.
 ///
 /// Topic: `max_utilization_updated`; data: `(old_cap_bps, new_cap_bps)`.
 pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
@@ -92,6 +109,7 @@ pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
     );
 }
 
+/// Emitted by `transfer_ownership` when the pool admin role is transferred.
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ownership_transferred"), old_admin.clone()),
@@ -113,6 +131,7 @@ pub fn unpaused(env: &Env, admin: &Address) {
         .publish((Symbol::new(env, "unpaused"), admin.clone()), ());
 }
 
+/// Emitted by `set_protocol_fee` when the admin updates the protocol fee rate or treasury.
 pub fn protocol_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32, treasury: &Address) {
     env.events().publish(
         (Symbol::new(env, "protocol_fee_updated"),),
