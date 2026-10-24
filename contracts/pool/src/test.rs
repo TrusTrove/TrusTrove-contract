@@ -2991,10 +2991,6 @@ fn test_doc_example_handle_default_and_no_repayment_event() {
                         u128::try_from_val(&te.env, &data).unwrap(),
                         DEFAULT_FUNDED_AMOUNT
                     );
-                    assert_eq!(
-                        u128::try_from_val(&te.env, &data).unwrap(),
-                        9_800_000_000u128
-                    );
                 } else if topic0 == Symbol::new(&te.env, "repayment_received") {
                     repayment_event_found = true;
                 }
@@ -3105,12 +3101,8 @@ fn test_doc_example_handle_default_recovered_principal() {
                         BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
                         invoice_id
                     );
-                    // Payload is the defaulted funded principal (9_800_000_000)
+                    // Payload is the defaulted funded principal
                     assert_eq!(u128::try_from_val(&te.env, &data).unwrap(), funded_amount);
-                    assert_eq!(
-                        u128::try_from_val(&te.env, &data).unwrap(),
-                        9_800_000_000u128
-                    );
                 } else if topic0 == Symbol::new(&te.env, "repayment_received") {
                     repayment_event_found = true;
                 }
