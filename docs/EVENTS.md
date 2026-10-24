@@ -447,7 +447,7 @@ Emitted when the pool receives repayment for an invoice (via `receive_repayment(
 - `lp_yield`: Yield distributed to liquidity providers (credited to `TotalDeposits` and `TotalYieldDistributed`).
 - `protocol_cut`: Fee cut transferred to the protocol treasury address (0 if protocol fee is disabled).
 
-> **Important**: `handle_default()` does **not** emit `repayment_received`. Defaults represent realized capital losses and emit `invoice_defaulted` instead.
+> **Important**: `handle_default()` does **not** emit `repayment_received`. Defaults emit `invoice_defaulted` instead (with the defaulted funded principal payload).
 
 **Emitted by:** `settle_repayment()` called by `receive_repayment()` and `receive_repayment_with_refund()` in `contracts/pool/src/lib.rs`  
 **Source:** `contracts/pool/src/events.rs:78`
@@ -500,31 +500,53 @@ When an invoice is repaid early via `receive_repayment_with_refund()`, part of t
 
 ### `invoice_defaulted`
 
-Emitted when the pool handles a defaulted invoice via `handle_default()`. The funded principal is written off as an unrecoverable capital loss by reducing `TotalDeposits` (when principal was released to the issuer) and removing the funded invoice entry.
+Emitted when the pool handles a defaulted invoice via `handle_default()`. Topics index the event name and the defaulted `invoice_id`. The data payload is the defaulted funded principal (`funded_amount`).
+
+> **Note on Payload Semantics**: The data payload represents the invoice's defaulted funded principal in USDC stroops, and is **not necessarily an LP capital loss**. The pool executes one of two paths depending on escrow release status:
+> - **Unrecoverable Loss Path (`escrow_released == false`, standard post-#819 flow):** When the funded principal was already paid out to the invoice issuer at funding time, escrow cannot recover funds on default. The pool absorbs the loss by reducing `TotalDeposits` by `funded_amount` (lowering the LP share price rather than burning shares), while `TotalFunded` is decremented.
+> - **Recovered Principal Path (`escrow_released == true`, pre-#819 locks or unreleased escrow):** When escrow still held and returned the principal to the pool, `TotalDeposits` is deliberately left unchanged to preserve LP capital and share value (issue #439), while `TotalFunded` is decremented.
+
+In both paths, `invoice_defaulted` emits `funded_amount` as its data payload and increments `TotalLossRealised`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"invoice_defaulted"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
-| **Data** | `u128` | Loss amount in USDC stroops (funded principal lost) |
+| **Data** | `u128` | Defaulted funded principal in USDC stroops (`funded_amount`; not necessarily the LP capital loss if escrow returned the principal) |
 
 **Emitted by:** `handle_default()` in `contracts/pool/src/lib.rs`  
-**Source:** `contracts/pool/src/events.rs:95`
+**Source:** `contracts/pool/src/events.rs:105`
 
-#### Example
+#### Examples
 
-##### Example 3: Default Handling (`handle_default`)
+##### Example 3A: Default with Unrecoverable Loss (`escrow_released == false`)
 
-When an invoice defaults past its due date, the invoice contract invokes `pool.handle_default(invoice_id)`. The pool verifies that escrow released funds to the issuer, books the loss, and emits `invoice_defaulted`.
+When an invoice defaults and the principal was already released to the issuer at funding time (the standard post-#819 flow), escrow returns `false` on `handle_default`. The pool verifies via `escrow.was_released_to_issuer` that funds reached the issuer, books the unrecoverable loss by reducing `TotalDeposits`, and emits `invoice_defaulted`.
 
 - Invoice Face Value: 1,000 USDC (`10_000_000_000` stroops)
 - Funded Amount: 980 USDC (`9_800_000_000` stroops)
-- Realized Loss Amount: `9_800_000_000` stroops
+- Escrow Status: Principal released to issuer (`escrow_released == false`, `was_released_to_issuer == true`)
+- `TotalDeposits` Impact: Reduced by `9_800_000_000` stroops (realized LP capital loss, lowering share price)
+- `TotalFunded` Impact: Decreased by `9_800_000_000` stroops
+- `TotalLossRealised` Impact: Increased by `9_800_000_000` stroops
 - **Topics**: `[Symbol("invoice_defaulted"), BytesN<32>(invoice_id)]`
-- **Data**: `9_800_000_000u128`
+- **Data**: `9_800_000_000u128` (defaulted funded principal)
 
-> Note: Unlike repayments, no yield or protocol fee cut is involved, and `repayment_received` is never emitted.
+##### Example 3B: Default with Recovered Principal (`escrow_released == true`)
+
+When escrow still held the principal at default time (e.g., pre-#819 locks or unreleased escrow), `escrow.handle_default` transfers the principal back to the pool and returns `true`. The pool decrements `TotalFunded`, leaves `TotalDeposits` unchanged so LP capital and share price are preserved (issue #439), and emits `invoice_defaulted`.
+
+- Invoice Face Value: 1,000 USDC (`10_000_000_000` stroops)
+- Funded Amount: 980 USDC (`9_800_000_000` stroops)
+- Escrow Status: Principal returned by escrow to pool (`escrow_released == true`)
+- `TotalDeposits` Impact: **Unchanged** (LP capital and share value preserved)
+- `TotalFunded` Impact: Decreased by `9_800_000_000` stroops
+- `TotalLossRealised` Impact: Increased by `9_800_000_000` stroops
+- **Topics**: `[Symbol("invoice_defaulted"), BytesN<32>(invoice_id)]`
+- **Data**: `9_800_000_000u128` (defaulted funded principal)
+
+> Note: Unlike repayments, no yield or protocol fee cut is involved in either path, and `repayment_received` is never emitted by `handle_default()`.
 
 ---
 
@@ -1075,7 +1097,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 2. **Use topics for filtering** — `topic[0]` is always the event name (Symbol)
 3. **Data decoding** — payloads use Soroban SDK xdr encoding; decode based on the schemas above
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
-5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `invoice_defaulted` tracks realized default losses
+5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `invoice_defaulted` tracks defaulted funded principal
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`
 7. **Batch events** — `batch_invoices_created` and `batch_invoices_listed` are summary events emitted after the per-invoice events of the same call. `pool::batch_fund_invoice` has no summary event; reconcile it from the individual `invoice_funded` events instead, which is also what tells you which entries a capacity stop skipped.
 

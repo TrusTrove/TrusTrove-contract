@@ -88,10 +88,20 @@ pub fn repayment_received(
     );
 }
 
-/// Emitted by `handle_default` when an invoice defaults and the funded principal
-/// is absorbed by the pool as a realized capital loss. Topics index the event name
-/// and the defaulted `invoice_id`. Data payload is `loss_amount` (the funded principal
-/// in USDC stroops that was lost).
+/// Emitted by `handle_default` when an invoice defaults. Topics index the event name
+/// and the defaulted `invoice_id`. Data payload is `loss_amount`: the defaulted
+/// funded principal in USDC stroops.
+///
+/// Note that this payload represents the invoice's defaulted funded principal and
+/// is not necessarily an LP capital loss:
+/// - **Unrecoverable Loss Path (`escrow_released == false`):** When the principal
+///   had already been released to the issuer at funding time, escrow recovers nothing
+///   on default. `TotalDeposits` shrinks by `loss_amount` so LPs absorb the loss as a
+///   lower share price.
+/// - **Recovered Principal Path (`escrow_released == true`):** When escrow still held
+///   and returned the principal (e.g. pre-#819 locks or unreleased escrow), `TotalDeposits`
+///   is deliberately left unchanged to preserve LP capital and share value (issue #439),
+///   while the event still emits the defaulted funded principal.
 pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_defaulted"), invoice_id.clone()),

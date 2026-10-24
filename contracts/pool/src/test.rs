@@ -2939,14 +2939,42 @@ fn test_doc_example_handle_default_and_no_repayment_event() {
     let invoice_id = create_and_list(&te, &te.usdc_id);
     te.pool.fund_invoice(&invoice_id);
 
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
     te.env
         .ledger()
         .set_timestamp(te.env.ledger().timestamp() + 86400 + 60);
 
     let ok = te.pool.handle_default(&invoice_id);
     assert!(ok);
-
+    // Capture before further queries: sdk >=22 test Envs reset the event
+    // buffer at every top-level invocation.
     let events = te.env.events().all();
+
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+
+    // In the unrecoverable-loss path (Example 3A, escrow_released == false),
+    // principal was already paid to issuer: TotalDeposits shrinks by funded_amount
+    // so LPs absorb the loss via lower share price.
+    assert_eq!(
+        after.total_deposits,
+        before.total_deposits - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(
+        after.total_loss_realised,
+        before.total_loss_realised + DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value - DEFAULT_FUNDED_AMOUNT
+    );
+
     let mut defaulted_event_found = false;
     let mut repayment_event_found = false;
 
@@ -2977,6 +3005,122 @@ fn test_doc_example_handle_default_and_no_repayment_event() {
     assert!(
         defaulted_event_found,
         "invoice_defaulted event must be emitted"
+    );
+    assert!(
+        !repayment_event_found,
+        "handle_default must NOT emit repayment_received event"
+    );
+}
+
+#[test]
+fn test_doc_example_handle_default_recovered_principal() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let funded_amount = DEFAULT_FUNDED_AMOUNT; // 9_800_000_000
+
+    // Simulate escrow still holding the principal (pre-#819 or unreleased escrow)
+    // so that escrow.handle_default returns true and returns the principal to the pool.
+    let escrow_bal_key = TKey(te.escrow_id.clone());
+    te.env.as_contract(&te.usdc_id, || {
+        let cur: i128 = te
+            .env
+            .storage()
+            .persistent()
+            .get(&escrow_bal_key)
+            .unwrap_or(0);
+        te.env
+            .storage()
+            .persistent()
+            .set(&escrow_bal_key, &(cur + funded_amount as i128));
+    });
+
+    te.env.as_contract(&te.escrow_id, || {
+        te.env.storage().persistent().set(
+            &trusttrove_escrow::DataKey::Locked(invoice_id.clone()),
+            &trusttrove_escrow::EscrowRecord {
+                invoice_id: invoice_id.clone(),
+                amount: funded_amount,
+                locked_at: te.env.ledger().timestamp(),
+                issuer: te.issuer.clone(),
+            },
+        );
+        te.env
+            .storage()
+            .persistent()
+            .remove(&trusttrove_escrow::DataKey::IssuerReleased(
+                invoice_id.clone(),
+            ));
+    });
+
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86400 + 60);
+
+    let ok = te.pool.handle_default(&invoice_id);
+    assert!(ok);
+    // Capture before further queries: sdk >=22 test Envs reset the event
+    // buffer at every top-level invocation.
+    let events = te.env.events().all();
+
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+
+    // In the recovered-principal path (Example 3B, escrow_released == true),
+    // TotalDeposits is deliberately left unchanged to preserve LP capital and share value (issue #439).
+    assert_eq!(
+        after.total_deposits, before.total_deposits,
+        "TotalDeposits must remain unchanged on recovered principal"
+    );
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - funded_amount,
+        "TotalFunded must decrease by funded_amount"
+    );
+    assert_eq!(
+        after.total_loss_realised,
+        before.total_loss_realised + funded_amount,
+        "TotalLossRealised tracks defaulted funded principal"
+    );
+    assert_eq!(after.active_invoice_count, before.active_invoice_count - 1);
+    assert_eq!(
+        position_after.usdc_value, position_before.usdc_value,
+        "LP position value must be preserved when principal is recovered"
+    );
+
+    let mut defaulted_event_found = false;
+    let mut repayment_event_found = false;
+
+    for (contract, topics, data) in events.iter() {
+        if contract == te.pool_id && !topics.is_empty() {
+            if let Ok(topic0) = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()) {
+                if topic0 == Symbol::new(&te.env, "invoice_defaulted") {
+                    defaulted_event_found = true;
+                    assert_eq!(
+                        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+                        invoice_id
+                    );
+                    // Payload is the defaulted funded principal (9_800_000_000)
+                    assert_eq!(u128::try_from_val(&te.env, &data).unwrap(), funded_amount);
+                    assert_eq!(
+                        u128::try_from_val(&te.env, &data).unwrap(),
+                        9_800_000_000u128
+                    );
+                } else if topic0 == Symbol::new(&te.env, "repayment_received") {
+                    repayment_event_found = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        defaulted_event_found,
+        "invoice_defaulted event must be emitted with defaulted funded principal"
     );
     assert!(
         !repayment_event_found,
