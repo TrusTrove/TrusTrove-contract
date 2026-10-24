@@ -70,20 +70,21 @@ fn setup_fee_lifecycle() -> FeeLifecycle {
         });
     }
 
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry = RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
     let metadata: Map<String, String> = Map::new(&env);
     registry.register_issuer(&issuer, &metadata);
     registry.register_buyer(&buyer, &metadata);
     registry.verify_profile(&admin, &issuer, &true);
     registry.verify_profile(&admin, &buyer, &true);
 
-    let invoice_id = env.register(InvoiceContract, ());
-    let escrow_id = env.register(EscrowContract, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(InvoiceContract, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
@@ -98,20 +99,22 @@ fn setup_fee_lifecycle() -> FeeLifecycle {
     );
     invoice.set_agent_registry_contract(&agent_reg_id);
 
-    let escrow = EscrowContractClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
     pool.set_max_utilization(&admin, &10000);
 
@@ -296,9 +299,8 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry = RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
 
     let metadata: Map<String, String> = Map::new(&env);
     registry.register_issuer(&issuer, &metadata);
@@ -309,12 +311,14 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     assert!(registry.is_verified(&buyer));
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register(InvoiceContract, ());
-    let escrow_id = env.register(EscrowContract, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(InvoiceContract, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
@@ -331,21 +335,22 @@ fn test_cross_contract_invoice_pool_escrow_lifecycle() {
     );
     invoice.set_agent_registry_contract(&agent_reg_id);
 
-    let escrow = EscrowContractClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
-
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
     pool.set_max_utilization(&admin, &10000); // 100% cap
 
@@ -601,30 +606,40 @@ fn test_repay_conserves_face_value_before_at_and_after_maturity() {
 #[should_panic]
 fn test_cross_contract_unauthorized_pool_setter_rejected() {
     let env = Env::default();
-    env.set_auths(&[]);
+    env.mock_all_auths();
 
     let admin = Address::generate(&env);
-    let registry_id = env.register(RegistryContract, ());
-    let invoice_id = env.register(InvoiceContract, ());
-    let escrow_id = env.register(EscrowContract, ());
-    let pool_id = env.register(PoolContract, ());
     let usdc_id = Address::generate(&env);
-
-    let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &DEFAULT_SHARE_DECIMALS,
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(InvoiceContract, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
 
-    // Non-admin call without authorization must fail
+    let pool = PoolContractClient::new(&env, &pool_id);
+
+    // #827: the pool is constructed with its admin auth mocked above; the
+    // rejection under test is the setter. Drop every mocked authorization —
+    // only the stored admin may change the cap.
+    env.set_auths(&[]);
     let attacker = Address::generate(&env);
     pool.set_max_utilization(&attacker, &5000);
 }
@@ -653,9 +668,8 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry = RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
 
     let metadata: Map<String, String> = Map::new(&env);
     registry.register_issuer(&issuer, &metadata);
@@ -664,12 +678,14 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     registry.verify_profile(&admin, &buyer, &true);
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register(InvoiceContract, ());
-    let escrow_id = env.register(EscrowContract, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(InvoiceContract, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
@@ -685,21 +701,22 @@ fn test_cross_contract_partial_repayment_lifecycle() {
     );
     invoice.set_agent_registry_contract(&agent_reg_id);
 
-    let escrow = EscrowContractClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
-
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
     pool.set_max_utilization(&admin, &10000);
 
@@ -806,9 +823,8 @@ fn test_partial_repayment_then_default_lifecycle() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry = RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
 
     let metadata: Map<String, String> = Map::new(&env);
     registry.register_issuer(&issuer, &metadata);
@@ -817,12 +833,14 @@ fn test_partial_repayment_then_default_lifecycle() {
     registry.verify_profile(&admin, &buyer, &true);
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register(InvoiceContract, ());
-    let escrow_id = env.register(EscrowContract, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(InvoiceContract, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
@@ -838,21 +856,22 @@ fn test_partial_repayment_then_default_lifecycle() {
     );
     invoice.set_agent_registry_contract(&agent_reg_id);
 
-    let escrow = EscrowContractClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
-
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
     pool.set_max_utilization(&admin, &10000);
 
@@ -1000,9 +1019,8 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     });
 
     // 2. Deploy real Registry contract & register participants
-    let registry_id = env.register(RegistryContract, ());
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
     let registry = RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
 
     let metadata: Map<String, String> = Map::new(&env);
     registry.register_issuer(&issuer, &metadata);
@@ -1011,12 +1029,14 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     registry.verify_profile(&admin, &buyer, &true);
 
     // 3. Deploy real Invoice, Escrow, and Pool contracts
-    let invoice_id = env.register(InvoiceContract, ());
-    let escrow_id = env.register(EscrowContract, ());
-    let pool_id = env.register(PoolContract, ());
+    let pool_id = Address::generate(&env);
+    let invoice_id = env.register(InvoiceContract, (admin.clone(), registry_id.clone()));
+    let escrow_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
 
     let invoice = InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
@@ -1032,21 +1052,22 @@ fn test_partial_repayment_then_default_pool_loss_calculation() {
     );
     invoice.set_agent_registry_contract(&agent_reg_id);
 
-    let escrow = EscrowContractClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
-
     let pool = PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &DEFAULT_SHARE_DECIMALS,
+    env.register_at(
+        &pool_id,
+        PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            DEFAULT_SHARE_DECIMALS,
+        ),
     );
     pool.set_max_utilization(&admin, &10000);
 

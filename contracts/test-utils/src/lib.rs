@@ -101,9 +101,8 @@ pub fn setup_full_protocol() -> FullProtocol {
     let lp = Address::generate(&env);
 
     // 1. Registry
-    let registry_id = env.register(trusttrove_registry::RegistryContract, ());
+    let registry_id = env.register(trusttrove_registry::RegistryContract, (admin.clone(),));
     let registry = trusttrove_registry::RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
 
     let empty_meta = Map::new(&env);
     registry.register_issuer(&issuer, &empty_meta);
@@ -124,30 +123,41 @@ pub fn setup_full_protocol() -> FullProtocol {
             .set(&buyer_bal_key, &100_000_000_000_000i128);
     });
 
-    // 3. Contracts
-    let invoice_id = env.register(trusttrove_invoice::InvoiceContract, ());
-    let escrow_id = env.register(trusttrove_escrow::EscrowContract, ());
-    let pool_id = env.register(trusttrove_pool::PoolContract, ());
+    // 3. Contracts. #827 moved every initializer to a deploy-time
+    //    `__constructor`, so escrow and pool — which reference each other —
+    //    are registered at pre-generated addresses (escrow first, since the
+    //    pool constructor cross-checks the escrow's funding asset).
+    let invoice_id = env.register(
+        trusttrove_invoice::InvoiceContract,
+        (admin.clone(), registry_id.clone()),
+    );
+    let pool_id = Address::generate(&env);
+    let escrow_id = Address::generate(&env);
+    env.register_at(
+        &escrow_id,
+        trusttrove_escrow::EscrowContract,
+        (admin.clone(), pool_id.clone(), usdc_id.clone()),
+    );
+    env.register_at(
+        &pool_id,
+        trusttrove_pool::PoolContract,
+        (
+            admin.clone(),
+            invoice_id.clone(),
+            escrow_id.clone(),
+            usdc_id.clone(),
+            registry_id.clone(),
+            admin.clone(),
+            10_000_000u128,
+            String::from_str(&env, "TrusTrove USDC Pool Shares"),
+            String::from_str(&env, "TT-USDC"),
+            7u32,
+        ),
+    );
 
     let invoice = trusttrove_invoice::InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
-
     let escrow = trusttrove_escrow::EscrowContractClient::new(&env, &escrow_id);
-    escrow.initialize(&admin, &pool_id, &usdc_id);
-
     let pool = trusttrove_pool::PoolContractClient::new(&env, &pool_id);
-    pool.initialize(
-        &admin,
-        &invoice_id,
-        &escrow_id,
-        &usdc_id,
-        &registry_id,
-        &admin,
-        &10_000_000,
-        &String::from_str(&env, "TrusTrove USDC Pool Shares"),
-        &String::from_str(&env, "TT-USDC"),
-        &7,
-    );
 
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);

@@ -34,7 +34,11 @@ pub struct RegistryContract;
 
 #[contractimpl]
 impl RegistryContract {
-    /// Initializes the registry contract and stores the admin address.
+    /// Constructs the registry contract and stores the admin address.
+    ///
+    /// Runs atomically at deploy time (Soroban protocol constructor, #827):
+    /// there is no window in which the instance exists without a stored
+    /// admin, so no one can front-run initialization and claim ownership.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -42,25 +46,25 @@ impl RegistryContract {
     ///
     /// # Auth
     /// * Requires `admin.require_auth()` — the incoming admin must sign the
-    ///   initialization call so ownership cannot be assigned to an address
+    ///   deployment so ownership cannot be assigned to an address
     ///   the caller does not control.
     ///
     /// # Panics
-    /// * `RegistryError::AlreadyInitialized` if the contract has already been
-    ///   initialized (an admin is already stored under `DataKey::Admin`).
+    /// * Any panic aborts the deployment transaction atomically, so a
+    ///   registry that ends up on-chain is always fully constructed.
+    ///   (`RegistryError::AlreadyInitialized` is unreachable from this
+    ///   entry point and kept only for error-code stability.)
     ///
     /// # Returns
     /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin);
+    /// // Deploy-and-construct in a single operation:
+    /// // env.register(RegistryContract, (admin,))
     /// ```
-    pub fn initialize(env: Env, admin: Address) {
+    pub fn __constructor(env: Env, admin: Address) {
         require_not_paused(&env);
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, RegistryError::AlreadyInitialized);
-        }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         events::contract_initialized(&env, &admin);

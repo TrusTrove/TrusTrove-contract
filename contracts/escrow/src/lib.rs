@@ -26,7 +26,11 @@ pub struct EscrowContract;
 
 #[contractimpl]
 impl EscrowContract {
-    /// Initializes the escrow contract and stores required contract references.
+    /// Constructs the escrow contract and stores required contract references.
+    ///
+    /// Runs atomically at deploy time (Soroban protocol constructor, #827):
+    /// there is no window in which the instance exists unconfigured, so no
+    /// one can front-run initialization.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -38,21 +42,23 @@ impl EscrowContract {
     /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `AlreadyInitialized` if the contract has already been initialized.
     /// * `InvalidConfig` if `pool_contract`, `usdc_asset`, and `admin` are not distinct addresses.
+    ///   A panic here aborts the deployment transaction, so no misconfigured
+    ///   instance is ever created.
+    ///   `AlreadyInitialized` is unreachable from this entry point (the
+    ///   protocol invokes the constructor exactly once) and is kept only for
+    ///   error-code stability.
     ///
     /// # Returns
     /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin, &pool, &usdc);
+    /// // Deploy-and-construct in a single operation:
+    /// // env.register(EscrowContract, (admin, pool, usdc))
     /// ```
-    pub fn initialize(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
+    pub fn __constructor(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
         require_not_paused(&env);
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, EscrowError::AlreadyInitialized);
-        }
         if pool_contract == usdc_asset || pool_contract == admin || usdc_asset == admin {
             panic_with_error!(&env, EscrowError::InvalidConfig);
         }
@@ -230,7 +236,7 @@ impl EscrowContract {
     /// * `InvalidConfig` if `invoice_contract` collides with the admin, the
     ///   pool contract, the USDC asset, or this escrow contract — mirroring
     ///   the distinct-address rule enforced by
-    ///   [`Self::initialize`](Self::initialize).
+    ///   constructed at deploy time via [`Self::__constructor`](Self::__constructor).
     ///
     /// # Returns
     /// * `()` - No value is returned. Emits `invoice_contract_set`.
