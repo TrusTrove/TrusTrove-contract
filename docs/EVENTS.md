@@ -426,6 +426,25 @@ nothing.
 
 ---
 
+### `min_discount_updated`
+
+Emitted when the admin changes the pool's minimum discount floor (yield floor)
+via `set_min_discount` (issue #829). Mirrors `protocol_fee_updated`: the old
+value is included so an indexer can report what changed rather than only what
+it changed to. A rejected call (non-admin, or floor above
+`MAX_MIN_DISCOUNT_BPS` = 5000 bps) emits nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_discount_updated"` |
+| **Data** | `(u32, u32)` | `(old_min_bps, new_min_bps)` |
+
+**Emitted by:** `set_min_discount()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
@@ -558,6 +577,17 @@ Emitted when locked funds are released back to the pool (on repayment).
 | **Data** | `u128` | Released amount (repayment amount) |
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
+
+#### Partial Release and Residual Lock
+
+When `release_to_pool` is called with an amount less than the total locked amount, the following occurs:
+
+1. The `released_to_pool` event is emitted with the `repayment_amount` (the amount being repaid in this call).
+2. The escrow `Locked` record's `amount` is reduced by `repayment_amount` (preserving the original `locked_at` timestamp).
+3. The residual locked amount remains in escrow, and `get_locked()` will return the remaining balance.
+4. A subsequent `release_to_pool` call can repay the remaining amount, at which point the `Locked` record is fully removed.
+
+This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time.
 
 ---
 

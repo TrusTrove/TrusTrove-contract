@@ -1,6 +1,9 @@
 # Agent-Registry Interface (consumed by `invoice::submit_attestation`)
 
-> **Status:** normative spec, interface version **v1**.
+> **Status:** normative spec, interface version **v2** (payload binding +
+> expiry, issues #822 / #823; the `AttestationPayload` layout and the
+> domain separator are the versioned parts — `get_agent` / `Agent` are
+> unchanged from v1).
 > **Source of truth:** [`contracts/invoice/src/lib.rs`](../contracts/invoice/src/lib.rs)
 > (`submit_attestation`, `ATTESTATION_DOMAIN_SEPARATOR`) and
 > [`contracts/invoice/src/types.rs`](../contracts/invoice/src/types.rs)
@@ -103,10 +106,13 @@ pub fn submit_attestation(
 pub struct AttestationPayload {
     pub domain_separator: BytesN<32>,
     pub invoice_id: BytesN<32>,
+    pub contract_address: Address,
+    pub network_id: BytesN<32>,
     pub risk_score: u32,
     pub evidence_hash: BytesN<32>,
     pub agent_id: Symbol,
     pub nonce: u64,
+    pub valid_until: u64,
 }
 ```
 
@@ -114,10 +120,23 @@ pub struct AttestationPayload {
 |-------|------------------------|
 | `domain_separator` | MUST equal `ATTESTATION_DOMAIN_SEPARATOR` (see §3.2), else `InvalidAmount` (#16). |
 | `invoice_id` | MUST equal the `invoice_id` argument, else `InvalidAmount` (#16). |
+| `contract_address` | MUST equal `env.current_contract_address()` — the deployed invoice contract this signature is for (issue #822), else `PayloadBindingMismatch` (#29). |
+| `network_id` | MUST equal `env.ledger().network_id()` (the 32-byte network identifier of the executing ledger, carried verbatim into the payload by the signer), else `PayloadBindingMismatch` (#29). |
 | `risk_score` | Basis points, intended range 0–10000. **Not range-checked on-chain** — stored as-is. |
 | `evidence_hash` | Opaque 32-byte hash of the off-chain evidence. Stored as-is. |
 | `agent_id` | Passed to `get_agent`. Because it is inside the signed bytes, a relayer cannot swap it. |
 | `nonce` | Caller-chosen. **Not tracked on-chain** — the one-attestation-per-invoice rule is the replay guard. |
+| `valid_until` | Unix timestamp in **seconds** (ledger timestamp semantics). MUST be `>= env.ledger().timestamp()` at submission, else `AttestationExpired` (#30); equality is valid (strict `>` comparator). Copied onto the stored `Attestation` and re-checked at listing — `list_for_financing` panics with `AttestationExpired` (#30) once `timestamp > valid_until` (issue #823). |
+
+**Why `contract_address` + `network_id` are required (issue #822).**
+`invoice_id` is a deterministic hash of (issuer, buyer, face_value,
+due_date, counter, asset) and the counter restarts at 0 on every fresh
+deployment, so the same inputs produce the *same id* on testnet, mainnet,
+or a redeployed contract. Without these fields an attestation signed for
+one deployment replays on any other deployment trusting the same agent
+key. Signers MUST fill both fields from the target deployment (fetch the
+contract's `network_id` from the network descriptor, not from config
+guesswork).
 
 **Serialization.** `payload` is the `ToXdr` encoding of the struct: an
 `ScVal::Map` with `Symbol` keys in the canonical (sorted) order Soroban
@@ -130,17 +149,20 @@ are signed must also decode cleanly as an `AttestationPayload`.
 ### 3.2 Domain separator
 
 ```rust
-pub const ATTESTATION_DOMAIN_SEPARATOR: [u8; 32] = *b"TrusTrove.InvoiceAttestation.v1_";
+pub const ATTESTATION_DOMAIN_SEPARATOR: [u8; 32] = *b"TrusTrove.InvoiceAttestation.v2_";
 ```
 
 | Form | Value |
 |------|-------|
-| ASCII | `TrusTrove.InvoiceAttestation.v1_` (32 bytes, trailing `_` is padding) |
-| Hex | `5472757354726f76652e496e766f6963654174746573746174696f6e2e76315f` |
+| ASCII | `TrusTrove.InvoiceAttestation.v2_` (32 bytes, trailing `_` is padding) |
+| Hex | `5472757354726f76652e496e766f6963654174746573746174696f6e2e76325f` |
 
-The `v1` suffix is the scheme version. Any change to the payload layout or
-signature scheme must ship with a new separator so old signatures can't be
-replayed against the new format.
+The `v2` suffix is the scheme version. v1 was the pre-#822/#823 layout; it
+was retired with the separator bump so signatures over the old six-field
+payload can never satisfy the new check (they fail both the separator
+comparison and XDR decoding of the added fields). Any further change to the
+payload layout or signature scheme must ship with a new separator so old
+signatures can't be replayed against the new format.
 
 ### 3.3 Signature scheme
 
@@ -165,16 +187,20 @@ Checks run in this order; the first failure aborts the call.
 | 4 | `payload` decodes as `AttestationPayload` | `InvalidAmount` (#16) |
 | 5 | `domain_separator` matches | `InvalidAmount` (#16) |
 | 6 | `payload.invoice_id == invoice_id` | `InvalidAmount` (#16) |
-| 7 | Signature recovers to a public key | host crypto error (not a TrusTrove code) |
-| 8 | `AgentRegistryContract` is configured | `NotFound` (#2) |
-| 9 | `get_agent(agent_id)` call succeeds and decodes as `Option<Agent>` | host error (registry trapped, missing function, or shape mismatch per §2.1) |
-| 10 | Result is `Some(agent)` with `agent.active && agent.pubkey == recovered` | `UntrustedSigner` (#21) |
+| 7 | `payload.contract_address == env.current_contract_address()` and `payload.network_id == env.ledger().network_id()` | `PayloadBindingMismatch` (#29) |
+| 8 | `env.ledger().timestamp() <= payload.valid_until` | `AttestationExpired` (#30) |
+| 9 | Signature recovers to a public key | host crypto error (not a TrusTrove code) |
+| 10 | `AgentRegistryContract` is configured | `NotFound` (#2) |
+| 11 | `get_agent(agent_id)` call succeeds and decodes as `Option<Agent>` | host error (registry trapped, missing function, or shape mismatch per §2.1) |
+| 12 | Result is `Some(agent)` with `agent.active && agent.pubkey == recovered` | `UntrustedSigner` (#21) |
 
 On success the contract stores an `Attestation { agent_id, risk_score,
-evidence_hash, submitted_at }` under `DataKey::Attestation(invoice_id)` and
-emits `attestation_submitted` (see [EVENTS.md](./EVENTS.md)). That record is
-what unlocks `list_for_financing`; without it listing fails with
-`VerificationRequired` (#23).
+evidence_hash, submitted_at, valid_until }` under
+`DataKey::Attestation(invoice_id)` and emits `attestation_submitted` (see
+[EVENTS.md](./EVENTS.md)). That record is what unlocks
+`list_for_financing`: without it listing fails with `VerificationRequired`
+(#23), and with it stored but past `valid_until` listing fails with
+`AttestationExpired` (#30) (issue #823).
 
 ---
 
@@ -187,7 +213,17 @@ what unlocks `list_for_financing`; without it listing fails with
   `AgentRegistryContract`) can authorise arbitrary attestation keys. See
   [THREAT_MODEL.md](./THREAT_MODEL.md).
 - **Deactivation is not retroactive.** Setting `active = false` blocks future
-  attestations only; attestations already stored remain valid.
+  attestations only; attestations already stored remain recorded — but they
+  stop unlocking listing once `valid_until` passes (issue #823), so the
+  damage window of a stale or compromised key is bounded by the validity
+  window agents sign into their payloads.
+- **Attestations expire.** `valid_until` is chosen by the signing agent at
+  underwriting time and enforced at both submission and listing. There is
+  no on-chain replace path: `AlreadyAttested` still fires for an invoice
+  whose stored attestation has expired, so such an invoice can no longer be
+  listed and drains through the normal cancel/expiry lifecycle instead —
+  agents SHOULD sign windows that comfortably cover the issuer's intended
+  listing schedule.
 - **One attestation per invoice.** There is no overwrite or revoke path for an
   attestation, so a compromised key's past attestations must be handled
   off-chain (or by not funding those invoices).

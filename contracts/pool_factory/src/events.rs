@@ -1,6 +1,13 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, Env, Symbol};
 
-/// Published when the pool factory is initialized.
+/// Published when the pool factory is constructed (its `__constructor` runs
+/// inside the deploy transaction — issue #827).
 pub fn contract_initialized(env: &Env, admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "contract_initialized"), admin.clone()),
@@ -8,7 +15,7 @@ pub fn contract_initialized(env: &Env, admin: &Address) {
     );
 }
 
-/// Published after `register_asset` deploys and initializes a new pool
+/// Published after `register_asset` deploys and constructs a new pool
 /// instance, so off-chain indexers (e.g. TrusTrove-app) learn about the new
 /// instance the same way they learn about other state-changing calls via
 /// `contracts/pool/src/events.rs`.

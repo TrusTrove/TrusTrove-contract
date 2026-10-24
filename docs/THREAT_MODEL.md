@@ -127,9 +127,68 @@ One contract authenticates as the caller of another contract's function.
 | `release_to_issuer` | Escrow | The pool contract | Only the pool can release to issuer |
 | `release_to_pool` | Escrow | The pool contract | Only the pool can reclaim escrowed funds |
 
-### Pattern D — Dual-Auth (two `require_auth()` calls)
+---
 
-Two distinct parties must both sign.
+## Escrow Initialization and Repayment Authorization Model
+
+### Stored References from `initialize()`
+
+The escrow contract stores the following references during `initialize(env, admin, pool_contract, usdc_asset)`:
+
+| Storage Key | Value Type | Description |
+|-------------|------------|-------------|
+| `Admin` | `Address` | Contract admin, must authorize `initialize()` and admin-gated operations |
+| `PoolContract` | `Address` | Authorized pool contract; only it may call `lock`, `release_to_issuer`, `release_to_pool` |
+| `InvoiceContract` | `Address` | Invoice contract address; pinned via `set_invoice_contract()` for `release_to_pool` validation (#997) |
+| `UsdcAsset` | `Address` | USDC token contract; used to create the token client for all transfers |
+| `TimeoutWindow` | `u64` | Seconds after `locked_at` before `release_after_timeout` may permissionlessly return a lock to the pool. Defaults to 30 days; capped at 365 days |
+| `Paused` | `bool` | Emergency circuit-breaker flag. While paused, `lock`, `release_to_issuer`, `release_to_pool`, `handle_default` all revert with `ContractPaused` |
+
+### Authorization for Each Escrow Function
+
+| Function | Caller Authorization | Key Storage Reference Used |
+|----------|----------------------|-----------------------------|
+| `lock` | `pool.require_auth()` — the configured pool contract must sign. This is the primary cross-contract auth gate (Pattern C). | `PoolContract`, `UsdcAsset` |
+| `release_to_issuer` | `pool.require_auth()` — the configured pool contract must sign. The issuer must match the stored `record.issuer` from the `Locked` record. | `PoolContract`, `UsdcAsset`, `Locked` record (amount, issuer) |
+| `release_to_pool` | `invoice_contract.require_auth()` — the invoice contract must sign (issue #820). Additionally, if a pinned invoice contract reference exists (via `set_invoice_contract(#997)`), the pool-resolved address must match the pin or the call is rejected with `InvalidConfig`. The function consumes either a live `Locked` record or the `IssuerReleased` marker. | `PoolContract`, `InvoiceContract` (pinned or resolved), `IssuerReleased` marker, `Locked` record, `repayment_amount` |
+| `handle_default` | `caller.require_auth()` — must equal either the stored admin or the pool contract. The grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from `locked_at`) must have elapsed. If no `Locked` record exists (because funding path released to issuer per #819), returns `false` and the pool accounts for it as an unrecoverable LP capital loss. | `PoolContract`, `Admin`, `Locked` record (or absence thereof), `locked_at`, `DEFAULT_MIN_LOCK_SECONDS` |
+
+### Invoice-Contract Binding for Repayment
+
+Repayment flows require the invoice contract to be properly wired:
+
+1. During deployment, the pool is initialized with `invoice_contract` via `initialize(invoice_contract, escrow_contract, ...)` (DEPLOYMENT.md §"Contract Wiring Order", step 7).
+2. The pool's `fund_invoice` call wires the invoice into escrow via `escrow.lock()` followed immediately by `escrow.release_to_issuer()` (issue #819), so the issuer is paid at funding time and the `Locked` record is removed.
+3. At repayment time, `buyer → invoice.repay → escrow.release_to_pool → pool`. The `release_to_pool` entry point:
+   - Resolves the invoice contract from the pool's `get_invoice_contract` view (#820)
+   - When a pinned reference exists via `set_invoice_contract(#997)`, validates that the pool-resolved address matches the pin — rejecting misconfigured pools that have drifted from the admin's pin
+   - Accepts evidence of a prior lock: either the live `Locked` record (principal still in escrow) **or** the `IssuerReleased` marker (principal already paid to the issuer at funding). Whichever exists is consumed, so a full settlement can succeed at most once per funded invoice.
+4. The repayment amount is the buyer's repayment routed through escrow to the pool; the full `face_value` including yield is settled when the invoice lifecycle reaches `Confirmed` status.
+
+### State Sequence Matching the Tests
+
+The following state sequence is tested and documented for end-to-end correctness:
+
+```
+1. initialize(escrow, pool, usdc) — stores PoolContract, UsdcAsset, Admin references
+2. fund_invoice(invoice_id) — pool → escrow.lock → escrow.release_to_issuer → issuer paid; Lock record removed; IssuerReleased marker written
+3. buyer repays: release_to_pool(invoice_id, repayment_amount) — consumes either Locked or IssuerReleased marker
+   - If partial: residual Lock amount reduced, original locked_at preserved
+   - If full: Lock/Marker removed, funds returned to pool
+4. handle_default(invoice_id, caller) — if Lock still live (not yet paired with issuer release): grace period check; return funds to pool; remove Lock
+   - If no Lock exists (funding path already paid issuer): returns false; pool accounts as unrecoverable loss
+5. release_after_timeout(invoice_id) — permissionless exit when now >= locked_at + timeout_window; returns stale lock to pool
+```
+
+All amounts are in **USDC stroops** (1 USDC = 10,000,000 stroops, 7 decimals). Timestamps are **Unix seconds**. Invoice IDs are **BytesN<32>** (32-byte identifiers).
+
+### Defense-in-Depth Notes
+
+- The `IssuerReleased` marker (issue #819) is the critical bridge between the funding path and repayment/default paths. Without it, `release_to_pool` and `handle_default` cannot distinguish "principal already paid to issuer" from "lock removed out of band".
+- The pinned invoice contract reference (#997) is a defense-in-depth measure: it prevents a pool whose `get_invoice_contract` configuration has drifted from the escrow admin's pin from silently redirecting repayments.
+- The `handle_default` function gracefully handles both pre-#819 and post-#819 invoice states: it returns `false` when no `Locked` record exists (post-#819 default case) and the pool accounts for the loss, rather than erroneously returning funds.
+- The `release_to_pool` function's dual-consumption guard (consuming whichever of `Locked` or `IssuerReleased` exists) ensures idempotent settlement at most once per funded invoice.
+
 
 | Function | Contract | Signers |
 |----------|----------|---------|
@@ -293,6 +352,61 @@ gas or storage.
 
 **Mitigation:** `batch_register_issuers` limits entries to `≤ 50` and
 panics with `RegistryError::BatchSizeExceeded` otherwise.
+
+---
+
+## Atomicity Assumptions
+
+Funding, repayment, and default rely on Soroban transaction rollback across
+nested contract calls. The protocol's threat model must clarify which state
+writes must remain atomic when a downstream call fails. This section documents
+the rollback expectations and residual-risk assumptions.
+
+### Cross-Contract Rollback Expectations
+
+| Sequence | Writes That Must Roll Back on Failure | Residual-Risk Assumption |
+|----------|-------------------------------------|--------------------------|
+| `invoice::create` → `pool::fund_invoice` → `escrow::lock` | All invoice, pool, and escrow state written during the chain | If `escrow::lock` fails, `pool::fund_invoice` rolls back, leaving no
+funded invoice entry and no LP share movement. The pool's `total_funded`
+and `active_invoice_count` are restored to their pre-chain values.
+|
+| `pool::receive_repayment` → `invoice::update_status` | Invoice `funded_amount`, status index, and pool `total_funded`/`active_invoice_count` | If the invoice's status update fails after repayment is received, the pool
+retains the funds but the invoice status lags. This is an accepted
+risk because the pool's accounting (`total_funded`) and the invoice's
+`funded_amount` are always synchronized at the two re-check points
+(`list_for_financing` and `fund_invoice`).
+|
+| `pool::handle_default` → `escrow::handle_default` → fund return to pool | `Locked` record removal, `IssuerReleased` marker consumption, pool
+`total_funded`/`active_invoice_count` reduction | If `escrow::handle_default` fails or returns `false`, the pool does not
+release funds and the default is not processed. The pool's state is left
+unchanged — no partial default can occur. This is guaranteed by the
+`handle_default` function's single-call atomicity in escrow.
+|
+| `escrow::lock` → `pool::fund_invoice` (partial path) | Escrow lock record and any partial pool state | If `pool::fund_invoice` is called without a preceding successful
+`invoice::list_for_financing`, or if the invoice is not in `Listed` status,
+the pool reverts with `InvoiceNotListed`. The escrow `lock` call is
+guarded by the pool's validation, so a failed fund_invoice does not leave
+a stale lock record.
+|
+
+### Residual-Risk Assumptions for External Contract Interfaces
+
+- **External contract interface changes:** The contracts trust the addresses
+  stored during `initialize()`. If a downstream contract is upgraded or
+  replaced at the same address, its behavior may differ, and the protocol's
+  atomicity guarantees no longer apply. This is why the admin key must be
+  protected with multi-sig (see [Centralization Risks](#centralization-risks)).
+
+- **Upgrade-induced behavior changes:** When a contract is upgraded via
+  `env.deployer().update_current_contract_wasm`, the new Wasm must maintain
+  the same storage layout and atomicity guarantees. An upgrade that changes
+  the rollback behavior can introduce state corruption across the
+  invoice-pool-escrow chain.
+
+- **Mock/test escrow in tests:** Tests use mock escrows (e.g.,
+  `MockFailingEscrowDefault`) that panic on `handle_default`. The pool's
+  `handle_default` function checks the return value and aborts the default
+  if the escrow returns `false`, ensuring no partial state changes.
 
 ---
 

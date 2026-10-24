@@ -9,7 +9,6 @@ use soroban_sdk::{
     xdr::ToXdr,
     Address, Bytes, BytesN, Env, Map, String, Symbol, TryFromVal,
 };
-use trusttrove_escrow::EscrowContractClient;
 use trusttrove_invoice::InvoiceContractClient;
 use trusttrove_pool::PoolContractClient;
 use trusttrove_registry::{RegistryContract, RegistryContractClient};
@@ -19,8 +18,8 @@ use crate::{
     DEFAULT_SHARE_DECIMALS, DEFAULT_SHARE_NAME, DEFAULT_SHARE_SYMBOL,
 };
 
-/// Everything a test needs to drive the factory, already wired together: an
-/// initialized factory plus the invoice/escrow/registry contracts and the pool
+/// Everything a test needs to drive the factory, already wired together: a
+/// constructed factory plus the invoice/escrow/registry contracts and the pool
 /// Wasm hash that `register_asset` deploys.
 struct TestEnv {
     env: Env,
@@ -46,26 +45,26 @@ fn setup() -> TestEnv {
     // for the longer round trips to cross the default *test-host* budget (not
     // the on-chain budget), so lift it suite-wide. Tests that actually measure
     // gas call `budget().reset_default()` themselves before measuring.
-    env.budget().reset_unlimited();
+    env.cost_estimate().budget().reset_unlimited();
 
     let admin = Address::generate(&env);
     let asset = Address::generate(&env);
-    let registry_id = env.register_contract(None, RegistryContract);
-    let registry = RegistryContractClient::new(&env, &registry_id);
-    registry.initialize(&admin);
+    let registry_id = env.register(RegistryContract, (admin.clone(),));
 
-    // Real invoice and escrow contracts: the pool's `initialize` cross-checks
+    // Real invoice and escrow contracts: the pool's constructor cross-checks
     // the escrow's configured asset and the factory reads the invoice's
     // registry, so both have to be real contracts for the round trip to work.
-    let invoice_id = env.register_contract(None, trusttrove_invoice::InvoiceContract);
-    let invoice = InvoiceContractClient::new(&env, &invoice_id);
-    invoice.initialize(&admin, &registry_id);
+    let invoice_id = env.register(
+        trusttrove_invoice::InvoiceContract,
+        (admin.clone(), registry_id.clone()),
+    );
 
     let escrow_id = new_escrow(&env, &admin, &asset);
 
-    let factory_id = env.register_contract(None, PoolFactoryContract);
+    // #827: deploy and init are atomic — the factory itself is constructed
+    // with its admin at registration time.
+    let factory_id = env.register(PoolFactoryContract, (admin.clone(),));
     let factory = PoolFactoryContractClient::new(&env, &factory_id);
-    factory.initialize(&admin);
 
     let pool_wasm_hash = env
         .deployer()
@@ -84,16 +83,16 @@ fn setup() -> TestEnv {
     }
 }
 
-/// Deploys and initializes an escrow contract for `asset`.
+/// Deploys an escrow contract constructed for `asset`.
 ///
 /// The escrow's stored pool address is irrelevant to the factory flow (the
 /// factory only deploys and wires pools, it never moves funds), so a generated
 /// address stands in for it.
 fn new_escrow(env: &Env, admin: &Address, asset: &Address) -> Address {
-    let escrow_id = env.register_contract(None, trusttrove_escrow::EscrowContract);
-    let escrow = EscrowContractClient::new(env, &escrow_id);
-    escrow.initialize(admin, &Address::generate(env), asset);
-    escrow_id
+    env.register(
+        trusttrove_escrow::EscrowContract,
+        (admin.clone(), Address::generate(env), asset.clone()),
+    )
 }
 
 fn register_asset(te: &TestEnv, asset: &Address) -> Address {
@@ -114,46 +113,46 @@ fn register_asset(te: &TestEnv, asset: &Address) -> Address {
         .register_asset(asset, &te.pool_wasm_hash, &te.invoice_id, &escrow_id)
 }
 
-/// Creates an initialized pool outside the factory to model a migrated pool.
+/// Constructs a pool outside the factory to model a migrated pool.
 fn new_initialized_pool(te: &TestEnv, asset: &Address) -> Address {
-    let pool_address = te
-        .env
-        .register_contract(None, trusttrove_pool::PoolContract);
     let escrow_id = if *asset == te.asset {
         te.escrow_id.clone()
     } else {
         new_escrow(&te.env, &te.admin, asset)
     };
-    PoolContractClient::new(&te.env, &pool_address).initialize(
-        &te.admin,
-        &te.invoice_id,
-        &escrow_id,
-        asset,
-        &te.registry_id,
-        &te.admin,
-        &DEFAULT_MIN_INITIAL_DEPOSIT,
-        &String::from_str(&te.env, DEFAULT_SHARE_NAME),
-        &String::from_str(&te.env, DEFAULT_SHARE_SYMBOL),
-        &DEFAULT_SHARE_DECIMALS,
-    );
-    pool_address
+    te.env.register(
+        trusttrove_pool::PoolContract,
+        (
+            te.admin.clone(),
+            te.invoice_id.clone(),
+            escrow_id,
+            asset.clone(),
+            te.registry_id.clone(),
+            te.admin.clone(),
+            DEFAULT_MIN_INITIAL_DEPOSIT,
+            String::from_str(&te.env, DEFAULT_SHARE_NAME),
+            String::from_str(&te.env, DEFAULT_SHARE_SYMBOL),
+            DEFAULT_SHARE_DECIMALS,
+        ),
+    )
 }
 
 fn new_escrow_for_pool(env: &Env, admin: &Address, asset: &Address, pool: &Address) -> Address {
-    let escrow_id = env.register_contract(None, trusttrove_escrow::EscrowContract);
-    let escrow = EscrowContractClient::new(env, &escrow_id);
-    escrow.initialize(admin, pool, asset);
-    escrow_id
+    env.register(
+        trusttrove_escrow::EscrowContract,
+        (admin.clone(), pool.clone(), asset.clone()),
+    )
 }
 
 /// The `trusttrove_pool.wasm` artifact that `register_asset` deploys.
 ///
-/// `register_asset` deploys through `Env::deployer()` and then invokes
-/// `initialize` on the fresh instance. The SDK 21 test host can only dispatch
-/// that call when the instance was created from real Wasm: an instance created
-/// from a placeholder Wasm has no exports, so the `initialize` call traps with
-/// `Error(Context, InvalidAction)`. The deploy-and-initialize tests therefore
-/// upload the actual pool artifact rather than a stub.
+/// `register_asset` deploys through `Env::deployer()` and runs the pool's
+/// `__constructor` as part of the same creation call. The test host can only
+/// dispatch that constructor when the instance was created from real Wasm: an
+/// instance created from a placeholder Wasm has no exports, so the
+/// constructor invocation traps with `Error(Context, InvalidAction)`. The
+/// deploy-and-construct tests therefore upload the actual pool artifact
+/// rather than a stub.
 ///
 /// It is resolved on first use instead of being committed to the repository
 /// (a ~50 KiB binary that would also go stale whenever the pool's ABI
@@ -222,14 +221,11 @@ fn pool_wasm() -> &'static [u8] {
 }
 
 #[test]
-fn test_initialize() {
+fn test_constructor() {
     let env = Env::default();
     env.mock_all_auths();
-    let factory_id = env.register_contract(None, PoolFactoryContract);
-    let factory_client = PoolFactoryContractClient::new(&env, &factory_id);
-
     let admin = Address::generate(&env);
-    factory_client.initialize(&admin);
+    let factory_id = env.register(PoolFactoryContract, (admin.clone(),));
 
     let events = env.events().all();
     let (contract, topics, data) = events.get(events.len() - 1).unwrap();
@@ -252,21 +248,12 @@ fn test_initialize() {
     });
 }
 
-#[test]
-#[should_panic(expected = "Error(Contract, #1)")]
-fn test_initialize_twice_panics() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let factory_id = env.register_contract(None, PoolFactoryContract);
-    let factory_client = PoolFactoryContractClient::new(&env, &factory_id);
-
-    let admin = Address::generate(&env);
-    factory_client.initialize(&admin);
-    factory_client.initialize(&admin);
-}
+// (#827: the former `test_initialize_twice_panics` is gone — with deploy and
+// init atomic there is no second initialization to reject; the factory's
+// `AlreadyInitialized` error code is unreachable by construction.)
 
 #[test]
-fn test_register_asset_deploys_and_initializes_pool() {
+fn test_register_asset_deploys_and_constructs_pool() {
     let te = setup();
 
     let pool_address = register_asset(&te, &te.asset.clone());
@@ -280,8 +267,8 @@ fn test_register_asset_deploys_and_initializes_pool() {
     assert_eq!(assets.len(), 1);
     assert_eq!(assets.get(0), Some(te.asset.clone()));
 
-    // The deployed instance is a live pool contract, initialized for this asset
-    // and wired to the invoice/escrow the caller passed in.
+    // The deployed instance is a live pool contract, constructed for this
+    // asset and wired to the invoice/escrow the caller passed in.
     let pool = PoolContractClient::new(&te.env, &pool_address);
     assert_eq!(pool.get_usdc_asset(), te.asset);
     assert_eq!(pool.get_invoice_contract(), te.invoice_id);
@@ -394,12 +381,20 @@ fn test_register_asset_duplicate_panics() {
 #[should_panic(expected = "Error(Contract, #4)")]
 fn test_register_asset_with_uninitialized_invoice_panics() {
     let te = setup();
-    // An invoice contract that was never initialized reports no registry, so
+    // An invoice contract whose config is missing reports no registry, so
     // the pool cannot be wired and registration is rejected rather than
-    // deploying a pool pointed at nothing.
-    let uninitialized_invoice = te
-        .env
-        .register_contract(None, trusttrove_invoice::InvoiceContract);
+    // deploying a pool pointed at nothing. #827: deploy is atomic, so the
+    // missing-config state is reproduced by evicting the constructor's keys.
+    let uninitialized_invoice = te.env.register(
+        trusttrove_invoice::InvoiceContract,
+        (te.admin.clone(), te.registry_id.clone()),
+    );
+    te.env.as_contract(&uninitialized_invoice, || {
+        te.env
+            .storage()
+            .instance()
+            .remove(&trusttrove_invoice::DataKey::RegistryContract);
+    });
 
     te.factory.register_asset(
         &te.asset,
@@ -470,7 +465,7 @@ fn test_register_existing_pool_rejects_account_address() {
 #[should_panic(expected = "Error(Contract, #5)")]
 fn test_register_existing_pool_rejects_non_pool_contract() {
     let te = setup();
-    let token = te.env.register_contract(None, MockToken);
+    let token = te.env.register(MockToken, ());
     te.factory.register_existing_pool(&te.asset, &token);
 }
 
@@ -550,7 +545,8 @@ fn test_get_pool_for_asset_requires_no_auth() {
 #[test]
 fn test_list_assets_empty() {
     let env = Env::default();
-    let factory_id = env.register_contract(None, PoolFactoryContract);
+    env.mock_all_auths();
+    let factory_id = env.register(PoolFactoryContract, (Address::generate(&env),));
     let factory_client = PoolFactoryContractClient::new(&env, &factory_id);
 
     let assets = factory_client.list_assets();
@@ -564,14 +560,14 @@ fn test_gas_benchmark_register_existing_pool() {
     let pool_address = new_initialized_pool(&te, &te.asset);
 
     // Measure register_existing_pool resource cost
-    te.env.budget().reset_default();
-    let cpu_before = te.env.budget().cpu_instruction_cost();
-    let mem_before = te.env.budget().memory_bytes_cost();
+    te.env.cost_estimate().budget().reset_default();
+    let cpu_before = te.env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_before = te.env.cost_estimate().budget().memory_bytes_cost();
 
     te.factory.register_existing_pool(&te.asset, &pool_address);
 
-    let cpu_after = te.env.budget().cpu_instruction_cost();
-    let mem_after = te.env.budget().memory_bytes_cost();
+    let cpu_after = te.env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_after = te.env.cost_estimate().budget().memory_bytes_cost();
 
     let cpu_delta = cpu_after - cpu_before;
     let mem_delta = mem_after - mem_before;
@@ -584,7 +580,8 @@ fn test_gas_benchmark_register_existing_pool() {
 #[test]
 fn test_list_assets_single() {
     let env = Env::default();
-    let factory_id = env.register_contract(None, PoolFactoryContract);
+    env.mock_all_auths();
+    let factory_id = env.register(PoolFactoryContract, (Address::generate(&env),));
     let factory_client = PoolFactoryContractClient::new(&env, &factory_id);
 
     // Simulate asset registration by setting the index directly
@@ -604,7 +601,8 @@ fn test_list_assets_single() {
 #[test]
 fn test_list_assets_multiple() {
     let env = Env::default();
-    let factory_id = env.register_contract(None, PoolFactoryContract);
+    env.mock_all_auths();
+    let factory_id = env.register(PoolFactoryContract, (Address::generate(&env),));
     let factory_client = PoolFactoryContractClient::new(&env, &factory_id);
 
     // Simulate multiple asset registrations
@@ -688,7 +686,7 @@ fn attest_invoice(env: &Env, invoice: &InvoiceContractClient, invoice_id: &Bytes
     let mut public_key_bytes = [0u8; 65];
     public_key_bytes.copy_from_slice(public_key.as_bytes());
     let agent_id = Symbol::new(env, "test_agent");
-    let agent_registry_id = env.register_contract(None, MockAgentRegistry);
+    let agent_registry_id = env.register(MockAgentRegistry, ());
     let agent_registry = MockAgentRegistryClient::new(env, &agent_registry_id);
     agent_registry.register_agent(
         &agent_id,
@@ -705,10 +703,13 @@ fn attest_invoice(env: &Env, invoice: &InvoiceContractClient, invoice_id: &Bytes
             &trusttrove_invoice::ATTESTATION_DOMAIN_SEPARATOR,
         ),
         invoice_id: invoice_id.clone(),
+        contract_address: invoice.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(env, &[9; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -760,10 +761,10 @@ fn test_factory_pools_fund_and_repay_invoices_for_their_own_assets() {
     // This integration path deploys two Wasm pools and invokes real invoice,
     // escrow, and registry contracts; keep its host budget independent of the
     // default unit-test resource ceiling.
-    te.env.budget().reset_unlimited();
+    te.env.cost_estimate().budget().reset_unlimited();
     let invoice = InvoiceContractClient::new(&te.env, &te.invoice_id);
-    let asset_a = te.env.register_contract(None, MockToken);
-    let asset_b = te.env.register_contract(None, MockToken);
+    let asset_a = te.env.register(MockToken, ());
+    let asset_b = te.env.register(MockToken, ());
     invoice.add_supported_asset(&asset_a);
     invoice.add_supported_asset(&asset_b);
 
@@ -896,8 +897,8 @@ fn test_pool_instances_do_not_cross_contaminate() {
     let te = setup();
 
     // Register two actual mock tokens
-    let asset1 = te.env.register_contract(None, MockToken);
-    let asset2 = te.env.register_contract(None, MockToken);
+    let asset1 = te.env.register(MockToken, ());
+    let asset2 = te.env.register(MockToken, ());
 
     let pool1 = register_asset(&te, &asset1);
     let pool2 = register_asset(&te, &asset2);
@@ -945,8 +946,8 @@ fn test_pool_instances_do_not_cross_contaminate() {
 fn test_get_aggregate_stats() {
     let te = setup();
 
-    let asset1 = te.env.register_contract(None, MockToken);
-    let asset2 = te.env.register_contract(None, MockToken);
+    let asset1 = te.env.register(MockToken, ());
+    let asset2 = te.env.register(MockToken, ());
 
     let pool1 = register_asset(&te, &asset1);
     let pool2 = register_asset(&te, &asset2);

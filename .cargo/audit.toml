@@ -3,4 +3,13 @@
 # Originates from soroban-sdk 21.7.7 -> stellar-xdr -> time 0.3.36
 # This advisory affects transitive dependencies only.
 # Fix: Awaiting soroban-sdk to upgrade time >= 0.3.47
-ignore = ["RUSTSEC-2026-0009"]
+#
+# RUSTSEC-2026-0387: crypto-bigint 0.5.5 constant-time timing variability
+# Reached only through soroban-env-host 23.0.1 -> k256 0.13.4 ->
+# elliptic-curve 0.13.8 -> crypto-bigint 0.5.5. soroban-env-host is a native
+# test/CI dependency and is not compiled into the deployed wasm contracts.
+# crypto-bigint's patched release is 0.7.6 and k256 only moves to that line in
+# 0.14, which soroban-env-host 23.0.1 pins below (^0.13.3). There is no 0.5.x
+# fix, so this can only be resolved by an upstream soroban-env-host release
+# that moves its k256 pin. Ignored until then; revisit on the next SDK bump.
+ignore = ["RUSTSEC-2026-0009", "RUSTSEC-2026-0387"]

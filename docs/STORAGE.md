@@ -207,6 +207,21 @@ let status = if !profile_exists {
 |---------|------|-------------|
 | `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
 
+#### Supported Asset Allow-List
+
+| DataKey | Type | Description | TTL extended |
+|---------|------|-------------|--------------|
+| `SupportedAsset(Address)` | `bool` | Funding-asset allow-list marker | On write (`add_supported_asset`, including idempotent re-adds) and on use (`is_supported_asset`, `create`'s `SupportedAsset` check), issue #863 |
+
+The marker is persistent storage while `SupportedAssetCount` (above,
+instance storage) is re-bumped by every admin write. Without the write and
+use-time extensions the marker could lapse underneath a still-in-use
+asset; `remove_supported_asset` early-returns on a missing marker, so the
+lapse would leave `SupportedAssetCount` permanently out of sync with
+membership (issue #863). Keep-alive strategy: bump-on-write plus
+bump-on-use, the same policy as the index keys (#832) and `StatusCount`
+(#830).
+
 #### Invoice Structure
 
 ```
@@ -301,14 +316,15 @@ Cancelled = 8   // issuer cancelled before listing
 
 | DataKey | Type | Description |
 |---------|------|-------------|
-| `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID |
-| `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default` |
+| `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID. Created by `lock()` and removed by `release_to_pool()` (full release), `handle_default()`, or when the residual is fully repaid. |
+| `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default`. Written when the `Locked` record is removed during `release_to_issuer`. |
 
 ```
 EscrowRecord {
     invoice_id: BytesN<32>,
     amount:     u128,      // USDC stroops
     locked_at:  u64,       // Unix timestamp
+    issuer:     Address,   // Issuer authorized to receive released funds
 }
 ```
 
@@ -316,34 +332,50 @@ EscrowRecord {
 
 | DataKey | Type | Description |
 |---------|------|-------------|
-| `History(BytesN<32>)` | `Vec<EscrowEvent>` | Append-only event log keyed by invoice ID |
+| `History(BytesN<32>)` | `Vec<EscrowEvent>` | Append-only event log keyed by invoice ID. Every state transition (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`, `release_after_timeout`) appends an `EscrowEvent`. The vector grows as payments are made and is TTL-extended on every write. |
 
 ```
 EscrowEvent {
     invoice_id: BytesN<32>,
-    action:     EscrowAction,   // Locked | ReleasedToIssuer | ReleasedToPool | DefaultHandled
+    action:     EscrowAction,   // Locked | ReleasedToIssuer | ReleasedToPool | DefaultHandled | TimeoutReleased
     amount:     u128,
     timestamp:  u64,
+    caller:     Option<Address>, // Set for `DefaultHandled` events
 }
 ```
 
-#### Lifecycle
+#### Partial Release and Residual Lock
 
-1. `lock()` creates an `EscrowRecord` and transfers USDC from pool → escrow.
-2. `release_to_issuer()` transfers USDC out, **removes** the `Locked` key and
-   writes the `IssuerReleased(invoice_id)` marker (issue #819 — the funding
-   path does `lock` then `release_to_issuer` in one call).
-3. `release_to_pool()` transfers USDC out and consumes whichever of `Locked`
-   or `IssuerReleased` exists; a second call finds neither and reverts with
-   `NotFound` (#2 guard).
-4. `handle_default()` returns locked USDC to the pool and **removes** the key.
-5. On removal, the TTL-granted entries also expire organically.
+The escrow supports partial `release_to_pool` calls. The behavior is:
+
+1. On each `release_to_pool(invoice_id, repayment_amount)` call, if a live `Locked` record exists with `amount > repayment_amount`:
+   - The `released_to_pool` event is emitted with the `repayment_amount`.
+   - The `Locked` record's `amount` field is reduced by `repayment_amount` (in-place update).
+   - The original `locked_at` timestamp is preserved.
+   - `get_locked()` now returns the reduced residual amount.
+2. If `repayment_amount >= record.amount`:
+   - The full remaining lock is repaid.
+   - The `Locked` record is removed (consumed).
+   - If an `IssuerReleased` marker was present (funding path already paid issuer), it is also removed.
+   - A second `release_to_pool` call on the same invoice (with no live lock and no marker) reverts with `NotFound` — the `NotFound` guard (#2) ensures idempotent settlement at most once per funded invoice.
+3. The `History` vector appends a `ReleasedToPool` event on each call, enabling indexers to track cumulative repayment progress and the residual lock state over time.
+
+#### Final-Release Removal Rule
+
+The `Locked` record (and optionally the `IssuerReleased` marker) is removed under exactly one of these conditions:
+
+- **Full repayment**: `release_to_pool` is called with `repayment_amount >= record.amount`, consuming the entire lock.
+- **Default handling**: `handle_default` is called and a live `Locked` record exists (not yet paired with an issuer release). The record is removed and funds returned to the pool.
+- **Timeout release**: `release_after_timeout` is called after `now >= locked_at + timeout_window`. The record is removed and funds returned to the pool.
+- **Second call guard**: A second `release_to_pool` call on an invoice that has already had its lock fully consumed and marker consumed reverts with `NotFound`, preventing double-release.
+
+The `History` vector entries are never removed — they form an append-only log of all escrow actions for the invoice. Indexers can reconstruct the residual lock state by summing `ReleasedToPool` amounts and comparing against the original `Locked.amount`.
 
 ### Storage Key Count
 
-**Approximately 3 keys per funded invoice** — a transient `Locked` record, an
-`IssuerReleased` marker (live between funding and repayment), and one
-`History` vector (which shares its TTL with the lock).
+**Approximately 3 keys per funded invoice** — a transient `Locked` record (removed on full release/default/timeout), an
+`IssuerReleased` marker (live between funding and repayment, consumed on repayment), and one
+`History` vector (append-only, grows with each escrow action, shares TTL with the lock).
 
 ---
 
@@ -369,6 +401,7 @@ EscrowEvent {
 | `ShareName` | `String` | SEP-41 `name()` of this pool's LP share token | `initialize()` |
 | `ShareSymbol` | `String` | SEP-41 `symbol()` of this pool's LP share token | `initialize()` |
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
+| `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 
 ### Persistent Storage
 
@@ -412,6 +445,7 @@ deposit would create it.
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `FundedInvoice(BytesN<32>)` | `u128` | Funded amount keyed by invoice ID |
+| `FundedInvoiceBuyer(BytesN<32>)` | `Address` | Buyer snapshotted from the invoice contract at funding time (issue #969). `receive_repayment_with_refund` rejects a refund destination that differs from it. Removed together with `FundedInvoice` on settlement. |
 
 ### Protocol Fee & Yield Distribution Math
 
@@ -428,12 +462,12 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + (5 × number_of_LPs) + (1 × number_of_funded_invoices).**
+**Approximately 8 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
 
 In practice most pools will have:
 - 8 instance keys (constant)
 - 5 keys per active LP
-- 1 key per funded invoice (removed on repayment/default)
+- 2 keys per funded invoice (removed on repayment/default)
 
 ---
 
@@ -484,3 +518,45 @@ unchanged, and an `upgraded` event carrying the new Wasm hash is emitted. Calls
 from any address other than the stored admin fail authorization. Protect the admin
 with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
 document for the redeployment rollback procedure.
+
+### Construction vs. upgrade (issue #827)
+
+Initialization and upgrades are now distinct mechanisms:
+
+* **Fresh deploys.** Each contract's configuration keys (`Admin`, the wired
+  contract references, and the asset/metadata entries) are seeded exactly once
+  by a protocol `__constructor`, which runs automatically inside the deploy
+  transaction (`CreateContractV2` with `CreateContractArgsV2`). Deploy and
+  initialization are atomic: a contract address that exists on-chain is always fully constructed
+  and admin-authenticated, and there is no window in which a deployed contract
+  is uninitialized and exploitable. The former `initialize()` entry points no
+  longer exist; the `AlreadyInitialized` error codes remain defined but are
+  unreachable, retained only as reserved discriminants.
+* **Upgrades.** `upgrade` swaps the Wasm in place and does **not** re-run the
+  constructor — constructor arguments are part of neither the contract address
+  nor the stored configuration after deployment. Any storage migration a new
+  Wasm version requires must therefore be done explicitly (e.g. an admin-gated
+  migration entry point) rather than by re-initializing.
+
+### Upgrading a pool with in-flight funded invoices (issue #969)
+
+`FundedInvoiceBuyer` is written by `fund_invoice`, so invoices funded before
+this key existed have a live `FundedInvoice` entry but no buyer snapshot.
+`receive_repayment_with_refund` rejects a missing snapshot with
+`PoolError::BuyerMismatch`, because the destination cannot be verified.
+
+Upgrade procedure:
+
+1. Swap the pool Wasm with `upgrade(new_wasm_hash)` as usual.
+2. For every invoice that was already funded before the upgrade, call
+   `pool.backfill_funded_invoice_buyer(invoice_id)`. The entry point is
+   permissionless and moves no funds: it reads the canonical buyer from the
+   configured invoice contract (`get_buyer`) and writes only the missing
+   snapshot. It returns `false` and overwrites nothing when a snapshot already
+   exists, so repeating the call (or calling it for post-upgrade invoices) is
+   safe. It panics with `InvoiceNotFound` when the invoice has no live funded
+   entry.
+
+Until step 2 runs, an affected invoice's refundable repayment still reverts
+fail-closed; the invoice itself is otherwise unaffected and can be backfilled
+at any later point.
