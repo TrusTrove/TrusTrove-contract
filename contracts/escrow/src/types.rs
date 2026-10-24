@@ -7,8 +7,10 @@ use soroban_sdk::{contracttype, BytesN};
 /// - `amount` must be greater than zero — guaranteed by [`EscrowContract::lock`].
 /// - `locked_at` is set to `env.ledger().timestamp()` at lock time and is never
 ///   updated for the lifetime of the record.
-/// - A record is removed (via `persistent().remove`) when escrow is released
-///   or default-handled; after removal `get_locked` / `get_locked_at` return `0`.
+/// - A partial `release_to_pool` repayment reduces `amount` in place while
+///   preserving `locked_at`; the record is only removed when the residual is
+///   fully repaid (or on a full release / default); after removal
+///   `get_locked` / `get_locked_at` return `0`.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct EscrowRecord {
@@ -42,6 +44,8 @@ pub enum EscrowAction {
     ReleasedToPool,
     /// Lock was resolved as a default and funds returned to the pool.
     DefaultHandled,
+    /// Stale lock returned to the pool via the permissionless `release_after_timeout`.
+    TimeoutReleased,
 }
 
 /// An entry in the escrow event history for a given invoice.
@@ -86,4 +90,40 @@ pub enum DataKey {
     /// Event history for a given invoice. The inner `BytesN<32>` is the
     /// invoice ID. Value type: `Vec<EscrowEvent>`.
     History(BytesN<32>),
+    /// Seconds after `locked_at` before `release_after_timeout` may return a
+    /// still-locked record to the pool. Instance key; value type: `u64`.
+    TimeoutWindow,
+    /// Evidence that the locked principal for a given invoice was released to
+    /// the issuer at funding time (issue #819). The inner `BytesN<32>` is the
+    /// invoice ID. Value type: `u128` (the amount released to the issuer).
+    ///
+    /// Written by [`EscrowContract::release_to_issuer`] when it removes the
+    /// [`DataKey::Locked`] record, and consumed by exactly one subsequent
+    /// [`EscrowContract::release_to_pool`] (repayment) call. The pool reads it
+    /// via [`EscrowContract::was_released_to_issuer`] in
+    /// `PoolContract::handle_default` to tell "principal already paid to the
+    /// issuer at funding" (normal) apart from an out-of-band lock removal
+    /// (#21 guard).
+    ///
+    /// **Storage-key layout:** this enum is unnumbered, so each variant's
+    /// discriminant is its positional index and that index *is* the on-chain
+    /// storage-key encoding. New variants must therefore be **appended at the
+    /// end** (this one takes index 6) — inserting one mid-enum would silently
+    /// renumber every later variant and orphan the keys already written by
+    /// deployed ledgers.
+    IssuerReleased(BytesN<32>),
+    /// Invoice contract reference pinned by the admin as defense-in-depth for
+    /// `release_to_pool` (#997). Instance key; value type: `Address`.
+    ///
+    /// Written by [`EscrowContract::set_invoice_contract`] (admin-authenticated).
+    /// `release_to_pool` still resolves the invoice contract it authorizes
+    /// from the pool's `get_invoice_contract` view (#820), but when a pin is
+    /// stored here that resolved address must equal the pin or the call is
+    /// rejected with [`EscrowError::InvalidConfig`](crate::EscrowError::InvalidConfig) —
+    /// so a pool whose invoice-contract configuration drifted from the
+    /// escrow admin's pin cannot silently redirect repayments.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 7) — see the note on [`DataKey::IssuerReleased`].
+    InvoiceContract,
 }

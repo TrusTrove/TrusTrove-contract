@@ -32,4 +32,14 @@ pub enum PoolError {
     /// `approve` was given an `expiration_ledger` at or before the current
     /// ledger sequence while also granting a non-zero amount.
     InvalidExpiration = 25,
+    /// A batch entry point was given more entries than `MAX_BATCH_SIZE`. The
+    /// cap bounds the worst-case cost of a single batch so a caller cannot
+    /// exceed the per-transaction budget by batching.
+    BatchSizeExceeded = 26,
+    /// The invoice's `discount_bps` is below the admin-configured minimum
+    /// discount floor (`DataKey::MinDiscountBps`, set via `set_min_discount`),
+    /// so funding it would deploy LP capital at less than the pool's yield
+    /// floor. Never triggers while the floor is at its default of `0`
+    /// (issue #829).
+    DiscountBelowMinimum = 28,
 }

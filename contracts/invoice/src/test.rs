@@ -6,17 +6,20 @@ extern crate std;
 
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
+use soroban_sdk::vec;
 use soroban_sdk::{
     contract, contractimpl, contracttype,
-    testutils::{Address as _, Events as _, Ledger},
+    testutils::{
+        storage::Instance as _, storage::Persistent as _, Address as _, Events as _, Ledger,
+    },
     token,
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal,
+    Address, BytesN, Env, IntoVal, String, Symbol, TryFromVal, Vec,
 };
 
 use crate::{
-    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, MAX_FACE_VALUE,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, MAX_BATCH_SIZE,
+    MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 // Default invoice parameters used across tests.
@@ -158,7 +161,7 @@ fn setup() -> Setup {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -166,16 +169,30 @@ fn setup() -> Setup {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     (env, client, issuer, buyer, registry_client, usdc_asset)
+}
+
+fn assert_wiring_setter_rejects(
+    env: &Env,
+    client: &InvoiceContractClient,
+    method: &str,
+    candidate: &Address,
+) {
+    let result = env.try_invoke_contract::<(), soroban_sdk::Error>(
+        &client.address,
+        &Symbol::new(env, method),
+        (candidate.clone(),).into_val(env),
+    );
+    assert!(result.is_err(), "{method} accepted a conflicting address");
 }
 
 #[allow(dead_code)]
@@ -194,7 +211,7 @@ fn setup_with_admin() -> SetupWithAdmin {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -202,13 +219,13 @@ fn setup_with_admin() -> SetupWithAdmin {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     (
@@ -223,7 +240,7 @@ fn setup_with_admin() -> SetupWithAdmin {
 }
 
 fn mock_pool_with_asset(env: &Env, asset: &Address) -> Address {
-    let pool_id = env.register_contract(None, MockPool);
+    let pool_id = env.register(MockPool, ());
     let _pool_client = MockPoolClient::new(env, &pool_id);
     env.as_contract(&pool_id, || {
         let key = Symbol::new(env, "asset");
@@ -256,20 +273,7 @@ impl MockAgentRegistry {
 #[contracttype]
 pub struct AgentKey(Symbol);
 
-const TEST_AGENT_SEED: [u8; 32] = [7u8; 32];
-
-fn test_agent_signing_key() -> k256::ecdsa::SigningKey {
-    k256::ecdsa::SigningKey::from_slice(&TEST_AGENT_SEED).unwrap()
-}
-
-fn test_agent_pubkey(env: &Env) -> BytesN<65> {
-    let point = test_agent_signing_key()
-        .verifying_key()
-        .to_encoded_point(false);
-    let mut bytes = [0u8; 65];
-    bytes.copy_from_slice(point.as_bytes());
-    BytesN::from_array(env, &bytes)
-}
+use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 
 /// Deploys a fresh mock agent-registry, registers one active agent with a
 /// real secp256k1 keypair, points `client` at it, and submits a validly
@@ -277,7 +281,7 @@ fn test_agent_pubkey(env: &Env) -> BytesN<65> {
 /// individual tests can just call this right before `list_for_financing`.
 fn attest(env: &Env, client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
     let agent_id = Symbol::new(env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -291,10 +295,16 @@ fn attest(env: &Env, client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        // Far-future expiry: helper attestations stay valid no matter how
+        // far the calling test advances the ledger timestamp. Expiry
+        // behaviour has its own dedicated tests.
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -309,6 +319,74 @@ fn attest(env: &Env, client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
     client.submit_attestation(invoice_id, &payload_bytes, &signature);
 }
 
+#[test]
+fn test_get_attestation_missing_entry_returns_none() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let unknown_id = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client.get_attestation(&unknown_id).is_none());
+
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert!(client.get_attestation(&invoice_id).is_none());
+}
+
+#[test]
+fn test_get_attestation_persists_signed_payload_and_submission_time() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.ledger().set_timestamp(1_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert!(client.get_attestation(&invoice_id).is_none());
+
+    let agent_id = Symbol::new(&env, "underwriter");
+    let registry_id = env.register(MockAgentRegistry, ());
+    MockAgentRegistryClient::new(&env, &registry_id).register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(&env),
+        },
+    );
+    client.set_agent_registry_contract(&registry_id);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score: 3_217,
+        evidence_hash: BytesN::from_array(&env, &[42u8; 32]),
+        agent_id,
+        nonce: 17,
+        // This test is about the stored submission time, not expiry.
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.clone().to_xdr(&env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut signature = [0u8; 65];
+    signature[..64].copy_from_slice(&sig.to_bytes());
+    signature[64] = recid.to_byte();
+
+    let submitted_at = 1_234;
+    env.ledger().set_timestamp(submitted_at);
+    client.submit_attestation(
+        &invoice_id,
+        &payload_bytes,
+        &BytesN::from_array(&env, &signature),
+    );
+
+    // Reading later must preserve the submission time rather than the read time.
+    env.ledger().set_timestamp(submitted_at + 100);
+    let stored = client.get_attestation(&invoice_id).unwrap();
+    assert_eq!(stored.agent_id, payload.agent_id);
+    assert_eq!(stored.risk_score, payload.risk_score);
+    assert_eq!(stored.evidence_hash, payload.evidence_hash);
+    assert_eq!(stored.submitted_at, submitted_at);
+}
+
 // ============== FAILURE-PATH TESTS FOR submit_attestation ==============
 
 #[test]
@@ -319,7 +397,7 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
 
     // Register agent with a different pubkey than the one we'll use to sign
@@ -337,10 +415,14 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -356,19 +438,21 @@ fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
 
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
 }
-
 #[test]
-#[should_panic(expected = "Error(Contract, #21)")]
 fn test_submit_attestation_inactive_agent() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
 
-    // Register agent as inactive
+    // Register agent as inactive but with the CORRECT pubkey for the signing
+    // key used below. This isolates "inactive" from "wrong pubkey" so the test
+    // pins the `active == false` branch in `submit_attestation`, not the
+    // untrusted-signer-by-mismatch branch (covered by
+    // `test_submit_attestation_untrusted_signer_wrong_pubkey`).
     registry_client.register_agent(
         &agent_id,
         &crate::Agent {
@@ -381,10 +465,14 @@ fn test_submit_attestation_inactive_agent() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -396,7 +484,35 @@ fn test_submit_attestation_inactive_agent() {
     sig_bytes[64] = recid.to_byte();
     let signature = BytesN::from_array(&env, &sig_bytes);
 
-    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+    // Use the fallible client variant so we can assert on the Result and then
+    // continue inspecting storage/events. `try_submit_attestation` returns the
+    // typed error path (#21 = UntrustedSigner) rather than aborting the test.
+    let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
+    // sdk >=22 test Envs reset the event buffer at every top-level
+    // invocation, so this capture holds exactly the rejected call's own
+    // events; submit_attestation emits `attestation_submitted` only on
+    // success, so the buffer must be empty.
+    let events_after_call = env.events().all();
+    match result {
+        Ok(_) => panic!("inactive agent must not be able to submit an attestation"),
+        Err(inner) => {
+            let err = inner.expect("inner error must be InvoiceError::UntrustedSigner");
+            assert_eq!(err, InvoiceError::UntrustedSigner.into());
+        }
+    }
+
+    // AC2: no attestation was persisted, and no attestation_submitted event
+    // was emitted. Both checks would be unreachable with `#[should_panic]`,
+    // which is why this test uses the fallible client variant.
+    assert!(
+        client.get_attestation(&invoice_id).is_none(),
+        "rejected attestation must not be stored"
+    );
+    assert_eq!(
+        events_after_call.len(),
+        0,
+        "rejected attestation must not emit attestation_submitted"
+    );
 }
 
 #[test]
@@ -407,7 +523,7 @@ fn test_submit_attestation_unregistered_agent() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let _registry_client = MockAgentRegistryClient::new(&env, &registry_id);
 
     // Don't register the agent at all
@@ -416,10 +532,14 @@ fn test_submit_attestation_unregistered_agent() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -446,7 +566,7 @@ fn test_submit_attestation_replay_rejection() {
 
     // Second attestation with a different valid payload should fail
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -460,10 +580,14 @@ fn test_submit_attestation_replay_rejection() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 6000,
         evidence_hash: BytesN::from_array(&env, &[10u8; 32]),
         agent_id,
         nonce: 2,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -491,7 +615,7 @@ fn test_submit_attestation_domain_separator_mismatch() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -507,10 +631,14 @@ fn test_submit_attestation_domain_separator_mismatch() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &wrong_domain),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -533,7 +661,7 @@ fn test_submit_attestation_invoice_id_mismatch() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -549,10 +677,14 @@ fn test_submit_attestation_invoice_id_mismatch() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: wrong_invoice_id,
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -565,6 +697,242 @@ fn test_submit_attestation_invoice_id_mismatch() {
     let signature = BytesN::from_array(&env, &sig_bytes);
 
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+// ============== ISSUE #822 / #823: PAYLOAD BINDING & EXPIRY ==============
+
+/// Register the shared test agent in a fresh mock agent-registry and wire it
+/// into `client`. Returns the registry address so a second invoice instance
+/// can be pointed at the same registry.
+fn register_test_agent(env: &Env, client: &InvoiceContractClient) -> Address {
+    let agent_id = Symbol::new(env, "test_agent");
+    let registry_id = env.register(MockAgentRegistry, ());
+    MockAgentRegistryClient::new(env, &registry_id).register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(env),
+        },
+    );
+    client.set_agent_registry_contract(&registry_id);
+    registry_id
+}
+
+/// Build a v2 [`crate::AttestationPayload`] bound to `bound_contract` on the
+/// current network, XDR-encode it, and sign `keccak256(payload)` with the
+/// shared test agent key. Returns the raw bytes and the 65-byte signature —
+/// the exact pair `submit_attestation` consumes.
+fn sign_attestation(
+    env: &Env,
+    bound_contract: &Address,
+    invoice_id: &BytesN<32>,
+    valid_until: u64,
+) -> (soroban_sdk::Bytes, BytesN<65>) {
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: bound_contract.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(env, &[9u8; 32]),
+        agent_id: Symbol::new(env, "test_agent"),
+        nonce: 1,
+        valid_until,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    (payload_bytes, BytesN::from_array(env, &sig_bytes))
+}
+
+/// Issue #822: an attestation signed for invoice contract A must be rejected
+/// by a *second* invoice contract instance in the same `Env` even when the
+/// invoice id is identical — which it is, because ids derive from
+/// (issuer, buyer, face_value, due_date, counter, asset) and the counter
+/// restarts at 0 per deployment.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_attestation_signed_for_one_deployment_rejected_by_another() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let registry_id = env.register(MockRegistry, ());
+    let registry_client = MockRegistryClient::new(&env, &registry_id);
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    registry_client.register(&issuer);
+    registry_client.register(&buyer);
+    let usdc = env.register(MockToken, ());
+
+    // Deployment A.
+    let a_id = env.register(InvoiceContract, ());
+    let a = InvoiceContractClient::new(&env, &a_id);
+    a.initialize(&Address::generate(&env), &registry_id);
+    a.add_supported_asset(&usdc);
+    let agent_registry = register_test_agent(&env, &a);
+
+    // Deployment B: same network, same agent registry, same parties.
+    let b_id = env.register(InvoiceContract, ());
+    let b = InvoiceContractClient::new(&env, &b_id);
+    b.initialize(&Address::generate(&env), &registry_id);
+    b.add_supported_asset(&usdc);
+    b.set_agent_registry_contract(&agent_registry);
+
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id_a = a.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let id_b = b.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(id_a, id_b, "replay premise: ids collide across deployments");
+
+    let (payload_bytes, signature) = sign_attestation(&env, &a_id, &id_a, u64::MAX);
+    a.submit_attestation(&id_a, &payload_bytes, &signature);
+
+    // The very same bytes must not unlock B.
+    b.submit_attestation(&id_b, &payload_bytes, &signature);
+}
+
+/// Issue #822: a payload bound to a different network id is rejected with the
+/// typed `PayloadBindingMismatch` error, not just a generic one.
+#[test]
+#[should_panic(expected = "Error(Contract, #29)")]
+fn test_attestation_wrong_network_id_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        // A network id that is not this ledger's (the test `Env` defaults
+        // to the all-zero id, so any nonzero value differs).
+        network_id: BytesN::from_array(&env, &[42u8; 32]),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
+        agent_id: Symbol::new(&env, "test_agent"),
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(&env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    let signature = BytesN::from_array(&env, &sig_bytes);
+
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+/// Issue #823: submission of an already-expired payload is rejected with the
+/// typed `AttestationExpired` error.
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_submit_attestation_expired_payload_rejected() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) = sign_attestation(&env, &client.address, &invoice_id, now - 1);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+/// Issue #823 boundary: `valid_until == now` is still valid — the expiry
+/// comparator is strict `>`, so the boundary second is accepted on the
+/// submit path (mirrored on the list path below).
+#[test]
+fn test_submit_attestation_boundary_second_accepted() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) = sign_attestation(&env, &client.address, &invoice_id, now);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+    assert_eq!(
+        client.get_attestation(&invoice_id).unwrap().valid_until,
+        now
+    );
+    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+}
+
+/// Issue #823: an attestation valid at submission but past `valid_until`
+/// when listing runs must block `list_for_financing`.
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_list_for_financing_rejected_after_attestation_expires() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) =
+        sign_attestation(&env, &client.address, &invoice_id, now + 100);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    // One second past the window: the listing gate closes.
+    env.ledger().set_timestamp(now + 101);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+}
+
+/// Issue #823 boundary on the list path: listing exactly at `valid_until`
+/// still succeeds.
+#[test]
+fn test_list_for_financing_boundary_second_accepted() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let valid_until = env.ledger().timestamp() + 100;
+    let (payload_bytes, signature) =
+        sign_attestation(&env, &client.address, &invoice_id, valid_until);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    env.ledger().set_timestamp(valid_until);
+    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Listed);
+}
+
+/// Issue #823 on the tolerant batch path: an expired attestation must be a
+/// failed entry, never a listing and never a panic.
+#[test]
+fn test_batch_list_reports_expired_attestation_as_failed_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    register_test_agent(&env, &client);
+    env.ledger().set_timestamp(1_000_000);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let now = env.ledger().timestamp();
+    let (payload_bytes, signature) = sign_attestation(&env, &client.address, &invoice_id, now + 10);
+    client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    env.ledger().set_timestamp(now + 11);
+    let entries = vec![&env, (invoice_id.clone(), DEFAULT_DISCOUNT_BPS)];
+    let failed = client.batch_list_for_financing(&entries);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), invoice_id);
+    assert_eq!(
+        client.get(&invoice_id).status,
+        InvoiceStatus::Created,
+        "expired attestation must leave the invoice unlisted"
+    );
 }
 
 #[test]
@@ -584,7 +952,7 @@ fn test_submit_attestation_nonexistent_invoice() {
     let (env, client, _issuer, _buyer, _, _usdc) = setup();
 
     let agent_id = Symbol::new(&env, "test_agent");
-    let registry_id = env.register_contract(None, MockAgentRegistry);
+    let registry_id = env.register(MockAgentRegistry, ());
     let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
     registry_client.register_agent(
         &agent_id,
@@ -599,10 +967,13 @@ fn test_submit_attestation_nonexistent_invoice() {
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: fake_invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(&env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -637,28 +1008,202 @@ fn test_create_invoice_with_verified_parties() {
     assert!(!invoice.buyer_confirmed);
 }
 
+/// Golden vector for the invoice id (#834).
+///
+/// Rebuilds `create`'s SHA-256 preimage with the byte-at-a-time algorithm
+/// (one `push_back` host call per byte) and asserts the id returned by the
+/// contract is byte-for-byte identical. This protects the bulk-append
+/// rewrite of the preimage builder from silently changing invoice ids.
 #[test]
-fn test_get_counts_tracks_created_to_listed() {
+fn test_create_invoice_id_matches_pre_refactor_preimage() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+
+    // Reference preimage, built the slow way, in the original component
+    // order: issuer_xdr || buyer_xdr || face_value_be || due_date_be ||
+    // counter_be || asset_xdr. `create` hashes the counter value read
+    // *before* the increment, so the first invoice on a fresh contract
+    // hashes 0.
+    let mut reference = soroban_sdk::Bytes::new(&env);
+    for b in issuer.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    for b in buyer.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    for b in face_value.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in due_date.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in 0u64.to_be_bytes() {
+        reference.push_back(b);
+    }
+    for b in usdc.clone().to_xdr(&env).iter() {
+        reference.push_back(b);
+    }
+    let expected: BytesN<32> = env.crypto().sha256(&reference).into();
+
+    assert_eq!(
+        invoice_id, expected,
+        "invoice id changed across the preimage refactor"
+    );
+}
+
+#[test]
+fn test_cancel_created_invoice() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
-    let counts = client.get_counts();
-    assert_eq!(counts.get(String::from_str(&env, "Created")), Some(1));
-    assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Funded")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Active")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Confirmed")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Repaid")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Defaulted")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Expired")), Some(0));
+    assert!(client.cancel(&invoice_id));
 
-    attest(&env, &client, &invoice_id);
-    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
-
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Cancelled);
     let counts = client.get_counts();
     assert_eq!(counts.get(String::from_str(&env, "Created")), Some(0));
-    assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(1));
+    assert_eq!(counts.get(String::from_str(&env, "Cancelled")), Some(1));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_cancel_requires_issuer_auth() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    env.set_auths(&[]);
+
+    client.cancel(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_cancel_listed_invoice_fails() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    client.cancel(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_upgrade_requires_admin_auth() {
+    let (env, client, _, _, _, _, _) = setup_with_admin();
+    env.set_auths(&[]);
+    client.upgrade(&BytesN::from_array(&env, &[0; 32]));
+}
+
+fn assert_counts_match_status_indexes(
+    env: &Env,
+    client: &InvoiceContractClient,
+    expected: &[u64; 9],
+) {
+    let statuses = [
+        InvoiceStatus::Created,
+        InvoiceStatus::Listed,
+        InvoiceStatus::Funded,
+        InvoiceStatus::Active,
+        InvoiceStatus::Confirmed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Expired,
+        InvoiceStatus::Cancelled,
+    ];
+    let counts = client.get_counts();
+    assert_eq!(counts.len(), statuses.len() as u32);
+    for (status, expected_count) in statuses.into_iter().zip(expected) {
+        let count = counts.get(String::from_str(env, status.as_str()));
+        assert_eq!(count, Some(*expected_count), "wrong count for {status:?}");
+        let indexed = client.get_by_status(&status, &0, &MAX_PAGE_SIZE);
+        assert_eq!(indexed.len() as u64, *expected_count);
+        for invoice in indexed {
+            assert_eq!(invoice.status, status);
+        }
+    }
+}
+
+#[test]
+fn test_get_counts_tracks_every_lifecycle_transition() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    client.set_expiry_window(&1);
+
+    let mut expected = [0u64; 9];
+    assert_counts_match_status_indexes(&env, &client, &expected);
+    // Two repayments also exercise a terminal count greater than one.
+    for terminal in [
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Expired,
+        InvoiceStatus::Cancelled,
+    ] {
+        let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+        let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        expected[InvoiceStatus::Created as usize] += 1;
+        assert_counts_match_status_indexes(&env, &client, &expected);
+
+        if terminal == InvoiceStatus::Cancelled {
+            assert!(client.cancel(&invoice_id));
+            expected[InvoiceStatus::Created as usize] -= 1;
+            expected[InvoiceStatus::Cancelled as usize] += 1;
+            assert_counts_match_status_indexes(&env, &client, &expected);
+            continue;
+        }
+
+        attest(&env, &client, &invoice_id);
+        assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+        expected[InvoiceStatus::Created as usize] -= 1;
+        expected[InvoiceStatus::Listed as usize] += 1;
+        assert_counts_match_status_indexes(&env, &client, &expected);
+
+        if terminal == InvoiceStatus::Expired {
+            env.ledger().set_timestamp(env.ledger().timestamp() + 1);
+            assert!(client.expire_listing(&invoice_id, &issuer));
+            expected[InvoiceStatus::Listed as usize] -= 1;
+            expected[InvoiceStatus::Expired as usize] += 1;
+            assert_counts_match_status_indexes(&env, &client, &expected);
+            continue;
+        }
+
+        assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT));
+        expected[InvoiceStatus::Listed as usize] -= 1;
+        expected[InvoiceStatus::Funded as usize] += 1;
+        assert_counts_match_status_indexes(&env, &client, &expected);
+
+        assert!(client.mark_shipped(&invoice_id));
+        expected[InvoiceStatus::Funded as usize] -= 1;
+        expected[InvoiceStatus::Active as usize] += 1;
+        assert_counts_match_status_indexes(&env, &client, &expected);
+
+        client.confirm_delivery(&invoice_id, &issuer);
+        assert_counts_match_status_indexes(&env, &client, &expected);
+        client.confirm_delivery(&invoice_id, &buyer);
+        expected[InvoiceStatus::Active as usize] -= 1;
+        expected[InvoiceStatus::Confirmed as usize] += 1;
+        assert_counts_match_status_indexes(&env, &client, &expected);
+
+        if terminal == InvoiceStatus::Repaid {
+            mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+            assert!(client.repay(&invoice_id));
+        } else {
+            env.ledger().set_timestamp(due_date);
+            assert!(client.trigger_default(&invoice_id));
+        }
+        expected[InvoiceStatus::Confirmed as usize] -= 1;
+        expected[terminal as usize] += 1;
+        assert_eq!(client.get(&invoice_id).status, terminal);
+        assert_counts_match_status_indexes(&env, &client, &expected);
+    }
 }
 
 #[test]
@@ -667,20 +1212,20 @@ fn test_create_fails_unverified_issuer() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     let face_value: u128 = DEFAULT_FACE_VALUE;
@@ -694,20 +1239,20 @@ fn test_create_fails_unverified_buyer() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     registry_client.register(&issuer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
     client.initialize(&admin, &registry_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     let face_value: u128 = DEFAULT_FACE_VALUE;
@@ -741,6 +1286,39 @@ fn test_create_fails_above_max_face_value() {
     let above_max = MAX_FACE_VALUE.checked_add(1).unwrap();
 
     client.create(&issuer, &buyer, &above_max, &due_date, &usdc);
+}
+
+// ============== ISSUE #824: MIN_FACE_VALUE DUST FLOOR ==============
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_create_fails_below_min_face_value() {
+    // Boundary: MIN_FACE_VALUE - 1 is dust — rejected with InvalidFaceValue
+    // so it can never be created/attested/listed and bloat the status views.
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let below_min = MIN_FACE_VALUE.checked_sub(1).unwrap();
+
+    client.create(&issuer, &buyer, &below_min, &due_date, &usdc);
+}
+
+#[test]
+fn test_create_succeeds_at_min_face_value_and_is_fundable_at_max_discount() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let invoice_id = client.create(&issuer, &buyer, &MIN_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(client.get(&invoice_id).face_value, MIN_FACE_VALUE);
+
+    // Fundability invariant behind the floor: even at the maximum 5000 bps
+    // discount the pool's `funded_amount = face_value * (10_000 -
+    // discount_bps) / 10_000` must not round to zero — one strope is the
+    // smallest amount `fund_invoice` accepts.
+    let funded_at_max_discount = MIN_FACE_VALUE * (10_000 - 5_000) / 10_000;
+    assert!(
+        funded_at_max_discount >= 1,
+        "MIN_FACE_VALUE must keep funded_amount >= 1 at the maximum discount"
+    );
 }
 
 #[test]
@@ -778,6 +1356,9 @@ fn test_create_succeeds_when_due_date_one_second_in_future() {
     let face_value: u128 = DEFAULT_FACE_VALUE;
 
     let invoice_id = client.create(&issuer, &buyer, &face_value, &just_future_due_date, &usdc);
+    // Capture the create call's own events before the get query resets the
+    // per-invocation buffer (sdk >=22 test Env semantics).
+    let events_after_create = env.events().all();
 
     // State: invoice record exists at Created with the boundary due_date.
     let invoice = client.get(&invoice_id);
@@ -793,7 +1374,7 @@ fn test_create_succeeds_when_due_date_one_second_in_future() {
     // shape here; detailed per-topic comparisons live in the dedicated event
     // integration tests because soroban_sdk's `Val` does not implement
     // `PartialEq` for ad-hoc equality assertions.
-    let events = env.events().all();
+    let events = events_after_create;
     let (event_contract, _topics, _data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address.clone());
 }
@@ -907,15 +1488,34 @@ fn test_list_fails_discount_too_high() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #12)")]
-fn test_list_for_financing_discount_bps_zero_panics() {
-    // discount_bps == 0 is a 0% yield — nonsensical business state.
-    // Must be rejected with InvalidDiscount (#12).
+fn test_zero_discount_full_lifecycle_and_zero_term_repayment() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let face_value = DEFAULT_FACE_VALUE;
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
     attest(&env, &client, &invoice_id);
-    client.list_for_financing(&invoice_id, &0);
+    assert!(client.list_for_financing(&invoice_id, &0));
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+
+    // Funding at maturity exercises repay's zero-term branch.
+    env.ledger().set_timestamp(due_date);
+    client.mark_funded(&invoice_id, &pool, &usdc, &face_value);
+    let funded = client.get(&invoice_id);
+    assert_eq!(funded.discount_bps, 0);
+    assert_eq!(funded.funded_amount, face_value);
+
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    mint_tokens(&env, &usdc, &buyer, face_value as i128);
+
+    assert!(client.repay(&invoice_id));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Repaid);
+    assert_eq!(MockPoolClient::new(&env, &pool).get_last_refund(), 0);
 }
 
 #[test]
@@ -928,13 +1528,14 @@ fn test_list_for_financing_discount_bps_min_boundary() {
     attest(&env, &client, &invoice_id);
     let result = client.list_for_financing(&invoice_id, &1);
     assert!(result);
+    let events_after_call = env.events().all();
 
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Listed);
     assert_eq!(invoice.discount_bps, 1);
 
     let contract_id = client.address.clone();
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, contract_id);
     assert_eq!(
@@ -954,13 +1555,14 @@ fn test_list_for_financing_discount_bps_max_boundary() {
     attest(&env, &client, &invoice_id);
     let result = client.list_for_financing(&invoice_id, &5000);
     assert!(result);
+    let events_after_call = env.events().all();
 
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Listed);
     assert_eq!(invoice.discount_bps, 5000);
 
     let contract_id = client.address.clone();
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, contract_id);
     assert_eq!(
@@ -1038,11 +1640,11 @@ fn test_get_by_issuer_returns_correct_invoices() {
     client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let invoices = client.get_by_issuer(&issuer);
+    let invoices = client.get_by_issuer(&issuer, &0, &MAX_PAGE_SIZE);
     assert_eq!(invoices.len(), 2);
 
     let other = Address::generate(&env);
-    let empty = client.get_by_issuer(&other);
+    let empty = client.get_by_issuer(&other, &0, &MAX_PAGE_SIZE);
     assert_eq!(empty.len(), 0);
 }
 
@@ -1054,7 +1656,7 @@ fn test_get_by_buyer_returns_correct_invoices() {
     client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let invoices = client.get_by_buyer(&buyer);
+    let invoices = client.get_by_buyer(&buyer, &0, &MAX_PAGE_SIZE);
     assert_eq!(invoices.len(), 2);
 }
 
@@ -1086,7 +1688,7 @@ fn test_get_invoice_count_by_issuer_matches_get_by_issuer() {
     for party in [&issuer, &issuer2, &issuer3, &buyer, &buyer2] {
         assert_eq!(
             client.get_invoice_count_by_issuer(party),
-            client.get_by_issuer(party).len(),
+            client.get_by_issuer(party, &0, &MAX_PAGE_SIZE).len(),
             "issuer count mismatch for {party:?}"
         );
     }
@@ -1124,7 +1726,7 @@ fn test_get_invoice_count_by_buyer_matches_get_by_buyer() {
     for party in [&issuer, &issuer2, &buyer, &buyer2, &buyer3] {
         assert_eq!(
             client.get_invoice_count_by_buyer(party),
-            client.get_by_buyer(party).len(),
+            client.get_by_buyer(party, &0, &MAX_PAGE_SIZE).len(),
             "buyer count mismatch for {party:?}"
         );
     }
@@ -1172,7 +1774,7 @@ fn test_get_by_status_returns_correct_invoices() {
     client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let created = client.get_by_status(&InvoiceStatus::Created);
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
     assert_eq!(created.len(), 2);
 }
 
@@ -1417,7 +2019,7 @@ fn test_trigger_default_stranger_panics() {
     // the other `setup()`-based `trigger_default` tests, so it's deferred.
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -1425,7 +2027,7 @@ fn test_trigger_default_stranger_panics() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1479,15 +2081,178 @@ fn test_get_by_status_filters_correctly() {
     let id1 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     client.create(&issuer, &buyer, &2_000_000_000, &due_date, &usdc);
 
-    let created = client.get_by_status(&InvoiceStatus::Created);
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
     assert_eq!(created.len(), 2);
 
     attest(&env, &client, &id1);
     client.list_for_financing(&id1, &DEFAULT_DISCOUNT_BPS);
-    let created = client.get_by_status(&InvoiceStatus::Created);
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
     assert_eq!(created.len(), 1);
-    let listed = client.get_by_status(&InvoiceStatus::Listed);
+    let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
     assert_eq!(listed.len(), 1);
+}
+
+// ============== O(1) STATUS MEMBERSHIP MARKERS (issues #831 / #835) ==============
+
+/// Reads the raw `DataKey::StatusMembership` marker straight from contract
+/// storage, so these tests assert on the key itself and not only on the
+/// public query helper. The marker's value is the invoice's row position in
+/// the status index (issue #831); membership means the key is present.
+fn raw_status_membership(
+    env: &Env,
+    client: &InvoiceContractClient,
+    status: InvoiceStatus,
+    invoice_id: &BytesN<32>,
+) -> bool {
+    let key = crate::status_membership_key(status, invoice_id);
+    env.as_contract(&client.address, || {
+        env.storage().persistent().get::<_, u32>(&key).is_some()
+    })
+}
+
+#[test]
+fn test_status_membership_marker_written_on_create_and_rolled_on_transitions() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // `create()` writes the `Created` marker, and it carries the same TTL
+    // policy as every other invoice storage entry.
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Created,
+        &invoice_id
+    ));
+    assert!(client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
+    let created_key = crate::status_membership_key(InvoiceStatus::Created, &invoice_id);
+    let marker_ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&created_key)
+    });
+    assert!(
+        marker_ttl >= TTL_THRESHOLD,
+        "membership marker TTL should be extended, got {marker_ttl}"
+    );
+
+    // No other status may claim membership yet.
+    for status in [
+        InvoiceStatus::Listed,
+        InvoiceStatus::Funded,
+        InvoiceStatus::Active,
+        InvoiceStatus::Confirmed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Expired,
+    ] {
+        assert!(!raw_status_membership(&env, &client, status, &invoice_id));
+        assert!(!client.has_status_membership(&status, &invoice_id));
+    }
+
+    // Created -> Listed: old marker cleared, new marker set.
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Created,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Listed,
+        &invoice_id
+    ));
+
+    // Listed -> Funded.
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Listed,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Funded,
+        &invoice_id
+    ));
+
+    // Funded -> Active.
+    client.mark_shipped(&invoice_id);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Funded,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Active,
+        &invoice_id
+    ));
+
+    // Active -> Confirmed (both parties confirm).
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Active,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Confirmed,
+        &invoice_id
+    ));
+
+    // Confirmed -> Defaulted once the due date is reached.
+    env.ledger().set_timestamp(due_date);
+    client.trigger_default(&invoice_id);
+    assert!(!raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Confirmed,
+        &invoice_id
+    ));
+    assert!(raw_status_membership(
+        &env,
+        &client,
+        InvoiceStatus::Defaulted,
+        &invoice_id
+    ));
+
+    // The query helper mirrors the raw storage state after every step above.
+    assert!(!client.has_status_membership(&InvoiceStatus::Confirmed, &invoice_id));
+    assert!(client.has_status_membership(&InvoiceStatus::Defaulted, &invoice_id));
+}
+
+#[test]
+fn test_has_status_membership_rejects_prior_unknown_and_never_held() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Current status hits in O(1); statuses never held do not.
+    assert!(client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Repaid, &invoice_id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Expired, &invoice_id));
+
+    // A prior status reads `false` once the invoice has transitioned out.
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    assert!(!client.has_status_membership(&InvoiceStatus::Created, &invoice_id));
+    assert!(client.has_status_membership(&InvoiceStatus::Listed, &invoice_id));
+
+    // An invoice id that was never created has no membership anywhere.
+    let unknown_id = BytesN::from_array(&env, &[0xABu8; 32]);
+    assert!(!client.has_status_membership(&InvoiceStatus::Listed, &unknown_id));
 }
 
 #[test]
@@ -1562,6 +2327,64 @@ fn test_mark_funded_succeeds_with_matching_asset() {
     assert_eq!(inv.funding_pool, Some(pool));
 }
 
+#[test]
+fn test_mark_funded_updates_counts_index_and_emits_one_event() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(1));
+    assert_eq!(counts.get(String::from_str(&env, "Funded")), Some(0));
+    let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.get(0).unwrap().id, invoice_id);
+    assert!(client
+        .get_by_status(&InvoiceStatus::Funded, &0, &MAX_PAGE_SIZE)
+        .is_empty());
+
+    assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT));
+    let events_after_mark_funded = env.events().all();
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Listed")), Some(0));
+    assert_eq!(counts.get(String::from_str(&env, "Funded")), Some(1));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Funded);
+    assert!(client
+        .get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE)
+        .is_empty());
+    let funded = client.get_by_status(&InvoiceStatus::Funded, &0, &MAX_PAGE_SIZE);
+    assert_eq!(funded.len(), 1);
+    assert_eq!(funded.get(0).unwrap().id, invoice_id);
+    assert_eq!(funded.get(0).unwrap().status, InvoiceStatus::Funded);
+
+    let mut funded_event_count = 0;
+    for (contract, topics, data) in events_after_mark_funded.iter() {
+        if contract != client.address {
+            continue;
+        }
+        let name = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        if name == Symbol::new(&env, "invoice_funded") {
+            funded_event_count += 1;
+            assert_eq!(topics.len(), 2);
+            assert_eq!(
+                BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+                invoice_id
+            );
+            assert_eq!(
+                u128::try_from_val(&env, &data).unwrap(),
+                DEFAULT_FUNDED_AMOUNT
+            );
+        }
+    }
+    assert_eq!(funded_event_count, 1);
+}
+
 // #553: mark_funded must only accept the configured pool contract. An
 // address that self-authorizes but isn't the one set via set_pool_contract
 // must be rejected (NotAuthorized, Contract #3), preventing arbitrary pool
@@ -1600,7 +2423,8 @@ fn test_mark_funded_succeeds_for_configured_pool() {
     assert_eq!(inv.funding_pool, Some(pool));
 }
 
-// #554: mark_funded panics when funded_amount exceeds face_value.
+// #554 / #934: mark_funded panics with the typed InvalidAmount error when
+// funded_amount exceeds face_value.
 #[test]
 #[should_panic(expected = "Error(Contract, #16)")]
 fn test_mark_funded_fails_when_amount_exceeds_face_value() {
@@ -1613,6 +2437,39 @@ fn test_mark_funded_fails_when_amount_exceeds_face_value() {
     let pool = mock_pool_with_asset(&env, &usdc);
     client.set_pool_contract(&pool);
     client.mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1));
+}
+
+// #934: a rejected over-funding attempt must not mutate the invoice at all —
+// the status stays Listed and funded_amount stays 0, so a later legitimate
+// funding (at or below face_value) is still possible.
+#[test]
+fn test_mark_funded_overfunding_leaves_invoice_unchanged() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    assert!(client
+        .try_mark_funded(&invoice_id, &pool, &usdc, &(DEFAULT_FACE_VALUE + 1))
+        .is_err());
+    // soroban-sdk 22+ resets the event buffer before every top-level invocation,
+    // so the rejected call is measured on its own: it must emit nothing.
+    assert_eq!(env.events().all().len(), 0);
+
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Listed);
+    assert_eq!(inv.funded_amount, 0);
+    assert_eq!(inv.funding_pool, None);
+    assert_eq!(inv.funded_at, None);
+
+    // The invoice is still fundable at its face value after the rejection.
+    assert!(client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FACE_VALUE));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Funded);
+    assert_eq!(client.get(&invoice_id).funded_amount, DEFAULT_FACE_VALUE);
 }
 
 // #554: funded_amount == face_value is the boundary and must succeed.
@@ -1820,6 +2677,104 @@ fn test_set_pool_contract_emits_event() {
 }
 
 #[test]
+fn test_set_pool_contract_replacement_emits_old_and_new_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let old_pool = Address::generate(&env);
+    let new_pool = Address::generate(&env);
+
+    client.set_pool_contract(&old_pool);
+    client.set_pool_contract(&new_pool);
+
+    // soroban-sdk 22+ resets the event buffer before every top-level invocation,
+    // so the replacement event is captured before any further call is made.
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    assert_eq!(client.get_pool_contract(), Some(new_pool.clone()));
+    let (event_contract, topics, data) = events.last().expect("expected replacement event");
+    assert_eq!(event_contract, client.address.clone());
+    assert_eq!(
+        topics,
+        (
+            Symbol::new(&env, "pool_contract_updated"),
+            old_pool,
+            new_pool
+        )
+            .into_val(&env)
+    );
+    <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
+fn test_set_pool_contract_rejects_conflicting_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let admin = client.get_admin().unwrap();
+    let registry = client.get_registry_contract().unwrap();
+    let escrow = Address::generate(&env);
+    let agent_registry = Address::generate(&env);
+    client.set_escrow_contract(&escrow);
+    client.set_agent_registry_contract(&agent_registry);
+
+    for candidate in [
+        admin,
+        client.address.clone(),
+        registry,
+        escrow,
+        agent_registry,
+    ] {
+        assert_wiring_setter_rejects(&env, &client, "set_pool_contract", &candidate);
+    }
+}
+
+#[test]
+fn test_set_escrow_contract_rejects_conflicting_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let admin = client.get_admin().unwrap();
+    let registry = client.get_registry_contract().unwrap();
+    let pool = Address::generate(&env);
+    let agent_registry = Address::generate(&env);
+    client.set_pool_contract(&pool);
+    client.set_agent_registry_contract(&agent_registry);
+
+    for candidate in [
+        admin,
+        client.address.clone(),
+        registry,
+        pool,
+        agent_registry,
+    ] {
+        assert_wiring_setter_rejects(&env, &client, "set_escrow_contract", &candidate);
+    }
+}
+
+#[test]
+fn test_set_agent_registry_contract_rejects_conflicting_addresses() {
+    let (env, client, _, _, _, _) = setup();
+    let admin = client.get_admin().unwrap();
+    let registry = client.get_registry_contract().unwrap();
+    let pool = Address::generate(&env);
+    let escrow = Address::generate(&env);
+    client.set_pool_contract(&pool);
+    client.set_escrow_contract(&escrow);
+
+    for candidate in [admin, client.address.clone(), registry, pool, escrow] {
+        assert_wiring_setter_rejects(&env, &client, "set_agent_registry_contract", &candidate);
+    }
+}
+
+#[test]
+fn test_initialize_rejects_conflicting_registry_address() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(InvoiceContract, ());
+    let client = InvoiceContractClient::new(&env, &contract_id);
+    let admin = Address::generate(&env);
+
+    for registry in [admin.clone(), contract_id.clone()] {
+        assert!(client.try_initialize(&admin, &registry).is_err());
+    }
+}
+
+#[test]
 fn test_set_expiry_window_emits_event() {
     let (env, client, _, _, _, _) = setup();
     let window: u64 = 86400;
@@ -1861,7 +2816,7 @@ fn test_mark_shipped_succeeds_by_issuer() {
 fn test_mark_shipped_stranger_panics() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -1869,7 +2824,7 @@ fn test_mark_shipped_stranger_panics() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -1960,7 +2915,7 @@ fn test_mark_shipped_stranger_panics() {
 fn test_expire_listing_stranger_panics() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -1968,7 +2923,7 @@ fn test_expire_listing_stranger_panics() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -2247,7 +3202,7 @@ fn test_repay_fails_from_listed() {
 fn test_repay_fails_no_auth() {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -2255,7 +3210,7 @@ fn test_repay_fails_no_auth() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -2344,21 +3299,27 @@ fn test_repay_fails_no_auth() {
 // to stay within CI time budgets for the Soroban in-process host.
 
 #[test]
-fn prop_any_positive_face_value_creates_invoice_in_created_status() {
+fn prop_any_min_face_value_creates_invoice_in_created_status() {
+    // Range starts at MIN_FACE_VALUE: issue #824 made smaller (dust) face
+    // values a rejection case, covered by
+    // `test_create_fails_below_min_face_value` instead.
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
-        .run(&(1u128..=1_000_000_000_000_000u128), |face_value| {
-            let (env, client, issuer, buyer, _, usdc) = setup();
-            let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-            let id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
-            let inv = client.get(&id);
-            prop_assert_eq!(inv.face_value, face_value);
-            prop_assert_eq!(inv.status, InvoiceStatus::Created);
-            prop_assert!(!inv.issuer_confirmed);
-            prop_assert!(!inv.buyer_confirmed);
-            prop_assert_eq!(inv.funded_amount, 0);
-            Ok(())
-        })
+        .run(
+            &(MIN_FACE_VALUE..=1_000_000_000_000_000u128),
+            |face_value| {
+                let (env, client, issuer, buyer, _, usdc) = setup();
+                let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+                let id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+                let inv = client.get(&id);
+                prop_assert_eq!(inv.face_value, face_value);
+                prop_assert_eq!(inv.status, InvoiceStatus::Created);
+                prop_assert!(!inv.issuer_confirmed);
+                prop_assert!(!inv.buyer_confirmed);
+                prop_assert_eq!(inv.funded_amount, 0);
+                Ok(())
+            },
+        )
         .unwrap();
 }
 
@@ -2382,7 +3343,7 @@ fn prop_any_future_due_date_creates_invoice_successfully() {
 fn prop_discount_bps_within_limit_always_lists_invoice() {
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
-        .run(&(1u32..=5000u32), |discount_bps| {
+        .run(&(0u32..=5000u32), |discount_bps| {
             let (env, client, issuer, buyer, _, usdc) = setup();
             let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
             let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
@@ -2403,7 +3364,7 @@ fn prop_invoice_id_is_deterministic_for_same_inputs() {
     // timestamp must always produce the same invoice ID.
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
-        .run(&(1u128..=1_000_000_000_000u128), |face_value| {
+        .run(&(MIN_FACE_VALUE..=1_000_000_000_000u128), |face_value| {
             let (env, client, issuer, buyer, _, usdc) = setup();
             let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
             let id1 = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
@@ -2578,6 +3539,32 @@ fn prop_status_indexes_and_counters_partition_all_invoices() {
     // Status-transition legality is covered by #436; this property is
     // index/counter conservation only. Replayed no-op transitions (calling
     // `mark_defaulted` twice) cover `move_status_index` idempotency.
+fn assert_status_index_consistency(client: &InvoiceContractClient, invoice_id: &BytesN<32>) {
+    let invoice = client.get(invoice_id);
+    let statuses = [
+        InvoiceStatus::Created,
+        InvoiceStatus::Listed,
+        InvoiceStatus::Funded,
+        InvoiceStatus::Active,
+        InvoiceStatus::Confirmed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Expired,
+    ];
+
+    for status in statuses {
+        let indexed = client.get_by_status(&status, &0, &MAX_PAGE_SIZE);
+        if status == invoice.status {
+            assert_eq!(indexed.len(), 1);
+            assert_eq!(indexed.get(0).unwrap().id, *invoice_id);
+        } else {
+            assert_eq!(indexed.len(), 0);
+        }
+    }
+}
+
+#[test]
+fn prop_random_valid_transition_paths_preserve_indexes_and_terminality() {
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
         .run(
@@ -2721,6 +3708,72 @@ fn prop_status_indexes_and_counters_partition_all_invoices() {
                     }
                     check_partition(&status)?;
                 }
+                any::<bool>(),
+                0u32..=5000u32,
+                1u64..=2_592_000u64,
+                any::<bool>(),
+            ),
+            |(expires, discount_bps, expiry_window, issuer_confirms_first)| {
+                let (env, client, issuer, buyer, _, usdc) = setup();
+                let due_date = env.ledger().timestamp() + 31_536_000;
+                let invoice_id =
+                    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+                assert_status_index_consistency(&client, &invoice_id);
+
+                attest(&env, &client, &invoice_id);
+                client.list_for_financing(&invoice_id, &discount_bps);
+                assert_status_index_consistency(&client, &invoice_id);
+
+                if expires {
+                    client.set_expiry_window(&expiry_window);
+                    env.ledger()
+                        .set_timestamp(env.ledger().timestamp() + expiry_window);
+                    prop_assert!(client.expire_listing(&invoice_id, &issuer));
+                    assert_status_index_consistency(&client, &invoice_id);
+
+                    let reopened = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                        &client.address,
+                        &Symbol::new(&env, "list_for_financing"),
+                        (invoice_id.clone(), discount_bps).into_val(&env),
+                    );
+                    prop_assert!(reopened.is_err());
+                } else {
+                    let pool = mock_pool_with_asset(&env, &usdc);
+                    client.set_pool_contract(&pool);
+                    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+                    client.set_escrow_contract(&escrow);
+                    let funded_amount =
+                        DEFAULT_FACE_VALUE * (10_000 - discount_bps as u128) / 10_000;
+                    client.mark_funded(&invoice_id, &pool, &usdc, &funded_amount);
+                    assert_status_index_consistency(&client, &invoice_id);
+
+                    client.mark_shipped(&invoice_id);
+                    assert_status_index_consistency(&client, &invoice_id);
+
+                    if issuer_confirms_first {
+                        client.confirm_delivery(&invoice_id, &issuer);
+                        assert_status_index_consistency(&client, &invoice_id);
+                        client.confirm_delivery(&invoice_id, &buyer);
+                    } else {
+                        client.confirm_delivery(&invoice_id, &buyer);
+                        assert_status_index_consistency(&client, &invoice_id);
+                        client.confirm_delivery(&invoice_id, &issuer);
+                    }
+                    assert_status_index_consistency(&client, &invoice_id);
+
+                    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+                    prop_assert!(client.repay(&invoice_id));
+                    assert_status_index_consistency(&client, &invoice_id);
+
+                    let replayed = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                        &client.address,
+                        &Symbol::new(&env, "repay"),
+                        (invoice_id.clone(),).into_val(&env),
+                    );
+                    prop_assert!(replayed.is_err());
+                }
+
+                assert_status_index_consistency(&client, &invoice_id);
                 Ok(())
             },
         )
@@ -2785,7 +3838,7 @@ impl MockEscrow {
 
 /// Registers a MockEscrow wired to `pool_id` and `asset` and returns its address.
 fn mock_escrow_for_pool(env: &Env, pool_id: &Address, asset: &Address) -> Address {
-    let escrow_id = env.register_contract(None, MockEscrow);
+    let escrow_id = env.register(MockEscrow, ());
     let esc_client = MockEscrowClient::new(env, &escrow_id);
     esc_client.set_pool(pool_id);
     esc_client.set_asset(asset);
@@ -2822,16 +3875,104 @@ fn setup_confirmed_invoice() -> (
 // ============== SUPPORTED ASSET TESTS ==============
 
 #[test]
+fn test_add_supported_asset_requires_admin_authorization() {
+    let (env, client, _, _, _, supported) = setup();
+    let asset = Address::generate(&env);
+    let non_admin = Address::generate(&env);
+    let count = client.get_supported_asset_count();
+
+    for signed_by_non_admin in [false, true] {
+        // Replace setup's blanket authorization with either no signature or
+        // a signature for this exact invocation from someone other than admin.
+        env.mock_auths(&[]);
+        if signed_by_non_admin {
+            env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &non_admin,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "add_supported_asset",
+                    args: (asset.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+        }
+
+        assert!(client.try_add_supported_asset(&asset).is_err());
+        assert!(!client.is_supported_asset(&asset));
+        assert!(client.is_supported_asset(&supported));
+        assert_eq!(client.get_supported_asset_count(), count);
+    }
+}
+
+#[test]
+fn test_remove_supported_asset_requires_admin_authorization() {
+    let (env, client, _, _, _, asset) = setup();
+    let non_admin = Address::generate(&env);
+    let count = client.get_supported_asset_count();
+
+    for signed_by_non_admin in [false, true] {
+        env.mock_auths(&[]);
+        if signed_by_non_admin {
+            env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+                address: &non_admin,
+                invoke: &soroban_sdk::testutils::MockAuthInvoke {
+                    contract: &client.address,
+                    fn_name: "remove_supported_asset",
+                    args: (asset.clone(),).into_val(&env),
+                    sub_invokes: &[],
+                },
+            }]);
+        }
+
+        assert!(client.try_remove_supported_asset(&asset).is_err());
+        assert!(client.is_supported_asset(&asset));
+        assert_eq!(client.get_supported_asset_count(), count);
+    }
+}
+
+#[test]
+fn test_is_supported_asset_renews_near_expiry_entry_without_adding_unknown_asset() {
+    let (env, client, _, _, _, asset) = setup();
+    let unknown = Address::generate(&env);
+    let key = crate::DataKey::SupportedAsset(asset.clone());
+    let unknown_key = crate::DataKey::SupportedAsset(unknown.clone());
+    let count = client.get_supported_asset_count();
+    let initial_ttl = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + initial_ttl - 1);
+    env.as_contract(&client.address, || {
+        assert_eq!(env.storage().persistent().get_ttl(&key), 1);
+    });
+
+    assert!(client.is_supported_asset(&asset));
+    env.as_contract(&client.address, || {
+        assert_eq!(env.storage().persistent().get_ttl(&key), TTL_EXTEND_TO);
+    });
+    assert!(!client.is_supported_asset(&unknown));
+    env.as_contract(&client.address, || {
+        assert!(!env.storage().persistent().has(&unknown_key));
+    });
+    assert_eq!(client.get_supported_asset_count(), count);
+
+    // The renewed entry survives beyond its original live-until ledger.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 2);
+    assert!(client.is_supported_asset(&asset));
+}
+
+#[test]
 fn test_add_supported_asset() {
     let (env, client, _, _, _, _) = setup();
     let asset = Address::generate(&env);
 
     assert!(!client.is_supported_asset(&asset));
     client.add_supported_asset(&asset);
+    let events_after_call = env.events().all();
     assert!(client.is_supported_asset(&asset));
     assert_eq!(client.get_supported_asset_count(), 2);
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
@@ -3006,8 +4147,23 @@ fn test_repay_early_fails_when_funding_asset_contract_missing() {
 }
 
 #[test]
-fn test_trigger_default_rejects_false_pool_result() {
+fn test_trigger_default_rolls_back_when_pool_handle_default_fails() {
     let (env, client, _buyer, invoice_id, pool, _escrow) = setup_confirmed_invoice();
+    let before_status = client.get(&invoice_id).status;
+    let count_before = client.get_counts();
+    let default_events_before = env
+        .events()
+        .all()
+        .iter()
+        .filter(|(contract, topics, _)| {
+            *contract == client.address && {
+                let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+                topic0 == Symbol::new(&env, "invoice_defaulted")
+            }
+        })
+        .count();
+    let events_before = env.events().all().len();
+
     MockPoolClient::new(&env, &pool).set_return_values(&false, &true);
     let due_date = client.get(&invoice_id).due_date;
     env.ledger().set_timestamp(due_date);
@@ -3019,7 +4175,55 @@ fn test_trigger_default_rejects_false_pool_result() {
     );
 
     assert!(result.is_err());
-    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+    assert_eq!(client.get(&invoice_id).status, before_status);
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Confirmed, &0, &MAX_PAGE_SIZE)
+            .len(),
+        1
+    );
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Defaulted, &0, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+    assert!(client.has_status_membership(&InvoiceStatus::Confirmed, &invoice_id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Defaulted, &invoice_id));
+
+    let statuses = [
+        InvoiceStatus::Created,
+        InvoiceStatus::Listed,
+        InvoiceStatus::Funded,
+        InvoiceStatus::Active,
+        InvoiceStatus::Confirmed,
+        InvoiceStatus::Repaid,
+        InvoiceStatus::Defaulted,
+        InvoiceStatus::Expired,
+        InvoiceStatus::Cancelled,
+    ];
+    for status in statuses {
+        let key = String::from_str(&env, status.as_str());
+        assert_eq!(
+            client.get_counts().get(key.clone()),
+            count_before.get(key),
+            "status counts changed after failing default"
+        );
+    }
+
+    let default_events_after = env
+        .events()
+        .all()
+        .iter()
+        .filter(|(contract, topics, _)| {
+            *contract == client.address && {
+                let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+                topic0 == Symbol::new(&env, "invoice_defaulted")
+            }
+        })
+        .count();
+    assert_eq!(env.events().all().len(), events_before);
+    assert_eq!(default_events_after, default_events_before);
 }
 
 #[test]
@@ -3041,13 +4245,46 @@ fn test_repay_from_confirmed() {
 
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
 
-    let events_before = env.events().all().len();
     client.repay(&invoice_id);
+    // sdk >=22: this buffer holds exactly the repay call's own events, and
+    // a successful repay must emit at least one (invoice_repaid).
+    let events_after_repay = env.events().all();
 
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Repaid);
     assert!(invoice.repaid_at.is_some());
-    assert!(env.events().all().len() > events_before);
+    assert!(!events_after_repay.is_empty());
+}
+
+#[test]
+fn test_repay_at_and_after_maturity_caps_large_discount_without_overflow() {
+    for repaid_at in [DEFAULT_DUE_OFFSET, DEFAULT_DUE_OFFSET + 1, u64::MAX] {
+        let (env, client, issuer, buyer, _, usdc) = setup();
+        let face_value = MAX_FACE_VALUE;
+        let funded_amount = face_value / 2;
+        let invoice_id = client.create(&issuer, &buyer, &face_value, &DEFAULT_DUE_OFFSET, &usdc);
+        attest(&env, &client, &invoice_id);
+        client.list_for_financing(&invoice_id, &5000);
+        let pool = mock_pool_with_asset(&env, &usdc);
+        client.set_pool_contract(&pool);
+        let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+        client.set_escrow_contract(&escrow);
+        client.mark_funded(&invoice_id, &pool, &usdc, &funded_amount);
+        mint_tokens(&env, &usdc, &buyer, face_value as i128);
+
+        // Uncapped discount * elapsed overflows even at maturity for this
+        // valid face value. Mature invoices should use the full discount
+        // directly, regardless of how much later the buyer settles.
+        env.ledger().set_timestamp(repaid_at);
+        assert!(client.repay(&invoice_id));
+        assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Repaid);
+        assert_eq!(client.get(&invoice_id).repaid_at, Some(repaid_at));
+        assert_eq!(MockPoolClient::new(&env, &pool).get_last_refund(), 0);
+        let token = MockTokenClient::new(&env, &usdc);
+        assert_eq!(token.balance(&buyer), 0);
+        assert_eq!(token.balance(&escrow), 0);
+        assert_eq!(token.balance(&pool), face_value as i128);
+    }
 }
 
 #[test]
@@ -3177,7 +4414,7 @@ fn test_create_fails_uninitialized_registry() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -3185,7 +4422,7 @@ fn test_create_fails_uninitialized_registry() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
@@ -3207,7 +4444,7 @@ fn test_create_fails_missing_counter() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -3215,7 +4452,7 @@ fn test_create_fails_missing_counter() {
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -3251,6 +4488,7 @@ fn test_create_writes_to_issuer_index() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
     let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    let events_after_create = env.events().all();
 
     // Direct storage read: issuer index count and entry
     env.as_contract(&client.address, || {
@@ -3270,17 +4508,19 @@ fn test_create_writes_to_issuer_index() {
     });
 
     // Public API: get_by_issuer returns the invoice
-    let invoices = client.get_by_issuer(&issuer);
+    let invoices = client.get_by_issuer(&issuer, &0, &MAX_PAGE_SIZE);
     assert_eq!(invoices.len(), 1);
     assert_eq!(invoices.get(0).unwrap().id, invoice_id);
 
     // A different (unused) issuer address returns no invoices
     let other = Address::generate(&env);
-    let empty = client.get_by_issuer(&other);
+    let empty = client.get_by_issuer(&other, &0, &MAX_PAGE_SIZE);
     assert_eq!(empty.len(), 0);
 
     // Verify the invoice_created event was emitted by the invoice contract
-    let events = env.events().all();
+    // (captured right after the create call — sdk >=22 buffers are
+    // per-invocation).
+    let events = events_after_create;
     let (event_contract, _topics, _data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
 }
@@ -3294,6 +4534,7 @@ fn test_create_writes_to_buyer_index() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
     let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    let events_after_create = env.events().all();
 
     // Direct storage read: buyer index count and entry
     env.as_contract(&client.address, || {
@@ -3313,17 +4554,19 @@ fn test_create_writes_to_buyer_index() {
     });
 
     // Public API: get_by_buyer returns the invoice
-    let invoices = client.get_by_buyer(&buyer);
+    let invoices = client.get_by_buyer(&buyer, &0, &MAX_PAGE_SIZE);
     assert_eq!(invoices.len(), 1);
     assert_eq!(invoices.get(0).unwrap().id, invoice_id);
 
     // A different (unused) buyer address returns no invoices
     let other = Address::generate(&env);
-    let empty = client.get_by_buyer(&other);
+    let empty = client.get_by_buyer(&other, &0, &MAX_PAGE_SIZE);
     assert_eq!(empty.len(), 0);
 
     // Verify the invoice_created event was emitted by the invoice contract
-    let events = env.events().all();
+    // (captured right after the create call — sdk >=22 buffers are
+    // per-invocation).
+    let events = events_after_create;
     let (event_contract, _topics, _data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
 }
@@ -3387,8 +4630,8 @@ fn test_create_writes_to_both_indexes_multiple_invoices() {
     });
 
     // Public API assertions
-    assert_eq!(client.get_by_issuer(&issuer).len(), 2);
-    assert_eq!(client.get_by_buyer(&buyer).len(), 2);
+    assert_eq!(client.get_by_issuer(&issuer, &0, &MAX_PAGE_SIZE).len(), 2);
+    assert_eq!(client.get_by_buyer(&buyer, &0, &MAX_PAGE_SIZE).len(), 2);
 }
 
 #[test]
@@ -3403,28 +4646,28 @@ fn test_create_indexes_are_party_specific() {
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
     // Issuer should see the invoice in their issuer index
-    let issuer_invoices = client.get_by_issuer(&issuer);
+    let issuer_invoices = client.get_by_issuer(&issuer, &0, &MAX_PAGE_SIZE);
     assert_eq!(issuer_invoices.len(), 1);
     assert_eq!(issuer_invoices.get(0).unwrap().id, invoice_id);
 
     // Buyer should see the invoice in their buyer index
-    let buyer_invoices = client.get_by_buyer(&buyer);
+    let buyer_invoices = client.get_by_buyer(&buyer, &0, &MAX_PAGE_SIZE);
     assert_eq!(buyer_invoices.len(), 1);
     assert_eq!(buyer_invoices.get(0).unwrap().id, invoice_id);
 
     // Issuer should NOT see the invoice in their buyer index
-    let issuer_as_buyer = client.get_by_buyer(&issuer);
+    let issuer_as_buyer = client.get_by_buyer(&issuer, &0, &MAX_PAGE_SIZE);
     assert_eq!(issuer_as_buyer.len(), 0);
 
     // Buyer should NOT see the invoice in their issuer index
-    let buyer_as_issuer = client.get_by_issuer(&buyer);
+    let buyer_as_issuer = client.get_by_issuer(&buyer, &0, &MAX_PAGE_SIZE);
     assert_eq!(buyer_as_issuer.len(), 0);
 
     // An unrelated third party should see nothing in either index
     let stranger = Address::generate(&env);
     registry.register(&stranger);
-    assert_eq!(client.get_by_issuer(&stranger).len(), 0);
-    assert_eq!(client.get_by_buyer(&stranger).len(), 0);
+    assert_eq!(client.get_by_issuer(&stranger, &0, &MAX_PAGE_SIZE).len(), 0);
+    assert_eq!(client.get_by_buyer(&stranger, &0, &MAX_PAGE_SIZE).len(), 0);
 }
 
 #[test]
@@ -3471,6 +4714,7 @@ fn test_view_functions_initialized_existing_invoice() {
     assert_eq!(client.get_face_value(&invoice_id), face_value);
     assert_eq!(client.get_funding_asset(&invoice_id), usdc);
     assert_eq!(client.get_discount_bps(&invoice_id), 250);
+    assert_eq!(client.get_funded_amount(&invoice_id), 0);
     assert_eq!(client.get_status(&invoice_id), InvoiceStatus::Listed as u32);
 
     let inv = client.get(&invoice_id);
@@ -3479,11 +4723,26 @@ fn test_view_functions_initialized_existing_invoice() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #2)")]
-fn test_get_issuer_missing_invoice_panics() {
+fn test_get_issuer_returns_stored_issuer_after_create() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    assert_eq!(client.get_issuer(&invoice_id), issuer);
+    assert_eq!(
+        client.get_issuer(&invoice_id),
+        client.get(&invoice_id).issuer
+    );
+}
+
+#[test]
+fn test_get_issuer_missing_invoice_returns_typed_not_found() {
     let (env, client, _, _, _, _) = setup();
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
-    client.get_issuer(&fake_id);
+    assert_eq!(
+        client.try_get_issuer(&fake_id),
+        Err(Ok(InvoiceError::NotFound.into())),
+    );
 }
 
 #[test]
@@ -3511,6 +4770,51 @@ fn test_get_discount_bps_missing_invoice_panics() {
 }
 
 #[test]
+fn test_get_funded_amount_returns_zero_before_funding() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    assert_eq!(client.get_funded_amount(&invoice_id), 0);
+}
+
+#[test]
+fn test_get_funded_amount_returns_correct_value_after_funding() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let face_value = DEFAULT_FACE_VALUE;
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &250);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    let funded_amount = face_value * 95 / 100;
+    client.mark_funded(&invoice_id, &pool, &usdc, &funded_amount);
+
+    assert_eq!(client.get_funded_amount(&invoice_id), funded_amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_funded_amount_missing_invoice_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_funded_amount(&fake_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #20)")]
+fn test_get_funded_amount_uninitialized_panics() {
+    let env = Env::default();
+    let contract_id = env.register(InvoiceContract, ());
+    let client = InvoiceContractClient::new(&env, &contract_id);
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    client.get_funded_amount(&fake_id);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_get_status_missing_invoice_panics() {
     let (env, client, _, _, _, _) = setup();
@@ -3530,7 +4834,7 @@ fn test_get_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_issuer_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_issuer(&fake_id);
@@ -3540,7 +4844,7 @@ fn test_get_issuer_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_face_value_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_face_value(&fake_id);
@@ -3550,7 +4854,7 @@ fn test_get_face_value_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_funding_asset_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_funding_asset(&fake_id);
@@ -3560,7 +4864,7 @@ fn test_get_funding_asset_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_discount_bps_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_discount_bps(&fake_id);
@@ -3570,7 +4874,7 @@ fn test_get_discount_bps_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_status_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_status(&fake_id);
@@ -3580,7 +4884,7 @@ fn test_get_status_uninitialized_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get(&fake_id);
@@ -3612,7 +4916,7 @@ fn test_get_buyer_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_buyer_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_buyer(&fake_id);
@@ -3640,7 +4944,7 @@ fn test_get_due_date_missing_invoice_panics() {
 #[should_panic(expected = "Error(Contract, #20)")]
 fn test_get_due_date_uninitialized_panics() {
     let env = Env::default();
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
     let fake_id = BytesN::from_array(&env, &[0u8; 32]);
     client.get_due_date(&fake_id);
@@ -3676,16 +4980,172 @@ fn test_mark_funded_fails_zero_amount() {
     client.mark_funded(&invoice_id, &pool, &usdc, &0);
 }
 
+// ============ ISSUE #863: SUPPORTED-ASSET MARKER TTL KEEP-ALIVE ============
+//
+// `add_supported_asset` wrote the persistent `SupportedAsset(Address)`
+// marker with no `extend_ttl`, while the instance-side `SupportedAssetCount`
+// was re-extended by every admin write. The marker could therefore lapse
+// (default persistence bump) long before the count entry, after which
+// `remove_supported_asset`'s `has()` guard early-returns and the count is
+// permanently out of sync with membership. These tests pin the write-time
+// extension, the bump-on-use keep-alive on `is_supported_asset` / `create`,
+// and the resulting count/membership consistency.
+
+#[test]
+fn test_add_supported_asset_extends_marker_ttl_issue_863() {
+    let (env, client, _, _, _, usdc) = setup();
+    let asset_key = crate::DataKey::SupportedAsset(usdc.clone());
+    let ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&asset_key)
+    });
+    assert!(
+        ttl >= TTL_EXTEND_TO - 100_000,
+        "add_supported_asset must extend the marker to ~TTL_EXTEND_TO, got {ttl}"
+    );
+}
+
+#[test]
+fn test_supported_asset_marker_cannot_lapse_while_in_use() {
+    let (env, client, _, _, _, usdc) = setup();
+    // Three keep-alive cycles of ~TTL_EXTEND_TO ledgers each: total elapsed
+    // (~5.7M) far exceeds the marker's lifetime. Touching the allow-list the
+    // way an active deployment does (idempotent admin re-add, membership
+    // query) must re-bump it every cycle, so membership and the count stay
+    // in lockstep instead of the #863 lapse.
+    for step in 0..3 {
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+        keep_instance_alive(&env, &client.address);
+        client.add_supported_asset(&usdc);
+        assert!(
+            client.is_supported_asset(&usdc),
+            "supported-asset marker lapsed after keep-alive cycle {step} while the allow-list is in use"
+        );
+    }
+    assert_eq!(
+        client.get_supported_asset_count(),
+        1,
+        "count must not double-count a marker that was never actually removed"
+    );
+    // Removal stays consistent with the live marker (count reaches 0).
+    client.remove_supported_asset(&usdc);
+    assert_eq!(client.get_supported_asset_count(), 0);
+    assert!(!client.is_supported_asset(&usdc));
+}
+
+#[test]
+fn test_is_supported_asset_rebumps_drained_marker() {
+    let (env, client, _, _, _, usdc) = setup();
+    let asset_key = crate::DataKey::SupportedAsset(usdc.clone());
+    // Drain the marker to just above expiry (same measured drain style as
+    // the pool LP tests) so the use-time bump is observable.
+    let marker_ttl = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&asset_key)
+    });
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + marker_ttl - 50);
+    keep_instance_alive(&env, &client.address);
+
+    assert!(client.is_supported_asset(&usdc));
+    let after = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&asset_key)
+    });
+    assert!(
+        after >= TTL_EXTEND_TO - 100_000,
+        "is_supported_asset must re-bump the drained supported-asset marker, got {after}"
+    );
+    // Membership and the instance-side count are still in lockstep after
+    // the drain-and-rebump cycle: the #863 divergence cannot occur.
+    assert_eq!(client.get_supported_asset_count(), 1);
+    //
+    // `create`'s allow-list check performs the identical `bump_persistent`
+    // on the same key (see `create_inner`); it is not re-measured across a
+    // drained marker here because creating after a ~2M-ledger drain would
+    // dispatch to the mock registry, whose test-only instance the host
+    // archives once its default TTL elapses (it carries no keep-alive of
+    // its own). T2 pins the end-to-end count consistency for the paths the
+    // admin and callers actually exercise.
+}
+
+#[test]
+fn test_set_escrow_contract_admin_can_replace_and_repay_uses_new_address() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let initial_escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&initial_escrow);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+    assert_eq!(client.get_escrow_contract(), Some(initial_escrow.clone()));
+
+    // Deploy a second working escrow and swap. To prove repay actually routes
+    // to the NEW address (not just that the value was stored), we drain the
+    // OLD escrow's storage. If repay were still pointed at initial_escrow,
+    // its `release_to_pool` would panic on the missing "pool" / "asset" keys.
+    // That the repayment below succeeds means the call routed to new_escrow.
+    let new_escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    assert_ne!(new_escrow, initial_escrow);
+    client.set_escrow_contract(&new_escrow);
+    assert_eq!(client.get_escrow_contract(), Some(new_escrow.clone()));
+
+    env.as_contract(&initial_escrow, || {
+        env.storage().instance().remove(&Symbol::new(&env, "pool"));
+        env.storage().instance().remove(&Symbol::new(&env, "asset"));
+    });
+
+    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+    let repaid = client.repay(&invoice_id);
+    assert!(repaid, "repay must route to the replaced escrow");
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Repaid);
+    assert_eq!(client.get_escrow_contract(), Some(new_escrow));
+}
+
+#[test]
+fn test_set_escrow_contract_non_admin_cannot_replace() {
+    let (env, client, _, _, _, usdc) = setup();
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+
+    // Seed a working escrow as admin (setup mocks all auths), then clear
+    // auths so the next call has to satisfy require_auth on its own.
+    let initial_escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&initial_escrow);
+    let before = client.get_escrow_contract();
+    assert_eq!(before, Some(initial_escrow));
+
+    // From here, no auths are mocked: only the stored admin could satisfy
+    // set_escrow_contract, and we are invoking with no auth context.
+    env.set_auths(&[]);
+    let replacement = mock_escrow_for_pool(&env, &pool, &usdc);
+    let result = env.try_invoke_contract::<(), InvoiceError>(
+        &client.address,
+        &Symbol::new(&env, "set_escrow_contract"),
+        (replacement,).into_val(&env),
+    );
+    assert!(result.is_err(), "non-admin must not replace escrow");
+
+    // Storage must be unchanged — the rejected call must not partially apply.
+    assert_eq!(client.get_escrow_contract(), before);
+}
 #[test]
 fn test_remove_supported_asset() {
     let (env, client, _, _, _, usdc) = setup();
 
     assert!(client.is_supported_asset(&usdc));
     client.remove_supported_asset(&usdc);
+    let events_after_call = env.events().all();
     assert!(!client.is_supported_asset(&usdc));
     assert_eq!(client.get_supported_asset_count(), 0);
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
@@ -3696,23 +5156,52 @@ fn test_remove_supported_asset() {
 }
 
 #[test]
-fn test_set_escrow_contract() {
+fn test_set_escrow_contract_emits_initial_assignment_event() {
     let (env, client, _, _, _, _) = setup();
-    let new_escrow = Address::generate(&env);
+    let escrow = Address::generate(&env);
 
-    let old_escrow = client.get_escrow_contract();
-    client.set_escrow_contract(&new_escrow);
-    assert_eq!(client.get_escrow_contract(), Some(new_escrow.clone()));
+    client.set_escrow_contract(&escrow);
+    let events_after_call = env.events().all();
+    assert_eq!(client.get_escrow_contract(), Some(escrow.clone()));
 
-    let events = env.events().all();
+    let events = events_after_call;
     let (event_contract, topics, data) = events.last().expect("expected at least one event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
         topics,
         (
             Symbol::new(&env, "escrow_contract_updated"),
-            old_escrow.unwrap_or(new_escrow.clone()),
-            new_escrow.clone()
+            escrow.clone(),
+            escrow.clone()
+        )
+            .into_val(&env)
+    );
+    <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
+fn test_set_escrow_contract_emits_replacement_event() {
+    let (env, client, _, _, _, _) = setup();
+    let initial_escrow = Address::generate(&env);
+    let replacement_escrow = Address::generate(&env);
+    client.set_escrow_contract(&initial_escrow);
+
+    client.set_escrow_contract(&replacement_escrow);
+    let events_after_call = env.events().all();
+    assert_eq!(
+        client.get_escrow_contract(),
+        Some(replacement_escrow.clone())
+    );
+
+    let events = events_after_call;
+    let (event_contract, topics, data) = events.last().expect("expected at least one event");
+    assert_eq!(event_contract, client.address);
+    assert_eq!(
+        topics,
+        (
+            Symbol::new(&env, "escrow_contract_updated"),
+            initial_escrow,
+            replacement_escrow
         )
             .into_val(&env)
     );
@@ -3783,6 +5272,7 @@ fn test_repay_partial_leaves_status_and_updates_balance() {
     let partial_amount = 400_000_000u128;
     let result = client.repay_partial(&invoice_id, &partial_amount);
     assert!(result);
+    let events_after_repay = env.events().all();
 
     let inv = client.get(&invoice_id);
     assert_eq!(inv.status, InvoiceStatus::Confirmed);
@@ -3795,7 +5285,7 @@ fn test_repay_partial_leaves_status_and_updates_balance() {
     assert_eq!(client.get_repaid_amount(&invoice_id), partial_amount);
 
     let contract_id = client.address.clone();
-    let events = env.events().all();
+    let events = events_after_repay;
     let found = events.iter().any(|e| {
         let (c, topics, _data) = e;
         if c != contract_id {
@@ -3805,6 +5295,43 @@ fn test_repay_partial_leaves_status_and_updates_balance() {
         topic0 == Symbol::new(&env, "partial_repayment_received")
     });
     assert!(found);
+}
+
+#[test]
+fn test_repay_after_partial_settles_outstanding_balance_only() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let face_value: u128 = 1_000_000_000;
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+
+    // The buyer can only afford `face_value` in total, so `repay` pulling more
+    // than the outstanding remainder would overdraw this balance and fail.
+    mint_tokens(&env, &usdc, &buyer, face_value as i128);
+
+    client.repay_partial(&invoice_id, &400_000_000);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+    assert_eq!(client.get_remaining_balance(&invoice_id), 600_000_000);
+    assert_eq!(client.get_repaid_amount(&invoice_id), 400_000_000);
+
+    assert!(client.repay(&invoice_id));
+    let inv = client.get(&invoice_id);
+    assert_eq!(inv.status, InvoiceStatus::Repaid);
+    assert_eq!(inv.repaid_amount, face_value);
+    assert_eq!(inv.remaining_balance, 0);
+    assert!(inv.repaid_at.is_some());
+    assert_eq!(client.get_remaining_balance(&invoice_id), 0);
+    assert_eq!(client.get_repaid_amount(&invoice_id), face_value);
 }
 
 #[test]
@@ -3917,6 +5444,94 @@ fn test_repay_early_reads_stored_funded_amount() {
     assert_eq!(inv.remaining_balance, 0);
 }
 
+//  ISSUE #949: REPAY_EARLY REFUND BOUNDARIES
+//
+// `repay_early` prorates the discount from `funded_at`. These tests pin the
+// two ends of the window: at `funded_at` the buyer gets the entire discount
+// back and the pool books no yield; one second before `due_date` the buyer
+// gets the integer-division remainder and the pool books the complement.
+
+#[test]
+fn test_repay_early_at_funded_at_refunds_full_discount() {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let invoice = client.get(&invoice_id);
+    let funded_at = invoice.funded_at.expect("funded invoice has funded_at");
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert!(discount > 0);
+
+    // `setup_confirmed_invoice` funds and confirms at the current timestamp;
+    // pin the ledger to the recorded funding time explicitly.
+    env.ledger().set_timestamp(funded_at);
+    mint_tokens(
+        &env,
+        &client.get_funding_asset(&invoice_id),
+        &buyer,
+        invoice.face_value as i128,
+    );
+
+    assert!(client.repay_early(&invoice_id));
+
+    assert_eq!(
+        MockPoolClient::new(&env, &pool).get_last_refund(),
+        discount,
+        "at funded_at the buyer must receive the full discount back"
+    );
+    let settled = client.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(funded_at));
+    assert_eq!(settled.repaid_amount, invoice.face_value);
+    assert_eq!(settled.remaining_balance, 0);
+
+    let token = MockTokenClient::new(&env, &client.get_funding_asset(&invoice_id));
+    assert_eq!(token.balance(&buyer), 0);
+    assert_eq!(token.balance(&pool), invoice.face_value as i128);
+    assert_eq!(token.balance(&escrow), 0);
+
+    // Settlement is one-shot: a second repayment must not book the split again.
+    assert!(client.try_repay(&invoice_id).is_err());
+}
+
+#[test]
+fn test_repay_early_one_second_before_due_date_refunds_only_remainder() {
+    let (env, client, buyer, invoice_id, pool, escrow) = setup_confirmed_invoice();
+    let invoice = client.get(&invoice_id);
+    let funded_at = invoice.funded_at.expect("funded invoice has funded_at");
+    let term = invoice.due_date - funded_at;
+    let discount = invoice.face_value - invoice.funded_amount;
+    assert!(term > 0 && discount > 0);
+
+    let repaid_at = invoice.due_date - 1;
+    let earned_by_pool = discount * (term - 1) as u128 / term as u128;
+    let expected_refund = discount - earned_by_pool;
+    assert!(expected_refund > 0, "integer division leaves a remainder");
+
+    env.ledger().set_timestamp(repaid_at);
+    mint_tokens(
+        &env,
+        &client.get_funding_asset(&invoice_id),
+        &buyer,
+        invoice.face_value as i128,
+    );
+
+    assert!(client.repay_early(&invoice_id));
+
+    assert_eq!(
+        MockPoolClient::new(&env, &pool).get_last_refund(),
+        expected_refund
+    );
+    assert_eq!(expected_refund + earned_by_pool, discount);
+    let settled = client.get(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.repaid_at, Some(repaid_at));
+
+    let token = MockTokenClient::new(&env, &client.get_funding_asset(&invoice_id));
+    assert_eq!(token.balance(&buyer), 0);
+    assert_eq!(token.balance(&pool), invoice.face_value as i128);
+    assert_eq!(token.balance(&escrow), 0);
+
+    assert!(client.try_repay_early(&invoice_id).is_err());
+}
+
 // ── Issue #872: expire_listing issuer path with explicit auth ────────────────
 //
 // The tests above run under `mock_all_auths()`, which masks the difference
@@ -3938,7 +5553,7 @@ fn setup_no_mock_auth() -> (
 ) {
     let env = Env::default();
 
-    let registry_id = env.register_contract(None, MockRegistry);
+    let registry_id = env.register(MockRegistry, ());
     let registry_client = MockRegistryClient::new(&env, &registry_id);
 
     let issuer = Address::generate(&env);
@@ -3946,7 +5561,7 @@ fn setup_no_mock_auth() -> (
     registry_client.register(&issuer);
     registry_client.register(&buyer);
 
-    let contract_id = env.register_contract(None, InvoiceContract);
+    let contract_id = env.register(InvoiceContract, ());
     let client = InvoiceContractClient::new(&env, &contract_id);
 
     let admin = Address::generate(&env);
@@ -3962,7 +5577,7 @@ fn setup_no_mock_auth() -> (
     client.initialize(&admin, &registry_id);
 
     // Funding asset must be allow-listed by the admin (explicit signature).
-    let usdc = env.register_contract(None, MockToken);
+    let usdc = env.register(MockToken, ());
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &admin,
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -3976,7 +5591,7 @@ fn setup_no_mock_auth() -> (
 
     // Agent registry must be configured by the admin (explicit signature);
     // register_agent itself needs no auth.
-    let agent_registry_id = env.register_contract(None, MockAgentRegistry);
+    let agent_registry_id = env.register(MockAgentRegistry, ());
     env.mock_auths(&[soroban_sdk::testutils::MockAuth {
         address: &admin,
         invoke: &soroban_sdk::testutils::MockAuthInvoke {
@@ -4010,10 +5625,16 @@ fn attest_no_mock_auth(env: &Env, client: &InvoiceContractClient, invoice_id: &B
     let payload = crate::AttestationPayload {
         domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
         invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
         risk_score: 5000,
         evidence_hash: BytesN::from_array(env, &[9u8; 32]),
         agent_id,
         nonce: 1,
+        // Far-future expiry: helper attestations stay valid no matter how
+        // far the calling test advances the ledger timestamp. Expiry
+        // behaviour has its own dedicated tests.
+        valid_until: u64::MAX,
     };
     let payload_bytes = payload.to_xdr(env);
     let digest = env.crypto().keccak256(&payload_bytes).to_array();
@@ -4278,4 +5899,1068 @@ fn test_expire_listing_unexpired_rejected_for_admin_with_explicit_auth() {
         },
     }]);
     client.expire_listing(&invoice_id, &admin);
+}
+
+// ============== ISSUE #713: EMERGENCY PAUSE / UNPAUSE ==============
+
+#[test]
+fn test_pause_blocks_state_changes_and_unpause_restores_them() {
+    let (env, client, ..) = setup();
+
+    // Live: state changes flow.
+    client.set_expiry_window(&3600);
+    assert_eq!(client.get_expiry_window(), 3600);
+
+    client.pause();
+
+    // State-changing entry points are rejected while paused...
+    assert!(client.try_set_expiry_window(&7200).is_err());
+    assert!(client
+        .try_add_supported_asset(&Address::generate(&env))
+        .is_err());
+
+    // ...while read-only views keep working.
+    assert_eq!(client.get_expiry_window(), 3600);
+    assert!(client.get_admin().is_some());
+    let _ = client.get_counts();
+
+    client.unpause();
+
+    // Unpaused: state changes flow again.
+    client.set_expiry_window(&7200);
+    assert_eq!(client.get_expiry_window(), 7200);
+}
+
+/// Pins the exact breaker error: `PauseError::ContractPaused` from the shared
+/// crate surfaces as `Error(Contract, #1)` on every guarded invoice entry
+/// point (`InvoiceError::AlreadyInitialized` is the only other #1, and it is
+/// unreachable from `set_expiry_window`).
+#[test]
+#[should_panic(expected = "Error(Contract, #1)")]
+fn test_set_expiry_window_reverts_while_paused_with_contract_paused_error() {
+    let (_env, client, ..) = setup();
+    client.pause();
+    client.set_expiry_window(&7200);
+}
+
+/// Negative auth: only a non-admin signed `pause`, so the stored admin's
+/// `require_auth()` must reject it — a non-admin cannot engage the breaker.
+#[test]
+fn test_pause_requires_admin_authorization() {
+    let (env, client, ..) = setup();
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "pause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_pause().is_err());
+}
+
+/// Negative auth for disengaging: a non-admin cannot unpause either, so a
+/// paused contract cannot be resumed by anyone but the admin.
+#[test]
+fn test_unpause_requires_admin_authorization() {
+    let (env, client, ..) = setup();
+    client.pause();
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "unpause",
+            args: soroban_sdk::Vec::new(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_unpause().is_err());
+}
+
+#[test]
+fn test_pause_and_unpause_emit_events() {
+    let (env, client, ..) = setup();
+    let admin = client.get_admin().unwrap();
+
+    client.pause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "paused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+
+    client.unpause();
+    let events = env.events().all();
+    let (contract, topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "unpaused")
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        admin
+    );
+}
+// ============== ISSUE #720: BATCH INVOICE CREATION ==============
+
+/// Helper: one valid `batch_create` entry.
+fn batch_entry(
+    env: &Env,
+    buyer: &Address,
+    usdc: &Address,
+    face_value: u128,
+) -> (Address, u128, u64, Address) {
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    (buyer.clone(), face_value, due_date, usdc.clone())
+}
+
+#[test]
+fn test_batch_create_creates_every_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let entries = vec![
+        &env,
+        (buyer.clone(), DEFAULT_FACE_VALUE, due_date, usdc.clone()),
+        (
+            buyer.clone(),
+            DEFAULT_FACE_VALUE * 2,
+            due_date + 100,
+            usdc.clone(),
+        ),
+        (buyer.clone(), 500_000_000, due_date + 200, usdc.clone()),
+    ];
+
+    let ids = client.batch_create(&issuer, &entries);
+    assert_eq!(ids.len(), 3);
+
+    for (index, id) in ids.iter().enumerate() {
+        let invoice = client.get(&id);
+        assert_eq!(invoice.status, InvoiceStatus::Created);
+        assert_eq!(invoice.issuer, issuer);
+        assert_eq!(invoice.buyer, buyer);
+        assert_eq!(invoice.discount_bps, 0);
+        assert_eq!(invoice.funded_amount, 0);
+        assert_eq!(invoice.remaining_balance, invoice.face_value);
+        // Each entry got its own face value.
+        let expected = if index == 1 {
+            DEFAULT_FACE_VALUE * 2
+        } else if index == 2 {
+            500_000_000
+        } else {
+            DEFAULT_FACE_VALUE
+        };
+        assert_eq!(invoice.face_value, expected);
+    }
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 3);
+}
+
+#[test]
+fn test_batch_create_emits_batch_summary_event() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let entries = vec![&env, batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE)];
+
+    let ids = client.batch_create(&issuer, &entries);
+    assert_eq!(ids.len(), 1);
+
+    let events = env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "batch_invoices_created")
+    );
+    assert_eq!(<(u32, u32)>::try_from_val(&env, &data).unwrap(), (1, 0));
+}
+
+#[test]
+fn test_batch_create_on_empty_batch_is_a_noop() {
+    let (env, client, issuer, _, _, _) = setup();
+    let entries = vec![&env];
+    let ids = client.batch_create(&issuer, &entries);
+    assert!(ids.is_empty());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_batch_create_rejects_oversized_batch() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let mut entries: Vec<(Address, u128, u64, Address)> = Vec::new(&env);
+    for _ in 0..=MAX_BATCH_SIZE {
+        entries.push_back(batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE));
+    }
+    client.batch_create(&issuer, &entries);
+}
+
+/// The 50-entry cap is reachable, but a full batch of `create` entries exceeds
+/// the default test-host budget because every entry performs two cross-contract
+/// `is_verified` calls. The budget is lifted for this test only -- it pins the
+/// cap, not the per-call cost.
+#[test]
+fn test_batch_create_allows_exactly_max_batch_size() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut entries: Vec<(Address, u128, u64, Address)> = Vec::new(&env);
+    for _ in 0..MAX_BATCH_SIZE {
+        entries.push_back(batch_entry(&env, &buyer, &usdc, DEFAULT_FACE_VALUE));
+    }
+    let ids = client.batch_create(&issuer, &entries);
+    assert_eq!(ids.len(), MAX_BATCH_SIZE);
+}
+
+/// The atomicity guarantee (#720): an unsupported asset on the second entry
+/// reverts the batch, so the first entry's invoice is not left behind.
+#[test]
+fn test_batch_create_with_one_invalid_entry_reverts_whole_batch() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let bad_asset = env.register(MockToken, ());
+    let _ = MockTokenClient::new(&env, &bad_asset);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let entries = vec![
+        &env,
+        (buyer.clone(), DEFAULT_FACE_VALUE, due_date, usdc.clone()),
+        (
+            buyer.clone(),
+            DEFAULT_FACE_VALUE,
+            due_date,
+            bad_asset.clone(), // not a supported asset -> UnsupportedAsset
+        ),
+    ];
+
+    // The whole call reverts with the failing entry's typed error.
+    assert!(client.try_batch_create(&issuer, &entries).is_err());
+
+    // Nothing was persisted: no invoice exists from the first (valid) entry.
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 0);
+}
+
+/// Atomicity also holds for a face-value violation: the batch reverts and no
+/// earlier entry survives.
+#[test]
+fn test_batch_create_with_invalid_face_value_reverts_whole_batch() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let entries = vec![
+        &env,
+        (buyer.clone(), DEFAULT_FACE_VALUE, due_date, usdc.clone()),
+        (buyer.clone(), 0, due_date, usdc.clone()), // InvalidFaceValue
+    ];
+
+    assert!(client.try_batch_create(&issuer, &entries).is_err());
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+}
+
+// ============== ISSUE #721: BATCH LIST FOR FINANCING ==============
+
+#[test]
+fn test_batch_list_for_financing_lists_every_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
+    for _ in 0..3 {
+        let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        attest(&env, &client, &id);
+        entries.push_back((id, DEFAULT_DISCOUNT_BPS));
+    }
+
+    let failed = client.batch_list_for_financing(&entries);
+    assert!(failed.is_empty());
+
+    for (id, discount) in entries.iter() {
+        assert_eq!(client.get_status(&id), 1); // Listed
+        assert_eq!(client.get_discount_bps(&id), discount);
+    }
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 3);
+}
+
+/// Explicit failure behavior (#721): listing is per-entry tolerant, so failed
+/// entries come back in the returned list instead of reverting the batch.
+#[test]
+fn test_batch_list_for_financing_returns_failed_entries_without_reverting() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Attested and listable.
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+    // Created but never attested.
+    let unattested = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // Attested but discount above the 5000 bps cap.
+    let bad_discount = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &bad_discount);
+    // A completely unknown invoice id.
+    let unknown = BytesN::from_array(&env, &[7u8; 32]);
+
+    let entries = vec![
+        &env,
+        (good.clone(), DEFAULT_DISCOUNT_BPS),
+        (unattested.clone(), DEFAULT_DISCOUNT_BPS),
+        (bad_discount.clone(), 5_001),
+        (unknown.clone(), DEFAULT_DISCOUNT_BPS),
+    ];
+
+    // The call succeeds and reports exactly the three failures.
+    let failed = client.batch_list_for_financing(&entries);
+    assert_eq!(failed.len(), 3);
+    assert_eq!(failed.get(0).unwrap(), unattested);
+    assert_eq!(failed.get(1).unwrap(), bad_discount);
+    assert_eq!(failed.get(2).unwrap(), unknown);
+
+    // The good entry listed; the bad ones did not.
+    assert_eq!(client.get_status(&good), 1);
+    assert_eq!(client.get_discount_bps(&good), DEFAULT_DISCOUNT_BPS);
+    assert_eq!(client.get_status(&unattested), 0); // Created
+    assert_eq!(client.get_discount_bps(&unattested), 0);
+    assert_eq!(client.get_status(&bad_discount), 0); // Created
+}
+
+/// A discount above the cap fails only its own entry; a valid entry later in
+/// the same batch still lists.
+#[test]
+fn test_batch_list_for_financing_partial_success_lists_valid_entries() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let bad = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &bad);
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+
+    let entries = vec![
+        &env,
+        (bad.clone(), 5_001),
+        (good.clone(), DEFAULT_DISCOUNT_BPS),
+    ];
+    let failed = client.batch_list_for_financing(&entries);
+
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), bad);
+    assert_eq!(client.get_status(&good), 1);
+}
+
+/// Listing an invoice that is already `Listed` fails only that entry.
+#[test]
+fn test_batch_list_for_financing_reports_already_listed_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &id);
+    assert!(client.list_for_financing(&id, &DEFAULT_DISCOUNT_BPS));
+
+    let entries = vec![&env, (id.clone(), DEFAULT_DISCOUNT_BPS)];
+    let failed = client.batch_list_for_financing(&entries);
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), id);
+}
+
+#[test]
+fn test_batch_list_for_financing_emits_batch_summary_event() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+    let unknown = BytesN::from_array(&env, &[3u8; 32]);
+
+    let entries = vec![
+        &env,
+        (good.clone(), DEFAULT_DISCOUNT_BPS),
+        (unknown.clone(), DEFAULT_DISCOUNT_BPS),
+    ];
+    let _ = client.batch_list_for_financing(&entries);
+
+    let events = env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "batch_invoices_listed")
+    );
+    assert_eq!(<(u32, u32)>::try_from_val(&env, &data).unwrap(), (1, 1));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #28)")]
+fn test_batch_list_for_financing_rejects_oversized_batch() {
+    let (env, client, _, _, _, _) = setup();
+    let id = BytesN::from_array(&env, &[1u8; 32]);
+    let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
+    for _ in 0..=MAX_BATCH_SIZE {
+        entries.push_back((id.clone(), DEFAULT_DISCOUNT_BPS));
+    }
+    client.batch_list_for_financing(&entries);
+}
+
+#[test]
+fn test_batch_list_for_financing_allows_exactly_max_batch_size() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut entries: Vec<(BytesN<32>, u32)> = Vec::new(&env);
+    for _ in 0..MAX_BATCH_SIZE {
+        let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        attest(&env, &client, &id);
+        entries.push_back((id, DEFAULT_DISCOUNT_BPS));
+    }
+    let failed = client.batch_list_for_financing(&entries);
+    assert!(failed.is_empty());
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), MAX_BATCH_SIZE);
+}
+
+#[test]
+fn test_move_status_index_compacts_storage() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Create 3 invoices
+    let id1 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let id2 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let id3 = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Initial check
+    let created = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
+    assert_eq!(created.len(), 3);
+    assert_eq!(created.get(0).unwrap().id, id1);
+    assert_eq!(created.get(1).unwrap().id, id2);
+    assert_eq!(created.get(2).unwrap().id, id3);
+
+    // Transition middle invoice out of Created
+    attest(&env, &client, &id2);
+    client.list_for_financing(&id2, &DEFAULT_DISCOUNT_BPS);
+
+    // Verify compaction: id3 should have swapped into id2's slot, and count should be 2.
+    let created_after = client.get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE);
+    assert_eq!(created_after.len(), 2);
+    assert_eq!(created_after.get(0).unwrap().id, id1);
+    assert_eq!(created_after.get(1).unwrap().id, id3);
+
+    let listed = client.get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE);
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed.get(0).unwrap().id, id2);
+}
+
+// ============== ISSUE #864: INSTANCE TTL EXTENSION ON WIRING-SETTER UPDATES ==============
+//
+// `set_pool_contract` and `set_agent_registry_contract` used to extend the
+// instance TTL only in the "no previous value" branch of their `if let`, so
+// re-pointing the address on an already-initialised instance skipped the
+// bump and left the instance entry to expire. Both setters must extend on
+// every successful call, matching `set_escrow_contract`. These tests drain
+// the instance TTL below `TTL_THRESHOLD` after the first set, then confirm
+// the update path refreshes it.
+
+#[test]
+fn test_set_pool_contract_replacement_extends_instance_ttl() {
+    let (env, client, _, _, _, _) = setup();
+
+    // First set (no previous value): extends the instance TTL to ~TTL_EXTEND_TO.
+    let pool_a = Address::generate(&env);
+    client.set_pool_contract(&pool_a);
+
+    // Advance the ledger so the remaining instance TTL falls below the
+    // threshold at which `extend_ttl` refreshes it.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    let ttl_before_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_update < TTL_THRESHOLD,
+        "instance ttl should be drained below TTL_THRESHOLD before the update call, got {ttl_before_update}"
+    );
+
+    // Update path: replacing the stored address must extend the TTL too.
+    let pool_b = Address::generate(&env);
+    client.set_pool_contract(&pool_b);
+    assert_eq!(client.get_pool_contract().unwrap(), pool_b);
+
+    let ttl_after_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_update >= TTL_THRESHOLD,
+        "replacing the pool contract should extend the instance ttl, got {ttl_after_update}"
+    );
+}
+
+#[test]
+fn test_set_agent_registry_contract_replacement_extends_instance_ttl() {
+    let (env, client, _, _, _, _) = setup();
+
+    // First set (no previous value): extends the instance TTL to ~TTL_EXTEND_TO.
+    let agent_registry_a = Address::generate(&env);
+    client.set_agent_registry_contract(&agent_registry_a);
+
+    // Advance the ledger so the remaining instance TTL falls below the
+    // threshold at which `extend_ttl` refreshes it.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    let ttl_before_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_before_update < TTL_THRESHOLD,
+        "instance ttl should be drained below TTL_THRESHOLD before the update call, got {ttl_before_update}"
+    );
+
+    // Update path: replacing the stored address must extend the TTL too.
+    let agent_registry_b = Address::generate(&env);
+    client.set_agent_registry_contract(&agent_registry_b);
+    assert_eq!(
+        client.get_agent_registry_contract().unwrap(),
+        agent_registry_b
+    );
+
+    let ttl_after_update = env.as_contract(&client.address, || env.storage().instance().get_ttl());
+    assert!(
+        ttl_after_update >= TTL_THRESHOLD,
+        "replacing the agent registry contract should extend the instance ttl, got {ttl_after_update}"
+    );
+}
+
+// ============ BATCHED FUNDING VIEW (issue #833) ============
+//
+// `PoolContract::fund_invoice` used to read the invoice contract four times
+// (`get_funding_terms`, `get_issuer`, `get_buyer`, `get_funding_asset`), each
+// call loading and deserializing the whole `Invoice`. `get_funding_context`
+// consolidates those fields into one read; these tests pin its parity with
+// the four views, its error behavior on a missing invoice, and its lower
+// host budget cost.
+
+#[test]
+fn test_get_funding_context_matches_individual_views() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &200);
+
+    let ctx = client.get_funding_context(&invoice_id);
+
+    // Every field equals what the corresponding individual view returns for
+    // the same invoice — the batched read is a pure consolidation, with no
+    // behaviour drift.
+    let (status, face_value, discount_bps) = client.get_funding_terms(&invoice_id);
+    assert_eq!(ctx.status, status);
+    assert_eq!(ctx.status, 1, "status should be 1 (Listed)");
+    assert_eq!(ctx.face_value, face_value);
+    assert_eq!(ctx.face_value, 1_000_000_000);
+    assert_eq!(ctx.discount_bps, discount_bps);
+    assert_eq!(ctx.discount_bps, 200);
+    assert_eq!(ctx.issuer, client.get_issuer(&invoice_id));
+    assert_eq!(ctx.buyer, client.get_buyer(&invoice_id));
+    assert_eq!(ctx.funding_asset, client.get_funding_asset(&invoice_id));
+    assert_eq!(ctx.issuer, issuer);
+    assert_eq!(ctx.buyer, buyer);
+    assert_eq!(ctx.funding_asset, usdc);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_funding_context_unknown_panics() {
+    let (env, client, _, _, _, _) = setup();
+    let fake_id = BytesN::from_array(&env, &[0u8; 32]);
+    // Same `NotFound` abort as `get_funding_terms`, the first of the four
+    // calls this view replaces (the pool relies on this staying the first
+    // failure on the funding path).
+    client.get_funding_context(&fake_id);
+}
+
+#[test]
+fn test_get_funding_context_costs_less_than_four_separate_views() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + 86400;
+    let invoice_id = client.create(&issuer, &buyer, &1_000_000_000, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &200);
+
+    // Measure the old read pattern: four host calls, four invoice loads.
+    // sdk >=22 test Envs reset the budget at the start of every top-level
+    // invocation, so each call's cost is read right after it and summed
+    // test-side.
+    let terms = client.get_funding_terms(&invoice_id);
+    let mut cpu_four = env.cost_estimate().budget().cpu_instruction_cost();
+    let mut mem_four = env.cost_estimate().budget().memory_bytes_cost();
+    let four_issuer = client.get_issuer(&invoice_id);
+    cpu_four += env.cost_estimate().budget().cpu_instruction_cost();
+    mem_four += env.cost_estimate().budget().memory_bytes_cost();
+    let four_buyer = client.get_buyer(&invoice_id);
+    cpu_four += env.cost_estimate().budget().cpu_instruction_cost();
+    mem_four += env.cost_estimate().budget().memory_bytes_cost();
+    let four_asset = client.get_funding_asset(&invoice_id);
+    cpu_four += env.cost_estimate().budget().cpu_instruction_cost();
+    mem_four += env.cost_estimate().budget().memory_bytes_cost();
+
+    // Measure the consolidated read: one host call, one invoice load.
+    let ctx = client.get_funding_context(&invoice_id);
+    let cpu_one = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_one = env.cost_estimate().budget().memory_bytes_cost();
+
+    // Parity first (the cheaper path must answer identically)...
+    assert_eq!(ctx.status, terms.0);
+    assert_eq!(ctx.face_value, terms.1);
+    assert_eq!(ctx.discount_bps, terms.2);
+    assert_eq!(ctx.issuer, four_issuer);
+    assert_eq!(ctx.buyer, four_buyer);
+    assert_eq!(ctx.funding_asset, four_asset);
+
+    // ...then the performance claim. Host budget accounting is deterministic,
+    // so 3/4ths of the reads saved must show up as a strict reduction in both
+    // CPU and memory. Use a generous floor (one call is clearly under 3/4 of
+    // four) so the assertion is about direction, not an exact instruction mix.
+    assert!(
+        cpu_one * 2 < cpu_four,
+        "single batched read should cost well under the four separate reads: {cpu_one} vs {cpu_four} cpu"
+    );
+    assert!(
+        mem_one * 2 < mem_four,
+        "single batched read should cost well under the four separate reads: {mem_one} vs {mem_four} bytes"
+    );
+}
+
+// ============== ISSUE #832: INDEX ENTRIES AND INVOICES RE-BUMPED ON READ ==============
+//
+// `IssuerIndexEntry`, `BuyerIndexEntry`, `StatusIndexEntry`, the matching
+// `*IndexCount` keys and the `Invoice` records hydrated behind them were
+// previously TTL-extended only at write time. Once the ledger passed
+// `TTL_EXTEND_TO` ledgers after a create, a read through `get_by_issuer`,
+// `get_by_buyer` or `get_by_status` could hit archived entries and panic
+// with `NotFound` — for terminal invoices (e.g. `Cancelled`) there is no
+// later transition to bump the record at all. The views now re-bump every
+// persistent entry they read.
+
+/// Keeps the contract *instance* entry alive across the ledger jumps below,
+/// so each test isolates the archival behaviour of the persistent index
+/// entries and invoice records. On a live network a keeper does the same for
+/// the instance via any state-changing call.
+fn keep_instance_alive(env: &Env, contract: &Address) {
+    env.as_contract(contract, || {
+        env.storage()
+            .instance()
+            .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    });
+}
+
+#[test]
+fn test_get_by_issuer_rebumps_index_entries_and_invoices_on_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Drain the create-time TTLs to just below the extension threshold.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+
+    // Advance past the point where the entries would have archived without
+    // the read-time bump applied by the first `get_by_issuer` call. Without
+    // the fix this panics with `InvoiceError::NotFound`.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_get_by_buyer_rebumps_index_entries_and_invoices_on_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let page = client.get_by_buyer(&buyer, &0, &20);
+    assert_eq!(page.len(), 1);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_buyer(&buyer, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_get_by_status_rebumps_index_entries_and_invoices_on_read() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let page = client.get_by_status(&InvoiceStatus::Created, &0, &20);
+    assert_eq!(page.len(), 1);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_status(&InvoiceStatus::Created, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_terminal_invoice_stays_available_when_read_through_indexes() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // `cancel` is the last write to this Invoice record: without a read-time
+    // bump its TTL can never be recovered by a later transition, and the
+    // entry moved into the `Cancelled` status index has the same problem.
+    assert!(client.cancel(&invoice_id));
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    // First pass through every index re-bumps count key, index entry and the
+    // terminal Invoice record.
+    assert_eq!(client.get_by_issuer(&issuer, &0, &20).len(), 1);
+    assert_eq!(client.get_by_buyer(&buyer, &0, &20).len(), 1);
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Cancelled, &0, &20)
+            .len(),
+        1
+    );
+
+    // Past the point where all of the above would have archived without the
+    // read-time bumps. Without the fix these calls panic with
+    // `InvoiceError::NotFound` (index entries) or return empty pages.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 150_000);
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+    let invoice = page.get(0).unwrap();
+    assert_eq!(invoice.id, invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Cancelled);
+
+    let page = client.get_by_buyer(&buyer, &0, &20);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+    let page = client.get_by_status(&InvoiceStatus::Cancelled, &0, &20);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+/// Issue #832 documented that the read-time TTL bump only protects entries
+/// that are actually still being queried: once the write-time TTL has fully
+/// elapsed with no `get_by_*` call in between, the index entries expire.
+///
+/// Under soroban-sdk 22 the test Env emulated the network's archived-access
+/// failure (`Storage::InternalError`). Soroban-sdk 23 follows protocol 23,
+/// where transactions automatically restore archived entries before access,
+/// and the test Env now emulates that restoration instead (see the SDK's
+/// `_migrating::v23_archived_testing` notes). Even the TTL introspection
+/// helpers count as accesses, so expiry is no longer observable from the
+/// test Env; what this test pins is the protocol-23 half: a read through
+/// entries whose write-time TTL has fully elapsed succeeds via automatic
+/// restoration instead of hard-failing, and the index page stays intact.
+#[test]
+fn test_get_by_issuer_never_read_entries_expire_and_auto_restore() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 100_010);
+
+    // Protocol-23 automatic restoration: the read returns the archived entry
+    // instead of hard-failing (on SDK 22's emulated host this panicked with
+    // `Error(Storage, InternalError)`).
+    let page = client.get_by_issuer(&issuer, &0, &20);
+    assert_eq!(page.len(), 1);
+    assert_eq!(page.get(0).unwrap().id, invoice_id);
+}
+
+// ============== ISSUE #830: STATUSCOUNT ENTRIES ARE TTL-EXTENDED ON WRITE ==============
+//
+// `increment_status_count` / `decrement_status_count` wrote
+// `DataKey::StatusCount(status)` without ever calling `extend_ttl`, so the
+// counter archived once the ledger passed its default write TTL. Every later
+// `create` and status transition that touches the counter then fails with an
+// archival error, and `get_counts` — which reads all nine counters through
+// `read_status_count` — becomes unreliable too. The fix bumps the key with
+// the same `TTL_THRESHOLD` / `TTL_EXTEND_TO` policy as every other persistent
+// invoice entry on each write.
+
+#[test]
+fn test_status_count_ttl_extended_across_ledger_jumps() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let first = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Drain the write-time TTL of `StatusCount(Created)` to just below the
+    // extension threshold. Without the fix the counter is never re-bumped —
+    // it carried only the default write TTL and is long archived by now, so
+    // the `get_counts` below fails with the host's archival error.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    keep_instance_alive(&env, &client.address);
+    let counts = client.get_counts();
+    assert_eq!(
+        counts.get(String::from_str(&env, "Created")).unwrap(),
+        1,
+        "get_counts must report the create across the ledger jump"
+    );
+
+    // A status transition still works: `cancel` decrements
+    // `StatusCount(Created)` and increments `StatusCount(Cancelled)`.
+    // Without the fix the decrement's read of the archived counter fails the
+    // whole transition; with it, both writes re-bump for another
+    // `TTL_EXTEND_TO` ledgers.
+    assert!(client.cancel(&first));
+
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(
+        counts.get(String::from_str(&env, "Cancelled")).unwrap(),
+        1,
+        "the transition must be reflected in the counters"
+    );
+
+    // Advance past where the counters written at create time would have
+    // archived. `get_counts` still works because the transition re-bumped
+    // both counters. (Entries that were not re-bumped — e.g. the
+    // `StatusMembership(Created, …)` marker — are expected to archive per
+    // issue #832's documented keeper/RestoreFootprint model, so nothing
+    // after this point reads them.)
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + 150_000);
+    let counts = client.get_counts();
+    assert_eq!(
+        counts.get(String::from_str(&env, "Created")).unwrap(),
+        0,
+        "counters must survive a ledger jump past their write-time TTL"
+    );
+    assert_eq!(
+        counts.get(String::from_str(&env, "Cancelled")).unwrap(),
+        1,
+        "counters must stay reliable after every later transition too"
+    );
+}
+
+// ============== ISSUE #831: INDEX HELPERS STAY O(1) AS INDEXES GROW ==============
+//
+// `extend_issuer_index`, `extend_buyer_index` and the `StatusIndexEntry`
+// walk behind `move_status_index` used to scan their whole index on every
+// call just to detect duplicates/membership, so `create` and every status
+// transition cost O(total invoices). Eventually one call exceeds the
+// transaction budget and the protocol stops accepting new invoices for
+// everyone. The helpers now use O(1) membership markers (`DataKey::IssuerMembership`,
+// `DataKey::BuyerMembership`, and a stored position in
+// `DataKey::StatusMembership`), and the budget assertions below pin that
+// cost to a small constant factor of the first call with 300 invoices in
+// the indexes.
+
+/// CPU budget factor allowed between the shallowest and deepest helper call
+/// at one and the same environment size. "Small constant factor" per issue
+/// #831's acceptance criteria, measured as a scan-depth pair so the host's
+/// own bookkeeping (which inflates every full call with the number of stored
+/// keys, ~23x at N=300 even with O(1) helpers) cancels out between the two
+/// measurements. Before the fix the deep/shallow ratio is >100x.
+const MAX_GROWTH_FACTOR: u64 = 16;
+
+#[test]
+fn test_index_helper_cpu_does_not_grow_with_scan_depth() {
+    const N: usize = 300;
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut ids = Vec::new(&env);
+    // Measured "first create": empty indexes (this is also the literal AC2
+    // baseline pair; see the end of the test for why its factor is bounded
+    // by the test host rather than the contract).
+    env.cost_estimate().budget().reset_unlimited();
+    ids.push_back(client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
+    let cpu_first_create = env.cost_estimate().budget().cpu_instruction_cost();
+    for _ in 1..N {
+        ids.push_back(client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
+    }
+
+    // Both measurements in each pair run back-to-back in the same grown
+    // environment with the same stored-key count; only the number of rows
+    // the pre-fix linear scans had to walk differs.
+
+    // 1. `extend_issuer_index` duplicate detection: `ids[0]` sat at row 0
+    //    of the issuer index (pre-fix scan: 1 read), `ids[N-1]` at the last
+    //    row (pre-fix scan: N reads).
+    env.cost_estimate().budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_issuer_index(&env, &issuer, &ids.get(0).unwrap());
+    });
+    let cpu_issuer_shallow = env.cost_estimate().budget().cpu_instruction_cost();
+    env.cost_estimate().budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_issuer_index(&env, &issuer, &ids.get(N as u32 - 1).unwrap());
+    });
+    let cpu_issuer_deep = env.cost_estimate().budget().cpu_instruction_cost();
+
+    // 2. Same pair for `extend_buyer_index`.
+    env.cost_estimate().budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_buyer_index(&env, &buyer, &ids.get(0).unwrap());
+    });
+    let cpu_buyer_shallow = env.cost_estimate().budget().cpu_instruction_cost();
+    env.cost_estimate().budget().reset_unlimited();
+    env.as_contract(&client.address, || {
+        crate::extend_buyer_index(&env, &buyer, &ids.get(N as u32 - 1).unwrap());
+    });
+    let cpu_buyer_deep = env.cost_estimate().budget().cpu_instruction_cost();
+
+    // 3. `move_status_index`-driven transition: moving `ids[0]` (row 0 of
+    //    the Created index) is the shallow case; moving `ids[N-2]` (second
+    //    to last row once the shallow move swapped the tail forward) is the
+    //    deep case. These double as the "last create / last transition"
+    //    end-to-end signal: every public create and transition funnels
+    //    through exactly these three helpers.
+    env.cost_estimate().budget().reset_unlimited();
+    assert!(client.cancel(&ids.get(0).unwrap()));
+    let cpu_move_shallow = env.cost_estimate().budget().cpu_instruction_cost();
+    env.cost_estimate().budget().reset_unlimited();
+    assert!(client.cancel(&ids.get(N as u32 - 2).unwrap()));
+    let cpu_move_deep = env.cost_estimate().budget().cpu_instruction_cost();
+
+    assert!(
+        cpu_issuer_deep <= cpu_issuer_shallow * MAX_GROWTH_FACTOR,
+        "issuer index cost must not grow with scan depth: shallow {cpu_issuer_shallow}, deep {cpu_issuer_deep} ({}x)",
+        cpu_issuer_deep / cpu_issuer_shallow.max(1)
+    );
+    assert!(
+        cpu_buyer_deep <= cpu_buyer_shallow * MAX_GROWTH_FACTOR,
+        "buyer index cost must not grow with scan depth: shallow {cpu_buyer_shallow}, deep {cpu_buyer_deep} ({}x)",
+        cpu_buyer_deep / cpu_buyer_shallow.max(1)
+    );
+    assert!(
+        cpu_move_deep <= cpu_move_shallow * MAX_GROWTH_FACTOR,
+        "status transition cost must not grow with scan depth: shallow {cpu_move_shallow}, deep {cpu_move_deep} ({}x)",
+        cpu_move_deep / cpu_move_shallow.max(1)
+    );
+
+    // Index results stay consistent after the marker-driven rewrite.
+    let counts = client.get_counts();
+    assert_eq!(
+        counts.get(String::from_str(&env, "Created")).unwrap(),
+        (N - 2) as u64
+    );
+    assert_eq!(counts.get(String::from_str(&env, "Cancelled")).unwrap(), 2);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), N as u32);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), N as u32);
+    let cancelled = client.get_by_status(&InvoiceStatus::Cancelled, &0, &2);
+    assert_eq!(cancelled.len(), 2);
+    assert!(client.has_status_membership(&InvoiceStatus::Cancelled, &ids.get(0).unwrap()));
+    assert!(
+        client.has_status_membership(&InvoiceStatus::Cancelled, &ids.get(N as u32 - 2).unwrap())
+    );
+    assert!(!client.has_status_membership(&InvoiceStatus::Created, &ids.get(0).unwrap()));
+    assert!(client.has_status_membership(&InvoiceStatus::Created, &ids.get(N as u32 - 1).unwrap()));
+
+    // Literal AC2 pair: last create (all indexes hold 300 invoices) vs the
+    // first create (empty indexes) above. The bound is deliberately
+    // generous: measurements on this repo's test host show per-call CPU
+    // itself grows ~23x with the *number of stored keys* at N=300 even when
+    // every helper is O(1) (probed during this fix), so the load-bearing
+    // assertion is the scan-depth gate above. Before the fix the extra
+    // full-index scans pushed this ratio to ~27x, failing the bound; with
+    // the marker rewrite it lands back at the host floor.
+    //
+    // Recalibrated from 25x to 40x for #834: the preimage refactor cut the
+    // *first* create's own cost ~39% (907,222 -> 557,318 CPU on this host),
+    // so the same host-key-count floor now expresses as a larger ratio
+    // (~35x measured). The growth signal is unchanged — a re-introduced
+    // full-index scan would push the ratio back past this bound, and the
+    // scan-depth gate above is the load-bearing O(1) assertion regardless.
+    env.cost_estimate().budget().reset_unlimited();
+    client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let cpu_last_create = env.cost_estimate().budget().cpu_instruction_cost();
+    assert!(
+        cpu_last_create <= cpu_first_create * 40,
+        "create cost must stay at the test-host floor: first {cpu_first_create}, last {cpu_last_create} ({}x)",
+        cpu_last_create / cpu_first_create.max(1)
+    );
+}
+
+#[test]
+fn test_move_status_index_replayed_transition_is_noop() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Public transition moves Created -> Cancelled (record, counters,
+    // indexes and markers together).
+    assert!(client.cancel(&id));
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(counts.get(String::from_str(&env, "Cancelled")).unwrap(), 1);
+
+    // Replaying the same `move_status_index` transition must be a pure
+    // no-op: membership in the target status returns early, so the source
+    // counter is not decremented a second time (which would underflow-panic
+    // with InvalidStatusTransition) and the Cancelled index is not appended
+    // twice.
+    env.as_contract(&client.address, || {
+        crate::move_status_index(&env, &id, InvoiceStatus::Created, InvoiceStatus::Cancelled);
+    });
+    let counts = client.get_counts();
+    assert_eq!(counts.get(String::from_str(&env, "Created")).unwrap(), 0);
+    assert_eq!(
+        counts.get(String::from_str(&env, "Cancelled")).unwrap(),
+        1,
+        "replayed transition must not change counters"
+    );
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Cancelled, &0, &20)
+            .len(),
+        1,
+        "replayed transition must not double-append the status index"
+    );
+    assert!(client.has_status_membership(&InvoiceStatus::Cancelled, &id));
+    assert!(!client.has_status_membership(&InvoiceStatus::Created, &id));
+}
+
+#[test]
+fn test_extend_issuer_and_buyer_index_duplicate_append_is_noop() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let first = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Re-appending the same invoice id to either personal index is a no-op
+    // (the behaviour the old linear scan provided, now delivered by the
+    // O(1) membership marker).
+    env.as_contract(&client.address, || {
+        crate::extend_issuer_index(&env, &issuer, &first);
+        crate::extend_buyer_index(&env, &buyer, &first);
+    });
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 1);
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 1);
+    assert_eq!(client.get_by_issuer(&issuer, &0, &20).len(), 1);
+    assert_eq!(client.get_by_buyer(&buyer, &0, &20).len(), 1);
+
+    // A different invoice is still appended to both.
+    let second = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 2);
+    assert_eq!(
+        client.get_by_issuer(&issuer, &0, &20).get(1).unwrap().id,
+        second
+    );
+    assert_eq!(client.get_invoice_count_by_buyer(&buyer), 2);
+    assert_eq!(
+        client.get_by_buyer(&buyer, &0, &20).get(1).unwrap().id,
+        second
+    );
 }

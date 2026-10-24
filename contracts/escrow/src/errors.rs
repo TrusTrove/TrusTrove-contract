@@ -19,4 +19,10 @@ pub enum EscrowError {
     InvalidRecipient = 7,
     /// Returned when attempting to initialize with colliding addresses (e.g., pool_contract == usdc_asset).
     InvalidConfig = 8,
+    /// Returned when `set_timeout_window` is given a zero window or one above `MAX_TIMEOUT_WINDOW_SECONDS`.
+    InvalidTimeoutWindow = 9,
+    /// Returned when `release_after_timeout` is called before `locked_at + timeout_window`.
+    TimeoutNotElapsed = 10,
+    /// Returned when `locked_at + timeout_window` overflows `u64`.
+    MathOverflow = 11,
 }

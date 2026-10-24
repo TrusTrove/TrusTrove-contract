@@ -2,11 +2,15 @@
 # deploy.sh — Idempotent deployment script for TrusTrove contracts
 #
 # Usage:
-#   ./scripts/deploy.sh              # Normal deploy (skips already-deployed contracts)
-#   ./scripts/deploy.sh --resume     # Explicit resume mode (same as default)
-#   ./scripts/deploy.sh --fresh      # Ignore saved addresses and redeploy everything
-#   ./scripts/deploy.sh --dry-run    # Show what would be deployed without actually deploying
-#   ./scripts/deploy.sh --help       # Show this help
+#   ./scripts/deploy.sh                         # Normal deploy (skips already-deployed contracts)
+#   ./scripts/deploy.sh --resume                # Explicit resume mode (same as default)
+#   ./scripts/deploy.sh --fresh                 # Ignore saved addresses and redeploy everything
+#   ./scripts/deploy.sh --dry-run               # Show what would be deployed without actually deploying
+#   ./scripts/deploy.sh --only <contract>       # Redeploy a single contract (hotfix mode)
+#   ./scripts/deploy.sh --help                  # Show this help
+#
+# <contract> for --only must be one of:
+#   registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm
 #
 # Deployed addresses are persisted to .deployed-addresses after each successful
 # deployment step.  Re-running the script after a partial failure will skip any
@@ -14,46 +18,12 @@
 
 set -euo pipefail
 
-# Load configuration from .env (falling back to .env.example) using safe
-# line-by-line parsing. Unlike `source`, this never executes arbitrary shell
-# commands, so shell metacharacters in the file cannot be used for code
-# execution (see CVE / issue #455).
-load_env() {
-  local file="$1"
-  if [ ! -f "$file" ]; then
-    echo "Warning: $file not found; skipping." >&2
-    return 1
-  fi
-  while IFS= read -r line || [ -n "$line" ]; do
-    # Trim surrounding whitespace
-    line="$(printf '%s' "$line" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
-    # Skip blank lines and comments
-    [ -z "$line" ] && continue
-    case "$line" in
-      \#*) continue ;;
-    esac
-    # Only accept KEY=VALUE pairs
-    case "$line" in
-      *=*)
-        key="${line%%=*}"
-        value="${line#*=}"
-        # Trim trailing whitespace from the key
-        key="$(printf '%s' "$key" | sed 's/[[:space:]]*$//')"
-        # Strip matching surrounding quotes from the value
-        case "$value" in
-          \"*\") value="${value#\"}"; value="${value%\"}" ;;
-          \'*\') value="${value#\'}"; value="${value%\'}" ;;
-        esac
-        # Only export keys that are valid shell identifiers; anything else
-        # (e.g. keys with spaces or special characters) is skipped.
-        case "$key" in
-          *[!A-Za-z0-9_]*|'') continue ;;
-        esac
-        export "$key=$value"
-        ;;
-    esac
-  done < "$file"
-}
+# Load configuration from .env (falling back to .env.example) using the safe
+# line-by-line KEY=VALUE parser shared with verify.sh. Unlike `source`, it
+# never executes arbitrary shell commands, so shell metacharacters in the
+# file cannot be used for code execution (see CVE / issue #455, issue #612).
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+. "$SCRIPT_DIR/load_env.sh"
 
 if [ -f .env ]; then
   load_env .env
@@ -68,14 +38,36 @@ fi
 FRESH=false
 RESUME=false
 DRY_RUN=false
+ONLY_CONTRACT=""
 
-for arg in "$@"; do
+# Parse arguments, handling --only which consumes the next argument
+_args=("$@")
+_i=0
+while [ $_i -lt ${#_args[@]} ]; do
+  arg="${_args[$_i]}"
   case "$arg" in
     --fresh)   FRESH=true ;;
     --resume)  RESUME=true ;;
     --dry-run) DRY_RUN=true ;;
+    --only)
+      _i=$((_i + 1))
+      if [ $_i -ge ${#_args[@]} ]; then
+        echo "Error: --only requires a contract key argument."
+        echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm"
+        exit 1
+      fi
+      ONLY_CONTRACT="${_args[$_i]}"
+      case "$ONLY_CONTRACT" in
+        registry|invoice|escrow_usdc|pool_usdc|escrow_xlm|pool_xlm) ;;
+        *)
+          echo "Error: unknown contract key '$ONLY_CONTRACT' for --only."
+          echo "Valid keys: registry, invoice, escrow_usdc, pool_usdc, escrow_xlm, pool_xlm"
+          exit 1
+          ;;
+      esac
+      ;;
     --help|-h)
-      sed -n '2,12p' "$0" | sed 's/^# //'
+      sed -n '2,17p' "$0" | sed 's/^# //'
       exit 0
       ;;
     *)
@@ -83,6 +75,7 @@ for arg in "$@"; do
       exit 1
       ;;
   esac
+  _i=$((_i + 1))
 done
 
 # Prefer a globally available `stellar` on PATH, fall back to STELLAR_BIN env var,
@@ -267,13 +260,84 @@ invoke_init() {
       "$@" 2>&1); then
     echo "ERROR: Initialization failed for $label:"
     echo "  $output"
-    echo "  The contract is deployed but NOT initialized."
-    echo "  Fix the error and rerun — this step will be retried automatically."
+    # Issue #825: distinguish a front-run initialization from a transient
+    # error. `initialize` panics with AlreadyInitialized (#1) if the
+    # storage Admin key is set — and until this transaction lands, ANY
+    # address can initialize a fresh deployment with their own admin. A
+    # rerun can never win that race retroactively, so saying "rerun" here
+    # would be misleading.
+    case "$output" in
+      *AlreadyInitialized*|*"Error(Contract, #1)"*)
+        echo "  This contract was ALREADY INITIALIZED — possibly by someone"
+        echo "  other than this deployer (front-run initialization, issue #825)."
+        echo "  Rerunning cannot fix it: check who holds admin with"
+        echo "  scripts/verify.sh (it compares get_admin against the deployer)"
+        echo "  and redeploy the contract with --fresh. See DEPLOYMENT.md,"
+        echo "  'Front-run initialization detection'."
+        ;;
+      *)
+        echo "  The contract is deployed but NOT initialized (transient error?)."
+        echo "  Fix the error and rerun — this step will be retried automatically."
+        ;;
+    esac
     return 1
   fi
 
   save_address "$init_key" "true"
   echo "  $label initialized successfully."
+}
+
+# ---------------------------------------------------------------------------
+# 4b. Post-initialize admin verification (issue #825)
+# ---------------------------------------------------------------------------
+
+# verify_admin <LABEL> <CONTRACT_ID>
+# Reads get_admin back from the contract just initialized and aborts unless
+# it equals $DEPLOYER_ADDRESS. `initialize` only authorizes whatever admin
+# is passed in, so a front-runner who initialized first with their own
+# address would otherwise go unnoticed — our own initialize would simply
+# fail with AlreadyInitialized and the deploy artifacts would be poisoned.
+# Every contract this script deploys (registry, invoice, escrow, pool)
+# exposes get_admin.
+verify_admin() {
+  local label="$1"
+  local contract_id="$2"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "  [DRY-RUN] Would assert get_admin == $DEPLOYER_ADDRESS for $label"
+    return 0
+  fi
+
+  # Skip contracts that were deployed in dry-run mode (no real address).
+  case "$contract_id" in
+    ""|"<dry-run>") return 0 ;;
+  esac
+
+  local on_chain_admin
+  if ! on_chain_admin=$("$STELLAR" contract invoke \
+      --id "$contract_id" \
+      --source "$DEPLOYER_ACCOUNT" \
+      --network testnet \
+      -- get_admin 2>&1); then
+    echo "ERROR: Could not read on-chain admin for $label ($contract_id):"
+    echo "  $on_chain_admin"
+    echo "  POSSIBLE FRONT-RUN INITIALIZATION or uninitialized contract."
+    echo "  Do NOT use this deployment — redeploy with --fresh"
+    echo "  (see DEPLOYMENT.md, 'Front-run initialization detection')."
+    exit 1
+  fi
+  on_chain_admin="$(printf '%s' "$on_chain_admin" | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+  if [ "$on_chain_admin" != "$DEPLOYER_ADDRESS" ]; then
+    echo "ERROR: $label ($contract_id) reports admin '$on_chain_admin',"
+    echo "  but this deployer is '$DEPLOYER_ADDRESS'."
+    echo "  POSSIBLE FRONT-RUN INITIALIZATION: someone else initialized this"
+    echo "  contract with their own admin before our initialize landed."
+    echo "  Do NOT use this deployment — redeploy with --fresh"
+    echo "  (see DEPLOYMENT.md, 'Front-run initialization detection')."
+    exit 1
+  fi
+  echo "  [OK] $label on-chain admin verified: $on_chain_admin"
 }
 
 # ---------------------------------------------------------------------------
@@ -307,6 +371,7 @@ echo "  Deployer address : $DEPLOYER_ADDRESS"
 echo "  Addresses file   : $ADDRESSES_FILE"
 echo "  Fresh deploy     : $FRESH"
 echo "  Dry-run mode     : $DRY_RUN"
+if [ -n "$ONLY_CONTRACT" ]; then echo "  Only deploying   : $ONLY_CONTRACT"; fi
 echo ""
 
 # ---------------------------------------------------------------------------
@@ -325,87 +390,156 @@ echo ""
 # 7. Deploy & initialize all contracts
 # ---------------------------------------------------------------------------
 
-echo "=== Deploying registry_contract ==="
-REGISTRY_ID=$(deploy_contract "registry" "target/wasm32v1-none/release/trusttrove_registry.wasm")
-echo "Registry: $REGISTRY_ID"
+# In --only mode, load all existing saved addresses first so cross-contract
+# references remain valid even when only one contract is redeployed.
+_load_or_deploy() {
+  local key="$1"
+  local var="$2"
+  local existing
+  existing=$(load_address "$key")
+  if [ -n "$existing" ]; then
+    eval "$var=\$existing"
+  fi
+}
 
-invoke_init "registry" "$REGISTRY_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS"
+if [ -n "$ONLY_CONTRACT" ]; then
+  echo "=== --only mode: redeploying single contract: $ONLY_CONTRACT ==="
+  # Clear the saved address + init flag for the targeted contract so
+  # deploy_contract / invoke_init will re-run it.
+  grep -v "^${ONLY_CONTRACT}=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
+  grep -v "^${ONLY_CONTRACT}_initialized=" "${ADDRESSES_FILE}.tmp" > "${ADDRESSES_FILE}.tmp2" 2>/dev/null || true
+  mv "${ADDRESSES_FILE}.tmp2" "$ADDRESSES_FILE"
+  rm -f "${ADDRESSES_FILE}.tmp"
 
-echo ""
-echo "=== Deploying invoice_contract ==="
-INVOICE_ID=$(deploy_contract "invoice" "target/wasm32v1-none/release/trusttrove_invoice.wasm")
-echo "Invoice: $INVOICE_ID"
+  # Load all surviving saved addresses into variables for cross-refs
+  REGISTRY_ID=$(load_address "registry")
+  INVOICE_ID=$(load_address "invoice")
+  ESCROW_USDC_ID=$(load_address "escrow_usdc")
+  POOL_USDC_ID=$(load_address "pool_usdc")
+  ESCROW_XLM_ID=$(load_address "escrow_xlm")
+  POOL_XLM_ID=$(load_address "pool_xlm")
+  echo "  Existing saved addresses loaded for cross-contract references."
+  echo ""
+fi
 
-invoke_init "invoice" "$INVOICE_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --registry_contract "$REGISTRY_ID"
+# Helper: returns true if we should run this step.
+# In --only mode only the targeted step runs; otherwise all steps run.
+_should_run() {
+  [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "$1" ]
+}
 
-echo ""
-echo "=== Deploying USDC escrow_contract ==="
-ESCROW_USDC_ID=$(deploy_contract "escrow_usdc" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
-echo "USDC Escrow: $ESCROW_USDC_ID"
+if _should_run "registry"; then
+  echo "=== Deploying registry_contract ==="
+  REGISTRY_ID=$(deploy_contract "registry" "target/wasm32v1-none/release/trusttrove_registry.wasm")
+  echo "Registry: $REGISTRY_ID"
 
-echo ""
-echo "=== Deploying USDC pool_contract ==="
-POOL_USDC_ID=$(deploy_contract "pool_usdc" "target/wasm32v1-none/release/trusttrove_pool.wasm")
-echo "USDC Pool: $POOL_USDC_ID"
+  invoke_init "registry" "$REGISTRY_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS"
+  verify_admin "registry" "$REGISTRY_ID"
+  echo ""
+fi
 
-invoke_init "escrow_usdc" "$ESCROW_USDC_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --pool_contract "$POOL_USDC_ID" \
-  --usdc_asset "$USDC_ISSUER"
+if _should_run "invoice"; then
+  echo "=== Deploying invoice_contract ==="
+  INVOICE_ID=$(deploy_contract "invoice" "target/wasm32v1-none/release/trusttrove_invoice.wasm")
+  echo "Invoice: $INVOICE_ID"
 
-invoke_init "pool_usdc" "$POOL_USDC_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --invoice_contract "$INVOICE_ID" \
-  --escrow_contract "$ESCROW_USDC_ID" \
-  --funding_asset "$USDC_ISSUER" \
-  --registry_contract "$REGISTRY_ID" \
-  --treasury "$DEPLOYER_ADDRESS" \
-  --min_initial_deposit 10000000 \
-  --share_name '"TrusTrove USDC Pool Shares"' \
-  --share_symbol '"TT-USDC"' \
-  --share_decimals 7
+  invoke_init "invoice" "$INVOICE_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --registry_contract "$REGISTRY_ID"
+  verify_admin "invoice" "$INVOICE_ID"
+  echo ""
+fi
 
-echo ""
-echo "=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
-ESCROW_XLM_ID=$(deploy_contract "escrow_xlm" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
-echo "XLM Escrow: $ESCROW_XLM_ID"
+if _should_run "escrow_usdc"; then
+  echo "=== Deploying USDC escrow_contract ==="
+  ESCROW_USDC_ID=$(deploy_contract "escrow_usdc" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
+  echo "USDC Escrow: $ESCROW_USDC_ID"
+  echo ""
+fi
 
-echo ""
-echo "=== Deploying XLM pool_contract (EXPERIMENTAL) ==="
-POOL_XLM_ID=$(deploy_contract "pool_xlm" "target/wasm32v1-none/release/trusttrove_pool.wasm")
-echo "XLM Pool: $POOL_XLM_ID"
+if _should_run "pool_usdc"; then
+  echo "=== Deploying USDC pool_contract ==="
+  POOL_USDC_ID=$(deploy_contract "pool_usdc" "target/wasm32v1-none/release/trusttrove_pool.wasm")
+  echo "USDC Pool: $POOL_USDC_ID"
+  echo ""
+fi
 
-invoke_init "escrow_xlm" "$ESCROW_XLM_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --pool_contract "$POOL_XLM_ID" \
-  --usdc_asset "$XLM_ASSET"
+# escrow_usdc init depends on pool_usdc, so run after both are deployed
+if _should_run "escrow_usdc"; then
+  invoke_init "escrow_usdc" "$ESCROW_USDC_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --pool_contract "$POOL_USDC_ID" \
+    --usdc_asset "$USDC_ISSUER"
+  verify_admin "escrow_usdc" "$ESCROW_USDC_ID"
+fi
 
-invoke_init "pool_xlm" "$POOL_XLM_ID" \
-  -- initialize \
-  --admin "$DEPLOYER_ADDRESS" \
-  --invoice_contract "$INVOICE_ID" \
-  --escrow_contract "$ESCROW_XLM_ID" \
-  --funding_asset "$XLM_ASSET" \
-  --registry_contract "$REGISTRY_ID" \
-  --treasury "$DEPLOYER_ADDRESS" \
-  --min_initial_deposit 10000000 \
-  --share_name '"TrusTrove XLM Pool Shares"' \
-  --share_symbol '"TT-XLM"' \
-  --share_decimals 7
 
-echo ""
-echo "=== Wiring USDC pool_contract into invoice_contract ==="
-invoke_init "invoice_set_pool" "$INVOICE_ID" \
-  -- set_pool_contract \
-  --pool_contract "$POOL_USDC_ID"
+if _should_run "pool_usdc"; then
+  invoke_init "pool_usdc" "$POOL_USDC_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --invoice_contract "$INVOICE_ID" \
+    --escrow_contract "$ESCROW_USDC_ID" \
+    --funding_asset "$USDC_ISSUER" \
+    --registry_contract "$REGISTRY_ID" \
+    --treasury "$DEPLOYER_ADDRESS" \
+    --min_initial_deposit 10000000 \
+    --share_name '"TrusTrove USDC Pool Shares"' \
+    --share_symbol '"TT-USDC"' \
+    --share_decimals 7
+  verify_admin "pool_usdc" "$POOL_USDC_ID"
+fi
+
+if _should_run "escrow_xlm"; then
+  echo ""
+  echo "=== Deploying XLM escrow_contract (EXPERIMENTAL) ==="
+  ESCROW_XLM_ID=$(deploy_contract "escrow_xlm" "target/wasm32v1-none/release/trusttrove_escrow.wasm")
+  echo "XLM Escrow: $ESCROW_XLM_ID"
+fi
+
+if _should_run "pool_xlm"; then
+  echo ""
+  echo "=== Deploying XLM pool_contract (EXPERIMENTAL) ==="
+  POOL_XLM_ID=$(deploy_contract "pool_xlm" "target/wasm32v1-none/release/trusttrove_pool.wasm")
+  echo "XLM Pool: $POOL_XLM_ID"
+fi
+
+if _should_run "escrow_xlm"; then
+  invoke_init "escrow_xlm" "$ESCROW_XLM_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --pool_contract "$POOL_XLM_ID" \
+    --usdc_asset "$XLM_ASSET"
+  verify_admin "escrow_xlm" "$ESCROW_XLM_ID"
+fi
+
+if _should_run "pool_xlm"; then
+  invoke_init "pool_xlm" "$POOL_XLM_ID" \
+    -- initialize \
+    --admin "$DEPLOYER_ADDRESS" \
+    --invoice_contract "$INVOICE_ID" \
+    --escrow_contract "$ESCROW_XLM_ID" \
+    --funding_asset "$XLM_ASSET" \
+    --registry_contract "$REGISTRY_ID" \
+    --treasury "$DEPLOYER_ADDRESS" \
+    --min_initial_deposit 10000000 \
+    --share_name '"TrusTrove XLM Pool Shares"' \
+    --share_symbol '"TT-XLM"' \
+    --share_decimals 7
+  verify_admin "pool_xlm" "$POOL_XLM_ID"
+fi
+
+if [ -z "$ONLY_CONTRACT" ]; then
+  echo ""
+  echo "=== Wiring USDC pool_contract into invoice_contract ==="
+  invoke_init "invoice_set_pool" "$INVOICE_ID" \
+    -- set_pool_contract \
+    --pool_contract "$POOL_USDC_ID"
+fi
 
 # Without the escrow wiring below, repay / repay_partial / repay_early panic
 # with InvoiceError::NotFound when reading DataKey::EscrowContract.

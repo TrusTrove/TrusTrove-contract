@@ -1,4 +1,15 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
+
+pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
+    env.events()
+        .publish((Symbol::new(env, "upgraded"), wasm_hash.clone()), ());
+}
 
 pub fn pool_initialized(
     env: &Env,
@@ -51,10 +62,16 @@ pub fn invoice_funded(env: &Env, invoice_id: &BytesN<32>, funded_amount: u128) {
     );
 }
 
-pub fn repayment_received(env: &Env, invoice_id: &BytesN<32>, amount: u128, yield_amount: u128) {
+pub fn repayment_received(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    amount: u128,
+    lp_yield: u128,
+    protocol_cut: u128,
+) {
     env.events().publish(
         (Symbol::new(env, "repayment_received"), invoice_id.clone()),
-        (amount, yield_amount),
+        (amount, lp_yield, protocol_cut),
     );
 }
 
@@ -72,12 +89,25 @@ pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
     );
 }
 
-#[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
         (Symbol::new(env, "ownership_transferred"), old_admin.clone()),
         new_admin.clone(),
     );
+}
+
+/// Emitted by `pause` when the emergency circuit breaker is engaged. `admin` is
+/// the address that authorized the pause, indexed so indexers can track who
+/// flipped the breaker.
+pub fn paused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "paused"), admin.clone()), ());
+}
+
+/// Emitted by `unpause` when the emergency circuit breaker is disengaged.
+pub fn unpaused(env: &Env, admin: &Address) {
+    env.events()
+        .publish((Symbol::new(env, "unpaused"), admin.clone()), ());
 }
 
 pub fn protocol_fee_updated(env: &Env, old_fee_bps: u32, new_fee_bps: u32, treasury: &Address) {
@@ -101,5 +131,16 @@ pub fn allowance_approved(
     env.events().publish(
         (Symbol::new(env, "allowance_approved"), from.clone()),
         (spender.clone(), amount, expiration_ledger),
+    );
+}
+
+/// Emitted by `set_min_discount` when the admin changes the pool's minimum
+/// discount floor (issue #829), mirroring `protocol_fee_updated`: the old
+/// value is included so an indexer can report what changed rather than only
+/// what it changed to. A rejected change emits nothing.
+pub fn min_discount_updated(env: &Env, old_min_bps: u32, new_min_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "min_discount_updated"),),
+        (old_min_bps, new_min_bps),
     );
 }
