@@ -1212,6 +1212,10 @@ fn test_fund_invoice_pays_issuer_at_funding_time() {
 
     let invoice = lifecycle.invoice.get(&invoice_id);
     assert_eq!(invoice.funded_amount, funded_amount);
+    // #999: the pool passes this invoice-context issuer through the
+    // pool-authorized escrow lock and release callbacks. Escrow must not make
+    // an invoice lookup through the active pool frame during funding.
+    assert_eq!(invoice.issuer, lifecycle.issuer);
 
     // The issuer received the full funded amount.
     assert_eq!(token.balance(&lifecycle.issuer), funded_amount as i128);

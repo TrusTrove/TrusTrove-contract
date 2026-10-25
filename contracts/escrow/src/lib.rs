@@ -369,7 +369,8 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        if issuer != record.issuer {
+        let recorded_issuer = record.issuer.clone();
+        if issuer != recorded_issuer {
             panic_with_error!(&env, EscrowError::InvalidRecipient);
         }
 
@@ -380,7 +381,9 @@ impl EscrowContract {
         // invalid token amount.
         let amount = i128::try_from(record.amount)
             .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
-        usdc.transfer(&env.current_contract_address(), &issuer, &amount);
+        // Pay from the locked invoice record, never from the caller-supplied
+        // address after it has merely passed validation.
+        usdc.transfer(&env.current_contract_address(), &recorded_issuer, &amount);
 
         Self::append_history(
             &env,
@@ -403,7 +406,7 @@ impl EscrowContract {
             .persistent()
             .extend_ttl(&released_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
-        events::released_to_issuer(&env, &invoice_id, &issuer, record.amount);
+        events::released_to_issuer(&env, &invoice_id, &recorded_issuer, record.amount);
         true
     }
 
@@ -451,7 +454,7 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if neither a lock record nor an issuer-release marker
     ///   exists for the invoice (unknown invoice or replayed release).
-    /// * `InvalidAmount` if `repayment_amount` is zero.
+    /// * `InvalidAmount` if `repayment_amount` is zero or exceeds `i128::MAX`.
     /// * `InvalidConfig` if a pinned invoice contract (see
     ///   [`Self::set_invoice_contract`]) differs from the invoice contract
     ///   configured on the pool (#997).
@@ -635,7 +638,10 @@ impl EscrowContract {
         }
 
         let now = env.ledger().timestamp();
-        if now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
+        // A timestamp rollback (or a malformed record seeded with a future
+        // `locked_at`) must fail the grace-period check as a typed
+        // authorization error, not underflow `now - locked_at`.
+        if now < record.locked_at || now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 

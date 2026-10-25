@@ -200,6 +200,42 @@ mod failing_escrow_default {
     }
 }
 
+// --------------- Mock Invoice (mark_defaulted failure) ---------------
+// Stands in for the pool's configured invoice contract to prove that
+// handle_default does not book the loss before invoice.mark_defaulted
+// persists the Defaulted status (issue #971). Escrow stays real in these
+// tests, so escrow.handle_default succeeds and mark_defaulted is the first
+// failing step. Two failure modes are covered: a panicking invoice (the
+// normal contract-error path) and an invoice that simply reports `false`.
+
+mod failing_mark_defaulted {
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
+
+    #[contract]
+    pub struct MockFailingMarkDefaultedInvoice;
+
+    #[contractimpl]
+    impl MockFailingMarkDefaultedInvoice {
+        pub fn mark_defaulted(_env: Env, _invoice_id: BytesN<32>) -> bool {
+            panic!("invoice mark_defaulted failed");
+        }
+    }
+}
+
+mod refusing_mark_defaulted {
+    use soroban_sdk::{contract, contractimpl, BytesN, Env};
+
+    #[contract]
+    pub struct MockRefusingMarkDefaultedInvoice;
+
+    #[contractimpl]
+    impl MockRefusingMarkDefaultedInvoice {
+        pub fn mark_defaulted(_env: Env, _invoice_id: BytesN<32>) -> bool {
+            false
+        }
+    }
+}
+
 // --------------- Mock Token (refund transfer failure) ---------------
 //
 // Stands in for the pool's funding asset to prove that a failing refund
@@ -1812,8 +1848,23 @@ fn test_set_max_utilization_emits_event() {
         (10000, 8500)
     );
 
+    // A later successful change reports the just-replaced value as its old
+    // cap, preserving a complete transition history for event consumers.
+    te.pool.set_max_utilization(&te.admin, &9000);
+    let events = te.env.events().all();
+    let (_, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "max_utilization_updated")
+    );
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (8500, 9000)
+    );
+
     // The storage update itself is still reflected in get_stats.
-    assert_eq!(te.pool.get_stats().max_utilization_bps, 8500);
+    assert_eq!(te.pool.get_stats().max_utilization_bps, 9000);
 
     // A rejected update (> 10000) must not emit the event.
     assert!(te.pool.try_set_max_utilization(&te.admin, &10001).is_err());
@@ -2566,7 +2617,7 @@ fn test_receive_repayment_with_refund_accepts_time_inconsistent_split() {
 // Happy path for receive_repayment_with_refund (#583): the buyer receives
 // exactly `refund` via the USDC transfer, only the remaining yield slice is
 // credited to the pool, and the repayment_received event carries
-// (amount, yield_amount).
+// (amount, lp_yield, protocol_cut).
 #[test]
 fn test_receive_repayment_with_refund_happy_path() {
     let te = setup();
@@ -2716,6 +2767,533 @@ fn test_receive_repayment_with_refund_zero_refund_matches_receive_repayment() {
         <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
         (amount, DEFAULT_YIELD_AMOUNT, 0)
     );
+}
+
+// -----------------------------------------------------------------------------
+// EVENT CATALOG SCHEMA TESTS (#1012): Verify documented repayment and default
+// event topics, schemas, and examples against contract assertions.
+// -----------------------------------------------------------------------------
+
+#[test]
+fn test_doc_example_receive_repayment_no_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let amount = 10_000_000_000u128; // Face value
+    let gross_yield = 200_000_000u128; // 200 bps discount on 10_000_000_000
+    let protocol_cut = 0u128; // Fee disabled (0 bps)
+    let lp_yield = gross_yield - protocol_cut;
+
+    let ok = te.pool.receive_repayment(&invoice_id, &amount);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 200_000_000, 0)
+    );
+}
+
+#[test]
+fn test_doc_example_receive_repayment_with_protocol_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1_000u32; // 10% protocol fee
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+    let amount = 10_000_000_000u128; // Face value
+    let gross_yield = 200_000_000u128;
+    let protocol_cut = gross_yield * fee_bps as u128 / 10_000; // 20_000_000
+    let lp_yield = gross_yield - protocol_cut; // 180_000_000
+
+    let ok = te.pool.receive_repayment(&invoice_id, &amount);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 180_000_000, 20_000_000)
+    );
+}
+
+#[test]
+fn test_doc_example_receive_repayment_with_refund_no_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let amount = 10_000_000_000u128;
+    let refund = 120_000_000u128; // 12 USDC refunded to buyer
+    let net_yield = amount - DEFAULT_FUNDED_AMOUNT - refund; // 80_000_000
+    let protocol_cut = 0u128;
+    let lp_yield = net_yield;
+
+    let ok = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 80_000_000, 0)
+    );
+}
+
+#[test]
+fn test_doc_example_receive_repayment_with_refund_with_protocol_fee() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let treasury = Address::generate(&te.env);
+    let fee_bps = 1_000u32; // 10%
+    te.pool.set_protocol_fee(&fee_bps, &treasury);
+
+    let amount = 10_000_000_000u128;
+    let refund = 120_000_000u128;
+    let net_yield = amount - DEFAULT_FUNDED_AMOUNT - refund; // 80_000_000
+    let protocol_cut = net_yield * fee_bps as u128 / 10_000; // 8_000_000
+    let lp_yield = net_yield - protocol_cut; // 72_000_000
+
+    let ok = te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer);
+    assert!(ok);
+
+    let events = te.env.events().all();
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (amount, lp_yield, protocol_cut)
+    );
+    assert_eq!(
+        <(u128, u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (10_000_000_000, 72_000_000, 8_000_000)
+    );
+}
+
+#[test]
+fn test_doc_example_handle_default_and_no_repayment_event() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86400 + 60);
+
+    let ok = te.pool.handle_default(&invoice_id);
+    assert!(ok);
+    // Capture before further queries: sdk >=22 test Envs reset the event
+    // buffer at every top-level invocation.
+    let events = te.env.events().all();
+
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+
+    // In the unrecoverable-loss path (Example 3A, escrow_released == false),
+    // principal was already paid to issuer: TotalDeposits shrinks by funded_amount
+    // so LPs absorb the loss via lower share price.
+    assert_eq!(
+        after.total_deposits,
+        before.total_deposits - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(
+        after.total_loss_realised,
+        before.total_loss_realised + DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(
+        position_after.usdc_value,
+        position_before.usdc_value - DEFAULT_FUNDED_AMOUNT
+    );
+
+    let mut defaulted_event_found = false;
+    let mut repayment_event_found = false;
+
+    for (contract, topics, data) in events.iter() {
+        if contract == te.pool_id && !topics.is_empty() {
+            if let Ok(topic0) = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()) {
+                if topic0 == Symbol::new(&te.env, "invoice_defaulted") {
+                    defaulted_event_found = true;
+                    assert_eq!(
+                        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+                        invoice_id
+                    );
+                    assert_eq!(
+                        u128::try_from_val(&te.env, &data).unwrap(),
+                        DEFAULT_FUNDED_AMOUNT
+                    );
+                } else if topic0 == Symbol::new(&te.env, "repayment_received") {
+                    repayment_event_found = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        defaulted_event_found,
+        "invoice_defaulted event must be emitted"
+    );
+    assert!(
+        !repayment_event_found,
+        "handle_default must NOT emit repayment_received event"
+    );
+}
+
+#[test]
+fn test_doc_example_handle_default_recovered_principal() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let funded_amount = DEFAULT_FUNDED_AMOUNT; // 9_800_000_000
+
+    // Simulate escrow still holding the principal (pre-#819 or unreleased escrow)
+    // so that escrow.handle_default returns true and returns the principal to the pool.
+    let escrow_bal_key = TKey(te.escrow_id.clone());
+    te.env.as_contract(&te.usdc_id, || {
+        let cur: i128 = te
+            .env
+            .storage()
+            .persistent()
+            .get(&escrow_bal_key)
+            .unwrap_or(0);
+        te.env
+            .storage()
+            .persistent()
+            .set(&escrow_bal_key, &(cur + funded_amount as i128));
+    });
+
+    te.env.as_contract(&te.escrow_id, || {
+        te.env.storage().persistent().set(
+            &trusttrove_escrow::DataKey::Locked(invoice_id.clone()),
+            &trusttrove_escrow::EscrowRecord {
+                invoice_id: invoice_id.clone(),
+                amount: funded_amount,
+                locked_at: te.env.ledger().timestamp(),
+                issuer: te.issuer.clone(),
+            },
+        );
+        te.env
+            .storage()
+            .persistent()
+            .remove(&trusttrove_escrow::DataKey::IssuerReleased(
+                invoice_id.clone(),
+            ));
+    });
+
+    let before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86400 + 60);
+
+    let ok = te.pool.handle_default(&invoice_id);
+    assert!(ok);
+    // Capture before further queries: sdk >=22 test Envs reset the event
+    // buffer at every top-level invocation.
+    let events = te.env.events().all();
+
+    let after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+
+    // In the recovered-principal path (Example 3B, escrow_released == true),
+    // TotalDeposits is deliberately left unchanged to preserve LP capital and share value (issue #439).
+    assert_eq!(
+        after.total_deposits, before.total_deposits,
+        "TotalDeposits must remain unchanged on recovered principal"
+    );
+    assert_eq!(
+        after.total_funded,
+        before.total_funded - funded_amount,
+        "TotalFunded must decrease by funded_amount"
+    );
+    assert_eq!(
+        after.total_loss_realised,
+        before.total_loss_realised + funded_amount,
+        "TotalLossRealised tracks defaulted funded principal"
+    );
+    assert_eq!(after.active_invoice_count, before.active_invoice_count - 1);
+    assert_eq!(
+        position_after.usdc_value, position_before.usdc_value,
+        "LP position value must be preserved when principal is recovered"
+    );
+
+    let mut defaulted_event_found = false;
+    let mut repayment_event_found = false;
+
+    for (contract, topics, data) in events.iter() {
+        if contract == te.pool_id && !topics.is_empty() {
+            if let Ok(topic0) = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()) {
+                if topic0 == Symbol::new(&te.env, "invoice_defaulted") {
+                    defaulted_event_found = true;
+                    assert_eq!(
+                        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+                        invoice_id
+                    );
+                    // Payload is the defaulted funded principal
+                    assert_eq!(u128::try_from_val(&te.env, &data).unwrap(), funded_amount);
+                } else if topic0 == Symbol::new(&te.env, "repayment_received") {
+                    repayment_event_found = true;
+                }
+            }
+        }
+    }
+
+    assert!(
+        defaulted_event_found,
+        "invoice_defaulted event must be emitted with defaulted funded principal"
+    );
+    assert!(
+        !repayment_event_found,
+        "handle_default must NOT emit repayment_received event"
+    );
+}
+
+//  ISSUE #969: REFUND DESTINATION MUST MATCH THE INVOICE BUYER //
+// `receive_repayment_with_refund` is given the refund destination as a plain
+// argument alongside the invoice-computed split. A miswired or compromised
+// caller contract could direct the refund to another address, so the pool
+// reads the canonical buyer back from the configured invoice contract
+// (`get_buyer`) and rejects any mismatch with the typed
+// `PoolError::BuyerMismatch` (#27) before any funds move or any accounting
+// is finalized.
+
+#[test]
+fn test_receive_repayment_with_refund_rejects_foreign_destination_without_mutation() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let attacker = Address::generate(&te.env);
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let before = te.pool.get_stats();
+    let pool_before = usdc.balance(&te.pool_id);
+    let buyer_before = usdc.balance(&te.buyer);
+    let attacker_before = usdc.balance(&attacker);
+
+    // Valid amounts, in-bounds refund — only the destination is wrong.
+    let amount = DEFAULT_FACE_VALUE;
+    let refund = 120_000_000u128;
+    let result =
+        te.pool
+            .try_receive_repayment_with_refund(&invoice_id, &amount, &refund, &attacker);
+    let error = std::format!("{result:?}");
+    assert!(
+        result.is_err(),
+        "a refund to a foreign destination must be rejected: {error}"
+    );
+    assert!(
+        error.contains("#27"),
+        "expected PoolError::BuyerMismatch: {error}"
+    );
+
+    // No accounting was finalized.
+    let after = te.pool.get_stats();
+    assert_eq!(after.total_deposits, before.total_deposits);
+    assert_eq!(
+        after.total_yield_distributed,
+        before.total_yield_distributed
+    );
+    assert_eq!(after.total_funded, before.total_funded);
+    assert_eq!(after.active_invoice_count, before.active_invoice_count);
+
+    // No funds moved.
+    assert_eq!(
+        usdc.balance(&attacker),
+        attacker_before,
+        "the foreign destination must receive nothing"
+    );
+    assert_eq!(usdc.balance(&te.buyer), buyer_before);
+    assert_eq!(
+        usdc.balance(&te.pool_id),
+        pool_before,
+        "the pool balance must not change on a rejected destination"
+    );
+
+    // The funded invoice entry survives; the invoice may still be settled
+    // later through the canonical path.
+    assert_eq!(
+        te.pool.get_funded_amount(&invoice_id),
+        Some(DEFAULT_FUNDED_AMOUNT)
+    );
+
+    // Positive control: the same split with the canonical buyer settles.
+    assert!(te
+        .pool
+        .receive_repayment_with_refund(&invoice_id, &amount, &refund, &te.buyer));
+    assert_eq!(usdc.balance(&te.buyer), buyer_before + refund as i128);
+    assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
+}
+
+// Even a zero-refund call must verify the destination: the argument is
+// untrusted regardless of whether money would move through it.
+#[test]
+fn test_receive_repayment_with_refund_rejects_foreign_destination_even_with_zero_refund() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let attacker = Address::generate(&te.env);
+    let before = te.pool.get_stats();
+
+    let result = te.pool.try_receive_repayment_with_refund(
+        &invoice_id,
+        &DEFAULT_FACE_VALUE,
+        &0u128,
+        &attacker,
+    );
+    let error = std::format!("{result:?}");
+    assert!(result.is_err(), "must reject foreign destination: {error}");
+    assert!(
+        error.contains("#27"),
+        "expected PoolError::BuyerMismatch: {error}"
+    );
+
+    let after = te.pool.get_stats();
+    assert_eq!(after.total_deposits, before.total_deposits);
+    assert_eq!(after.total_funded, before.total_funded);
+    assert_eq!(after.active_invoice_count, before.active_invoice_count);
+    assert_eq!(
+        te.pool.get_funded_amount(&invoice_id),
+        Some(DEFAULT_FUNDED_AMOUNT)
+    );
+}
+
+// #969 upgrade path: funded entries created before the buyer snapshot existed
+// must not become unpayable. `backfill_funded_invoice_buyer` reads the buyer
+// from the trusted invoice contract and restores the snapshot without moving
+// funds, after which the ordinary refund path works again.
+#[test]
+fn test_backfill_funded_invoice_buyer_restores_legacy_refund_path() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    // Simulate a pre-#969 funded entry: the `FundedInvoice` principal is live
+    // but the buyer snapshot does not exist yet.
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .remove(&DataKey::FundedInvoiceBuyer(invoice_id.clone()));
+    });
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let buyer_before = usdc.balance(&te.buyer);
+    let refund = 120_000_000u128;
+
+    let rejected = te.pool.try_receive_repayment_with_refund(
+        &invoice_id,
+        &DEFAULT_FACE_VALUE,
+        &refund,
+        &te.buyer,
+    );
+    let error = std::format!("{rejected:?}");
+    assert!(rejected.is_err(), "legacy entry must fail closed: {error}");
+    assert!(
+        error.contains("#27"),
+        "expected PoolError::BuyerMismatch before backfill: {error}"
+    );
+
+    assert!(
+        te.pool.backfill_funded_invoice_buyer(&invoice_id),
+        "the missing snapshot must be written"
+    );
+    assert!(
+        !te.pool.backfill_funded_invoice_buyer(&invoice_id),
+        "an existing snapshot must never be overwritten"
+    );
+
+    assert!(te.pool.receive_repayment_with_refund(
+        &invoice_id,
+        &DEFAULT_FACE_VALUE,
+        &refund,
+        &te.buyer
+    ));
+    assert_eq!(usdc.balance(&te.buyer), buyer_before + refund as i128);
+    assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_backfill_funded_invoice_buyer_rejects_unfunded_invoice() {
+    let te = setup();
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.backfill_funded_invoice_buyer(&invoice_id);
 }
 
 // A failing refund transfer must not leave the pool partially settled.
@@ -3375,6 +3953,171 @@ fn test_handle_default_rolls_back_on_escrow_failure() {
         "invoice status must not change on escrow failure"
     );
     assert_eq!(invoice_status_after, 2, "invoice must stay Funded");
+}
+
+/// Issue #971: `handle_default` must not leave the pool reporting a loss while
+/// the invoice remains active. The configured invoice is swapped for a stub
+/// that fails `mark_defaulted` after escrow's `handle_default` has already
+/// succeeded, so the failure lands exactly at the step that used to run
+/// *after* the pool accounting writes.
+#[test]
+fn test_handle_default_rolls_back_when_mark_defaulted_fails() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
+
+    // Escrow is left as the real contract: its handle_default succeeds (the
+    // funding path already paid the issuer, so escrow returns false with the
+    // issuer-release marker set), which puts the failure squarely in
+    // mark_defaulted.
+    let escrow = RealEscrowClient::new(&te.env, &te.escrow_id);
+    assert!(
+        escrow.was_released_to_issuer(&invoice_id),
+        "escrow must have released the principal to the issuer before the default"
+    );
+    assert_eq!(escrow.get_locked(&invoice_id), 0);
+
+    let failing_invoice_id = te
+        .env
+        .register(failing_mark_defaulted::MockFailingMarkDefaultedInvoice, ());
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &failing_invoice_id);
+    });
+
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+    let invoice_status_before = te.invoice.get_status(&invoice_id);
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let pool_balance_before = usdc.balance(&te.pool_id);
+
+    let result = te.pool.try_handle_default(&invoice_id);
+    assert!(
+        result.is_err(),
+        "handle_default must revert when invoice.mark_defaulted fails"
+    );
+
+    let stats_after = te.pool.get_stats();
+    assert_eq!(
+        stats_after.total_deposits, stats_before.total_deposits,
+        "total_deposits must not shrink when mark_defaulted fails"
+    );
+    assert_eq!(
+        stats_after.total_funded, stats_before.total_funded,
+        "total_funded must not change when mark_defaulted fails"
+    );
+    assert_eq!(
+        stats_after.total_loss_realised, stats_before.total_loss_realised,
+        "no loss may be realised while the invoice is still active"
+    );
+    assert_eq!(
+        stats_after.active_invoice_count, stats_before.active_invoice_count,
+        "active_invoice_count must not change when mark_defaulted fails"
+    );
+    assert_eq!(
+        stats_after.total_shares, stats_before.total_shares,
+        "total_shares must not change when mark_defaulted fails"
+    );
+    assert_eq!(
+        stats_after.total_yield_distributed, stats_before.total_yield_distributed,
+        "total_yield_distributed must not change when mark_defaulted fails"
+    );
+
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(
+        position_after.usdc_value, position_before.usdc_value,
+        "LP share value must not move when mark_defaulted fails"
+    );
+
+    let funded_entry_after: Option<u128> = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().get(&funded_key)
+    });
+    assert_eq!(
+        funded_entry_after,
+        Some(DEFAULT_FUNDED_AMOUNT),
+        "the funded invoice entry must survive the failed default"
+    );
+
+    assert_eq!(
+        usdc.balance(&te.pool_id),
+        pool_balance_before,
+        "pool token balance must not change when mark_defaulted fails"
+    );
+    assert_eq!(
+        te.invoice.get_status(&invoice_id),
+        invoice_status_before,
+        "invoice status must not change when mark_defaulted fails"
+    );
+    assert_eq!(
+        te.invoice.get_status(&invoice_id),
+        2,
+        "invoice must stay Funded"
+    );
+}
+
+/// Issue #971, fail-closed half: an invoice contract that reports the
+/// `Defaulted` status was not persisted (without trapping) is rejected with the
+/// typed `PoolError::InvoiceDefaultNotRecorded` (#29), and the pool still books
+/// nothing.
+#[test]
+fn test_handle_default_rejects_unpersisted_default() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 60);
+
+    let refusing_invoice_id = te.env.register(
+        refusing_mark_defaulted::MockRefusingMarkDefaultedInvoice,
+        (),
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &refusing_invoice_id);
+    });
+
+    let stats_before = te.pool.get_stats();
+    let invoice_status_before = te.invoice.get_status(&invoice_id);
+
+    let result = te.pool.try_handle_default(&invoice_id);
+    let error = std::format!("{result:?}");
+    assert!(
+        result.is_err(),
+        "a default the invoice did not persist must be rejected: {error}"
+    );
+    assert!(
+        error.contains("#29"),
+        "expected PoolError::InvoiceDefaultNotRecorded: {error}"
+    );
+
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_funded, stats_before.total_funded);
+    assert_eq!(
+        stats_after.total_loss_realised,
+        stats_before.total_loss_realised
+    );
+    assert_eq!(
+        stats_after.active_invoice_count,
+        stats_before.active_invoice_count
+    );
+    assert_eq!(
+        te.pool.get_funded_amount(&invoice_id),
+        Some(DEFAULT_FUNDED_AMOUNT)
+    );
+    assert_eq!(te.invoice.get_status(&invoice_id), invoice_status_before);
 }
 
 #[test]
@@ -4979,8 +5722,10 @@ fn test_get_escrow_contract_panics_when_uninitialized() {
 // untyped host panic. These tests cover the remaining entry points
 // and views after the bare `unwrap()` / `expect()` reads were replaced
 // (`get_admin`, `get_invoice_contract`, `get_escrow_contract` and
-// `get_usdc_asset` are pinned alongside; `deposit`, `withdraw` and
-// `fund_invoice` already had typed-error tests).
+// `get_usdc_asset` are pinned alongside; `deposit` and `withdraw` already had
+// typed-error tests). #973 pinned the same error family for every path that
+// goes through the three dependency-address helpers: `fund_invoice`,
+// `handle_default` and `get_usdc_asset`.
 
 fn uninitialized_pool() -> (Env, PoolContractClient<'static>) {
     // #827: constructed-then-evicted config (see deploy_pool_with_evicted_config)
@@ -5031,10 +5776,47 @@ fn test_receive_repayment_with_refund_panics_with_typed_not_initialized() {
 
 #[test]
 #[should_panic(expected = "Error(Contract, #2)")]
+fn test_fund_invoice_panics_with_typed_not_initialized() {
+    let (env, pool) = uninitialized_pool();
+    let invoice_id = BytesN::from_array(&env, &[0u8; 32]);
+    pool.fund_invoice(&invoice_id);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
 fn test_handle_default_panics_with_typed_not_initialized() {
     let (env, pool) = uninitialized_pool();
     let invoice_id = BytesN::from_array(&env, &[0u8; 32]);
     pool.handle_default(&invoice_id);
+}
+
+// The three dependency-address helpers (`invoice_contract`, `escrow_contract`,
+// `funding_asset`) all surface the same typed error family before
+// initialization (#973): `fund_invoice`, `handle_default` and `get_usdc_asset`
+// must each abort with `PoolError::NotInitialized` (#2) rather than an untyped
+// host panic from a raw `expect`.
+#[test]
+fn test_pre_initialization_dependency_helpers_share_typed_error_family() {
+    let (env, pool) = uninitialized_pool();
+    let invoice_id = BytesN::from_array(&env, &[0u8; 32]);
+
+    let fund_invoice_error = std::format!("{:?}", pool.try_fund_invoice(&invoice_id));
+    assert!(
+        fund_invoice_error.contains("#2"),
+        "fund_invoice must fail with PoolError::NotInitialized: {fund_invoice_error}"
+    );
+
+    let handle_default_error = std::format!("{:?}", pool.try_handle_default(&invoice_id));
+    assert!(
+        handle_default_error.contains("#2"),
+        "handle_default must fail with PoolError::NotInitialized: {handle_default_error}"
+    );
+
+    let get_usdc_asset_error = std::format!("{:?}", pool.try_get_usdc_asset());
+    assert!(
+        get_usdc_asset_error.contains("#2"),
+        "get_usdc_asset must fail with PoolError::NotInitialized: {get_usdc_asset_error}"
+    );
 }
 
 //  CONSTANTS LOCATION TESTS (issue #592)
@@ -6317,6 +7099,7 @@ fn test_shared_fixture_setup_full_protocol() {
 // Soroban host.
 const PROP_CASES: u32 = 10;
 const PROP_MAX_STEPS: usize = 12;
+const PROP_SOLVENCY_MAX_STEPS: usize = 8;
 
 // Amount bound: wide enough that a single step can exceed any balance built
 // up earlier in the sequence (driving the rejected-step paths), and far below
@@ -7950,11 +8733,17 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// #865 added, so the corrected flow costs cpu = 1,562,040 / mem = 318,929
 /// on this branch; the ceilings below pin that re-measurement.
 ///
-/// Re-measured on the `feb76fd1` (#1034) rebase: the #829 yield floor adds one
-/// instance-storage read (`DataKey::MinDiscountBps`) to `fund_one`, so the
-/// funded flow now costs cpu = 1,580,219 / mem = 320,571 (deterministic host
-/// budget accounting); the CPU ceiling below pins that re-measurement with the
-/// usual ~1% headroom and the memory ceiling is unchanged.
+/// Re-pinned by #969: `fund_invoice` now also snapshots the canonical buyer
+/// (`DataKey::FundedInvoiceBuyer`, one persistent write + TTL bump) so
+/// `receive_repayment_with_refund` can verify the refund destination without
+/// re-entering the invoice contract mid-settlement. That is ~56k cpu / ~18k
+/// mem of storage work, so the earlier #865 ceilings no longer bound the flow.
+/// The #829 yield floor adds one instance-storage read
+/// (`DataKey::MinDiscountBps`) to `fund_one` on top of that. The ceilings
+/// below leave headroom for both changes on top of the previous #969
+/// re-measurement (cpu = 1,617,956 / mem = 336,743); the #833 batching
+/// guarantee itself is still enforced by the invoice-call-count assertions in
+/// `test_fund_invoice_uses_single_batched_read` (2 invoice calls, not 5).
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -7968,12 +8757,12 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_590_000,
-        "fund_invoice (batched read + #819 issuer payout) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_625_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 330_000,
-        "fund_invoice (batched read + #819 issuer payout) must stay within its re-pinned memory budget: {mem}"
+        mem < 345_000,
+        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot) must stay within its re-pinned memory budget: {mem}"
     );
 }
 
@@ -8237,7 +9026,7 @@ fn prop_pool_token_balance_always_covers_available_liquidity() {
                 // the cut-vs-balance assertion bite); some run fee 0 (full yield stays
                 // with the LPs).
                 prop_oneof![1 => Just(0u32), 3 => 1u32..=MAX_PROTOCOL_FEE_BPS],
-                prop::collection::vec(solvency_step_strategy(), 1..=PROP_MAX_STEPS),
+                prop::collection::vec(solvency_step_strategy(), 1..=PROP_SOLVENCY_MAX_STEPS),
             ),
             |(fee_bps, steps)| {
                 let te = setup();

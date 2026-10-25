@@ -445,6 +445,7 @@ deposit would create it.
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `FundedInvoice(BytesN<32>)` | `u128` | Funded amount keyed by invoice ID |
+| `FundedInvoiceBuyer(BytesN<32>)` | `Address` | Buyer snapshotted from the invoice contract at funding time (issue #969). `receive_repayment_with_refund` rejects a refund destination that differs from it. Removed together with `FundedInvoice` on settlement. |
 
 ### Protocol Fee & Yield Distribution Math
 
@@ -461,12 +462,12 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + (5 × number_of_LPs) + (1 × number_of_funded_invoices).**
+**Approximately 8 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
 
 In practice most pools will have:
 - 8 instance keys (constant)
 - 5 keys per active LP
-- 1 key per funded invoice (removed on repayment/default)
+- 2 keys per funded invoice (removed on repayment/default)
 
 ---
 
@@ -536,3 +537,26 @@ Initialization and upgrades are now distinct mechanisms:
   nor the stored configuration after deployment. Any storage migration a new
   Wasm version requires must therefore be done explicitly (e.g. an admin-gated
   migration entry point) rather than by re-initializing.
+
+### Upgrading a pool with in-flight funded invoices (issue #969)
+
+`FundedInvoiceBuyer` is written by `fund_invoice`, so invoices funded before
+this key existed have a live `FundedInvoice` entry but no buyer snapshot.
+`receive_repayment_with_refund` rejects a missing snapshot with
+`PoolError::BuyerMismatch`, because the destination cannot be verified.
+
+Upgrade procedure:
+
+1. Swap the pool Wasm with `upgrade(new_wasm_hash)` as usual.
+2. For every invoice that was already funded before the upgrade, call
+   `pool.backfill_funded_invoice_buyer(invoice_id)`. The entry point is
+   permissionless and moves no funds: it reads the canonical buyer from the
+   configured invoice contract (`get_buyer`) and writes only the missing
+   snapshot. It returns `false` and overwrites nothing when a snapshot already
+   exists, so repeating the call (or calling it for post-upgrade invoices) is
+   safe. It panics with `InvoiceNotFound` when the invoice has no live funded
+   entry.
+
+Until step 2 runs, an affected invoice's refundable repayment still reverts
+fail-closed; the invoice itself is otherwise unaffected and can be backfilled
+at any later point.

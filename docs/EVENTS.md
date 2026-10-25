@@ -333,6 +333,41 @@ returned by the call.
 **Contract:** `pool_contract`  
 **Source:** `contracts/pool/src/events.rs`
 
+### `pool_initialized`
+
+Emitted when the pool contract is deployed and initialized.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"pool_initialized"` |
+| `topic[1]` | `Address` | Admin address |
+| `topic[2]` | `Address` | Configured invoice contract address |
+| `topic[3]` | `Address` | Configured escrow contract address |
+| `topic[4]` | `Address` | Configured funding asset (USDC) contract address |
+| **Data** | `()` | None |
+
+**Emitted by:** `__constructor()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:16`
+
+---
+
+### `upgraded`
+
+Emitted when the pool contract WASM bytecode is upgraded to a new hash.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"upgraded"` |
+| `topic[1]` | `BytesN<32>` | New WASM bytecode hash |
+| **Data** | `()` | None |
+
+**Emitted by:** `upgrade()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:10`
+
+---
+
 ### `lp_deposited`
 
 Emitted when an LP deposits USDC into the pool.
@@ -342,24 +377,42 @@ Emitted when an LP deposits USDC into the pool.
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"lp_deposited"` |
 | `topic[1]` | `Address` | LP address |
-| **Data** | `(u128, u128)` | `(usdc_amount, shares_issued)` |
+| **Data** | `(u128, u128)` | `(usdc_amount, shares_issued)` in stroops |
 
-**Emitted by:** `deposit()` in `contracts/pool/src/lib.rs:210`
+**Emitted by:** `deposit()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:36`
 
 ---
 
 ### `lp_withdrawn`
 
-Emitted when an LP withdraws USDC from the pool.
+Emitted when an LP withdraws USDC from the pool by burning shares.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"lp_withdrawn"` |
 | `topic[1]` | `Address` | LP address |
-| **Data** | `(u128, u128)` | `(usdc_amount, shares_burned)` |
+| **Data** | `(u128, u128)` | `(usdc_amount, shares_burned)` in stroops |
 
-**Emitted by:** `withdraw()` in `contracts/pool/src/lib.rs:314`
+**Emitted by:** `withdraw()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:44`
+
+---
+
+### `transfer`
+
+Emitted by SEP-41 share-movement entry points (`transfer`, `transfer_shares`, and `transfer_from`) using the standard SEP-41 transfer schema so generic token indexers can track LP share movements.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"transfer"` |
+| `topic[1]` | `Address` | Sender address (`from`) |
+| **Data** | `(Address, i128)` | `(to, amount)` — recipient address and share amount |
+
+**Emitted by:** `transfer()`, `transfer_shares()`, and `transfer_from()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:55`
 
 ---
 
@@ -372,39 +425,144 @@ Emitted when the pool funds an invoice.
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"invoice_funded"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
-| **Data** | `u128` | Funded amount |
+| **Data** | `u128` | Funded amount in USDC stroops |
 
-**Emitted by:** `fund_invoice()` in `contracts/pool/src/lib.rs:464`
+**Emitted by:** `fund_invoice()` (and called per-invoice in `batch_fund_invoice()`) in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:63`
 
 ---
 
 ### `repayment_received`
 
-Emitted when the pool receives repayment for an invoice.
+Emitted when the pool receives repayment for an invoice (via `receive_repayment()` or `receive_repayment_with_refund()`).
 
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"repayment_received"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
-| **Data** | `(u128, u128)` | `(amount, yield_amount)` — amount = face value, yield = discount earned |
+| **Data** | `(u128, u128, u128)` | `(amount, lp_yield, protocol_cut)` in USDC stroops |
 
-**Emitted by:** `receive_repayment()` in `contracts/pool/src/lib.rs:551` and `handle_default()` at line 660
+- `amount`: Total repaid face value / payment amount in USDC stroops.
+- `lp_yield`: Yield distributed to liquidity providers (credited to `TotalDeposits` and `TotalYieldDistributed`).
+- `protocol_cut`: Fee cut transferred to the protocol treasury address (0 if protocol fee is disabled).
+
+> **Important**: `handle_default()` does **not** emit `repayment_received`. Defaults emit `invoice_defaulted` instead (with the defaulted funded principal payload).
+
+**Emitted by:** `settle_repayment()` called by `receive_repayment()` and `receive_repayment_with_refund()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:78`
+
+#### Examples
+
+##### Example 1: Standard Repayment (`receive_repayment`)
+
+When an invoice is repaid in full via `receive_repayment()`, the full discount surplus (`amount - funded_amount`) is split between LP yield and any configured protocol fee cut.
+
+- Invoice Face Value: 1,000 USDC (`10_000_000_000` stroops)
+- Funded Amount: 980 USDC (`9_800_000_000` stroops, discount = 200 bps)
+- Repaid Amount: 1,000 USDC (`10_000_000_000` stroops)
+- Gross Yield: `10_000_000_000 - 9_800_000_000 = 200_000_000` stroops (20 USDC)
+
+**Case A: No protocol fee (`fee_bps = 0`)**
+- `lp_yield`: `200_000_000` stroops
+- `protocol_cut`: `0` stroops
+- **Topics**: `[Symbol("repayment_received"), BytesN<32>(invoice_id)]`
+- **Data**: `(10_000_000_000u128, 200_000_000u128, 0u128)`
+
+**Case B: With protocol fee enabled (`fee_bps = 1000` / 10%)**
+- `protocol_cut`: `200_000_000 * 1000 / 10000 = 20_000_000` stroops (transferred to treasury)
+- `lp_yield`: `200_000_000 - 20_000_000 = 180_000_000` stroops
+- **Topics**: `[Symbol("repayment_received"), BytesN<32>(invoice_id)]`
+- **Data**: `(10_000_000_000u128, 180_000_000u128, 20_000_000u128)`
+
+##### Example 2: Early Repayment with Buyer Refund (`receive_repayment_with_refund`)
+
+When an invoice is repaid early via `receive_repayment_with_refund()`, part of the discount surplus is refunded to the buyer. Only the remaining surplus after refund (`amount - funded_amount - refund`) constitutes yield.
+
+- Invoice Face Value: 1,000 USDC (`10_000_000_000` stroops)
+- Funded Amount: 980 USDC (`9_800_000_000` stroops)
+- Refund to Buyer: 12 USDC (`120_000_000` stroops transferred directly to buyer)
+- Net Yield Surplus: `10_000_000_000 - 9_800_000_000 - 120_000_000 = 80_000_000` stroops (8 USDC)
+
+**Case A: No protocol fee (`fee_bps = 0`)**
+- `lp_yield`: `80_000_000` stroops
+- `protocol_cut`: `0` stroops
+- **Topics**: `[Symbol("repayment_received"), BytesN<32>(invoice_id)]`
+- **Data**: `(10_000_000_000u128, 80_000_000u128, 0u128)`
+
+**Case B: With protocol fee enabled (`fee_bps = 1000` / 10%)**
+- `protocol_cut`: `80_000_000 * 1000 / 10000 = 8_000_000` stroops (transferred to treasury)
+- `lp_yield`: `80_000_000 - 8_000_000 = 72_000_000` stroops
+- **Topics**: `[Symbol("repayment_received"), BytesN<32>(invoice_id)]`
+- **Data**: `(10_000_000_000u128, 72_000_000u128, 8_000_000u128)`
 
 ---
 
 ### `invoice_defaulted`
 
-Emitted when the pool handles a defaulted invoice.
+Emitted when the pool handles a defaulted invoice via `handle_default()`. Topics index the event name and the defaulted `invoice_id`. The data payload is the defaulted funded principal (`funded_amount`).
+
+> **Note on Payload Semantics**: The data payload represents the invoice's defaulted funded principal in USDC stroops, and is **not necessarily an LP capital loss**. The pool executes one of two paths depending on escrow release status:
+> - **Unrecoverable Loss Path (`escrow_released == false`, standard post-#819 flow):** When the funded principal was already paid out to the invoice issuer at funding time, escrow cannot recover funds on default. The pool absorbs the loss by reducing `TotalDeposits` by `funded_amount` (lowering the LP share price rather than burning shares), while `TotalFunded` is decremented.
+> - **Recovered Principal Path (`escrow_released == true`, pre-#819 locks or unreleased escrow):** When escrow still held and returned the principal to the pool, `TotalDeposits` is deliberately left unchanged to preserve LP capital and share value (issue #439), while `TotalFunded` is decremented.
+
+In both paths, `invoice_defaulted` emits `funded_amount` as its data payload and increments `TotalLossRealised`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"invoice_defaulted"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
-| **Data** | `u128` | Loss amount (funded amount lost) |
+| **Data** | `u128` | Defaulted funded principal in USDC stroops (`funded_amount`; not necessarily the LP capital loss if escrow returned the principal) |
 
-**Emitted by:** `handle_default()` in `contracts/pool/src/lib.rs:741`
+**Emitted by:** `handle_default()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:105`
+
+#### Examples
+
+##### Example 3A: Default with Unrecoverable Loss (`escrow_released == false`)
+
+When an invoice defaults and the principal was already released to the issuer at funding time (the standard post-#819 flow), escrow returns `false` on `handle_default`. The pool verifies via `escrow.was_released_to_issuer` that funds reached the issuer, books the unrecoverable loss by reducing `TotalDeposits`, and emits `invoice_defaulted`.
+
+- Invoice Face Value: 1,000 USDC (`10_000_000_000` stroops)
+- Funded Amount: 980 USDC (`9_800_000_000` stroops)
+- Escrow Status: Principal released to issuer (`escrow_released == false`, `was_released_to_issuer == true`)
+- `TotalDeposits` Impact: Reduced by `9_800_000_000` stroops (realized LP capital loss, lowering share price)
+- `TotalFunded` Impact: Decreased by `9_800_000_000` stroops
+- `TotalLossRealised` Impact: Increased by `9_800_000_000` stroops
+- **Topics**: `[Symbol("invoice_defaulted"), BytesN<32>(invoice_id)]`
+- **Data**: `9_800_000_000u128` (defaulted funded principal)
+
+##### Example 3B: Default with Recovered Principal (`escrow_released == true`)
+
+When escrow still held the principal at default time (e.g., pre-#819 locks or unreleased escrow), `escrow.handle_default` transfers the principal back to the pool and returns `true`. The pool decrements `TotalFunded`, leaves `TotalDeposits` unchanged so LP capital and share price are preserved (issue #439), and emits `invoice_defaulted`.
+
+- Invoice Face Value: 1,000 USDC (`10_000_000_000` stroops)
+- Funded Amount: 980 USDC (`9_800_000_000` stroops)
+- Escrow Status: Principal returned by escrow to pool (`escrow_released == true`)
+- `TotalDeposits` Impact: **Unchanged** (LP capital and share value preserved)
+- `TotalFunded` Impact: Decreased by `9_800_000_000` stroops
+- `TotalLossRealised` Impact: Increased by `9_800_000_000` stroops
+- **Topics**: `[Symbol("invoice_defaulted"), BytesN<32>(invoice_id)]`
+- **Data**: `9_800_000_000u128` (defaulted funded principal)
+
+> Note: Unlike repayments, no yield or protocol fee cut is involved in either path, and `repayment_received` is never emitted by `handle_default()`.
+
+---
+
+### `max_utilization_updated`
+
+Emitted after the admin successfully changes the pool's maximum utilization
+cap. Both values are expressed in basis points (`10_000` = 100%).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"max_utilization_updated"` |
+| **Data** | `(u32, u32)` | `(old_cap_bps, new_cap_bps)` in basis points |
+
+**Emitted by:** `set_max_utilization()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:103`
 
 ---
 
@@ -421,8 +579,8 @@ nothing.
 | `topic[0]` | `Symbol` | `"protocol_fee_updated"` |
 | **Data** | `(u32, u32, Address)` | `(old_fee_bps, new_fee_bps, treasury)` |
 
-**Emitted by:** `set_protocol_fee()` in `contracts/pool/src/lib.rs:1525`  
-**Source:** `contracts/pool/src/events.rs:72`
+**Emitted by:** `set_protocol_fee()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:133`
 
 ---
 
@@ -441,7 +599,7 @@ it changed to. A rejected call (non-admin, or floor above
 | **Data** | `(u32, u32)` | `(old_min_bps, new_min_bps)` |
 
 **Emitted by:** `set_min_discount()` in `contracts/pool/src/lib.rs`  
-**Source:** `contracts/pool/src/events.rs`
+**Source:** `contracts/pool/src/events.rs:161`
 
 ---
 
@@ -458,8 +616,8 @@ revoke signal.
 | `topic[1]` | `Address` | Share owner (`from`) |
 | **Data** | `(Address, i128, u32)` | `(spender, amount, expiration_ledger)` |
 
-**Emitted by:** `approve()` in `contracts/pool/src/lib.rs:676`  
-**Source:** `contracts/pool/src/events.rs:83`
+**Emitted by:** `approve()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:144`
 
 ---
 
@@ -475,7 +633,7 @@ Emitted when pool ownership is transferred to a new admin.
 | **Data** | `Address` | New admin |
 
 **Emitted by:** `transfer_ownership()` in `contracts/pool/src/lib.rs`  
-**Source:** `contracts/pool/src/events.rs`
+**Source:** `contracts/pool/src/events.rs:111`
 
 ---
 
@@ -491,7 +649,7 @@ Emitted when the admin engages the emergency circuit breaker.
 | **Data** | `()` | None |
 
 **Emitted by:** `pause()` in `contracts/pool/src/lib.rs`  
-**Source:** `contracts/pool/src/events.rs`
+**Source:** `contracts/pool/src/events.rs:121`
 
 ---
 
@@ -507,7 +665,7 @@ Emitted when the admin disengages the emergency circuit breaker.
 | **Data** | `()` | None |
 
 **Emitted by:** `unpause()` in `contracts/pool/src/lib.rs`  
-**Source:** `contracts/pool/src/events.rs`
+**Source:** `contracts/pool/src/events.rs:127`
 
 ---
 
@@ -939,7 +1097,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 2. **Use topics for filtering** — `topic[0]` is always the event name (Symbol)
 3. **Data decoding** — payloads use Soroban SDK xdr encoding; decode based on the schemas above
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
-5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual
+5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `invoice_defaulted` tracks defaulted funded principal
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`
 7. **Batch events** — `batch_invoices_created` and `batch_invoices_listed` are summary events emitted after the per-invoice events of the same call. `pool::batch_fund_invoice` has no summary event; reconcile it from the individual `invoice_funded` events instead, which is also what tells you which entries a capacity stop skipped.
 
