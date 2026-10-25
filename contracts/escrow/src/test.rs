@@ -1353,12 +1353,12 @@ fn test_release_to_pool_rolls_back_when_transfer_fails() {
     let env = Env::default();
     env.mock_all_auths();
 
-    let admin = env.register_contract(None, MockCaller);
-    let pool = env.register_contract(None, poolmock::MockPool);
-    let invoice = env.register_contract(None, MockCaller);
+    let admin = env.register(MockCaller, ());
+    let pool = env.register(poolmock::MockPool, ());
+    let invoice = env.register(MockCaller, ());
     poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&invoice);
-    let issuer = env.register_contract(None, MockCaller);
-    let token_id = env.register_contract(None, reject::RecipientRejectMockToken);
+    let issuer = env.register(MockCaller, ());
+    let token_id = env.register(reject::RecipientRejectMockToken, ());
     let token = reject::RecipientRejectMockTokenClient::new(&env, &token_id);
 
     // Fund the pool so the lock can succeed; the rejection is recipient-based.
@@ -1368,9 +1368,11 @@ fn test_release_to_pool_rolls_back_when_transfer_fails() {
             .set(&BalanceKey(pool.clone()), &10_000_000_000_000i128);
     });
 
-    let contract_id = env.register_contract(None, EscrowContract);
+    let contract_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool.clone(), token_id.clone()),
+    );
     let client = EscrowContractClient::new(&env, &contract_id);
-    client.initialize(&admin, &pool, &token_id);
 
     // Reject the escrow→pool leg of `release_to_pool`.
     token.set_reject_to(&pool);

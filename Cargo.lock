@@ -1830,6 +1830,7 @@ dependencies = [
  "trusttrove-invoice",
  "trusttrove-pool",
  "trusttrove-registry",
+ "trusttrove-ttl",
 ]
 
 [[package]]
