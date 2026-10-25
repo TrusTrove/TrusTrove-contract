@@ -1571,12 +1571,10 @@ fn test_get_stats_rejects_total_funded_exceeds_deposits() {
 // driven by injecting u128-scaled storage values — the same technique the
 // get_stats/get_utilization_rate/fund_invoice overflow tests use.
 
-// `usdc_amount * total_shares` overflows u128 when total_shares is inflated
-// to u128::MAX, so deposit must panic with Overflow (#13). The check runs
-// before the token transfer, so the depositor's USDC is never pulled.
+// The first overflowing product is 2 * (u128::MAX / 2 + 1). The failed
+// deposit must not move tokens or change pool accounting or LP shares.
 #[test]
-#[should_panic(expected = "Error(Contract, #13)")]
-fn test_deposit_rejects_share_price_overflow() {
+fn test_deposit_share_price_overflow_preserves_state_and_balances() {
     let te = setup();
     te.pool.deposit(&te.lp, &10_000_000_000);
 
@@ -1584,10 +1582,31 @@ fn test_deposit_rejects_share_price_overflow() {
         te.env
             .storage()
             .instance()
-            .set(&DataKey::TotalShares, &u128::MAX);
+            .set(&DataKey::TotalShares, &(u128::MAX / 2 + 1));
     });
 
-    te.pool.deposit(&te.lp, &10_000_000_000);
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+    let lp_balance_before = usdc.balance(&te.lp);
+    let pool_balance_before = usdc.balance(&te.pool_id);
+
+    let result = te.pool.try_deposit(&te.lp, &2);
+    let error = std::format!("{result:?}");
+    assert!(
+        error.contains("#13"),
+        "expected Overflow for the first overflowing product: {error}"
+    );
+
+    let stats_after = te.pool.get_stats();
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(position_after.usdc_value, position_before.usdc_value);
+    assert_eq!(position_after.deposit_count, position_before.deposit_count);
+    assert_eq!(usdc.balance(&te.lp), lp_balance_before);
+    assert_eq!(usdc.balance(&te.pool_id), pool_balance_before);
 }
 
 // Boundary complement: the largest representable product (2 * (u128::MAX / 2)
@@ -9479,4 +9498,359 @@ fn test_fund_invoice_view_failure_preserves_accounting() {
     let stats = te.pool.get_stats();
     assert_eq!(stats.total_funded, DEFAULT_FUNDED_AMOUNT);
     assert_eq!(stats.active_invoice_count, 1);
+}
+
+// =========================================================================
+//  ISSUE #960: PARTIAL WITHDRAWAL ROUNDING PRESERVES ACCOUNTING INVARIANTS
+// =========================================================================
+
+/// #960: `withdraw` uses integer division for redemption and principal portions.
+/// This test verifies that across a partial withdrawal where the share price and
+/// aggregate basis produce non-even divisions (non-zero remainders), the pool's
+/// accounting invariants are preserved:
+/// - `TotalShares` decreases by exactly the redeemed shares and equals the sum
+///   of surviving LP share balances.
+/// - `TotalDeposits` decreases by exactly `usdc_to_return`.
+/// - `usdc_to_return` matches `preview_withdraw` and the exact integer floor
+///   `shares * total_deposits / total_shares`.
+/// - Surviving LP positions (shares and remaining USDC value) stay coherent and
+///   satisfy the integer accounting rules without pool undercollateralization.
+/// - Truncation dust favors the pool: `total_deposits >= sum(lp_values)`, with
+///   the difference strictly bounded by the number of LPs (< 2 stroops).
+/// - The effective share price for remaining shares does not drop, so remaining
+///   LPs are never diluted by another LP's partial withdrawal.
+#[test]
+fn test_partial_withdrawal_rounding_preserves_accounting_invariants() {
+    let te = setup();
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+
+    let lp1 = te.lp.clone();
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000);
+
+    // 1. LP1 deposits 10,000 USDC into empty pool (1:1 share price).
+    let lp1_dep = 10_000_000_000u128;
+    let lp1_minted = te.pool.deposit(&lp1, &lp1_dep);
+    assert_eq!(lp1_minted, lp1_dep);
+
+    // 2. Fund and repay an invoice to generate yield (share price rises to 1.02).
+    fund_and_repay_invoice(&te);
+
+    // 3. LP2 deposits 10,000 USDC at share price > 1.0.
+    // Minted shares: (10_000_000_000 * 10_000_000_000) / 10_200_000_000 = 9_803_921_568 shares.
+    let lp2_dep = 10_000_000_000u128;
+    let lp2_minted = te.pool.deposit(&lp2, &lp2_dep);
+    assert_eq!(lp2_minted, 9_803_921_568);
+
+    // Verify pool state before partial withdrawal:
+    let stats_before = te.pool.get_stats();
+    let lp1_pos_before = te.pool.get_lp_position(&lp1);
+    let lp2_pos_before = te.pool.get_lp_position(&lp2);
+
+    assert_eq!(stats_before.total_shares, 19_803_921_568);
+    assert_eq!(stats_before.total_deposits, 20_200_000_000);
+    assert_eq!(lp1_pos_before.shares, 10_000_000_000);
+    assert_eq!(lp2_pos_before.shares, 9_803_921_568);
+    assert_eq!(
+        stats_before.total_shares,
+        lp1_pos_before.shares + lp2_pos_before.shares
+    );
+
+    // 4. LP2 withdraws a non-full share amount (3_000_000_000 shares).
+    let withdraw_shares = 3_000_000_000u128;
+    assert!(withdraw_shares < lp2_pos_before.shares);
+
+    // Verify mathematically that this withdrawal produces a non-even redemption:
+    // (withdraw_shares * total_deposits) % total_shares != 0
+    let scaled_redemption = withdraw_shares * stats_before.total_deposits;
+    let expected_redemption = scaled_redemption / stats_before.total_shares;
+    let redemption_remainder = scaled_redemption % stats_before.total_shares;
+    assert!(
+        redemption_remainder > 0,
+        "test must use a share price and withdrawal amount that produce a non-even redemption"
+    );
+
+    // Verify non-even division on principal portion:
+    // (withdraw_shares * lp_initial_deposit) % lp_shares != 0
+    let lp2_init_dep_key = DataKey::LPInitialDeposit(lp2.clone());
+    let lp2_init_dep_before: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&lp2_init_dep_key)
+            .unwrap()
+    });
+    let principal_scaled = withdraw_shares * lp2_init_dep_before;
+    let expected_principal_portion = principal_scaled / lp2_pos_before.shares;
+    let principal_remainder = principal_scaled % lp2_pos_before.shares;
+    assert!(
+        principal_remainder > 0,
+        "test must verify non-even division on principal portion"
+    );
+
+    // Preview withdrawal matches integer floor formula.
+    let previewed_usdc = te.pool.preview_withdraw(&withdraw_shares);
+    assert_eq!(previewed_usdc, expected_redemption);
+
+    let lp2_usdc_bal_before = usdc.balance(&lp2);
+    let pool_usdc_bal_before = usdc.balance(&te.pool_id);
+
+    // Execute partial withdrawal.
+    let returned_usdc = te.pool.withdraw(&lp2, &withdraw_shares);
+
+    let stats_after = te.pool.get_stats();
+    let lp1_pos_after = te.pool.get_lp_position(&lp1);
+    let lp2_pos_after = te.pool.get_lp_position(&lp2);
+    let lp2_usdc_bal_after = usdc.balance(&lp2);
+    let pool_usdc_bal_after = usdc.balance(&te.pool_id);
+
+    // Assert returned USDC:
+    assert_eq!(returned_usdc, expected_redemption);
+    assert_eq!(returned_usdc, previewed_usdc);
+    assert_eq!(
+        lp2_usdc_bal_after - lp2_usdc_bal_before,
+        returned_usdc as i128
+    );
+    assert_eq!(
+        pool_usdc_bal_before - pool_usdc_bal_after,
+        returned_usdc as i128
+    );
+
+    // Assert TotalShares invariant:
+    assert_eq!(
+        stats_after.total_shares,
+        stats_before.total_shares - withdraw_shares,
+        "TotalShares must decrement by exactly the redeemed shares"
+    );
+    assert_eq!(
+        stats_after.total_shares,
+        lp1_pos_after.shares + lp2_pos_after.shares,
+        "TotalShares must equal the sum of surviving LP shares"
+    );
+    assert_eq!(
+        te.pool.total_supply(),
+        stats_after.total_shares as i128,
+        "SEP-41 total_supply must equal TotalShares"
+    );
+
+    // Assert TotalDeposits invariant:
+    assert_eq!(
+        stats_after.total_deposits,
+        stats_before.total_deposits - returned_usdc,
+        "TotalDeposits must decrement by exactly returned USDC"
+    );
+
+    // Assert LP shares:
+    assert_eq!(
+        lp2_pos_after.shares,
+        lp2_pos_before.shares - withdraw_shares,
+        "withdrawing LP shares must decrement by withdraw_shares"
+    );
+    assert_eq!(
+        lp1_pos_after.shares, lp1_pos_before.shares,
+        "non-withdrawing LP shares must remain unchanged"
+    );
+    assert_eq!(
+        te.pool.balance(&lp2),
+        lp2_pos_after.shares as i128,
+        "SEP-41 balance must match LPPosition shares for withdrawing LP"
+    );
+    assert_eq!(
+        te.pool.balance(&lp1),
+        lp1_pos_after.shares as i128,
+        "SEP-41 balance must match LPPosition shares for non-withdrawing LP"
+    );
+
+    // Assert remaining LP value:
+    let expected_lp1_value =
+        (lp1_pos_after.shares * stats_after.total_deposits) / stats_after.total_shares;
+    let expected_lp2_value =
+        (lp2_pos_after.shares * stats_after.total_deposits) / stats_after.total_shares;
+    assert_eq!(lp1_pos_after.usdc_value, expected_lp1_value);
+    assert_eq!(lp2_pos_after.usdc_value, expected_lp2_value);
+
+    // Solvency invariant:
+    let sum_remaining_lp_values = lp1_pos_after.usdc_value + lp2_pos_after.usdc_value;
+    assert!(
+        stats_after.total_deposits >= sum_remaining_lp_values,
+        "TotalDeposits must cover all surviving LP claimable values"
+    );
+    assert!(
+        returned_usdc + sum_remaining_lp_values <= stats_before.total_deposits,
+        "returned USDC plus remaining values must never exceed initial deposits"
+    );
+
+    // Truncation dust bound (< 2 stroops):
+    let unclaimable_dust = stats_after.total_deposits - sum_remaining_lp_values;
+    assert!(
+        unclaimable_dust < 2,
+        "unclaimable truncation dust across 2 LPs must be strictly less than 2 stroops"
+    );
+
+    // Effective share price monotonicity (no dilution for remaining shares):
+    assert!(
+        stats_after.total_deposits * stats_before.total_shares
+            >= stats_before.total_deposits * stats_after.total_shares,
+        "partial withdrawal rounding must never dilute the share price of remaining shares"
+    );
+
+    // Principal portion and yield attribution:
+    let expected_yield_earned = returned_usdc.saturating_sub(expected_principal_portion);
+    assert_eq!(
+        lp2_pos_after.yield_earned,
+        lp2_pos_before.yield_earned + expected_yield_earned
+    );
+    let lp2_init_dep_after: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .get(&lp2_init_dep_key)
+            .unwrap()
+    });
+    assert_eq!(
+        lp2_init_dep_after,
+        lp2_init_dep_before - expected_principal_portion,
+        "LPInitialDeposit must decrement by integer-truncated principal_portion"
+    );
+
+    // 5. Subsequent partial withdrawal by the OTHER LP (LP1), confirming multi-step rounding preservation.
+    let withdraw_shares_lp1 = 3_333_333_333u128;
+    assert!(withdraw_shares_lp1 < lp1_pos_after.shares);
+
+    let stats_mid = stats_after;
+    let scaled_redemption_lp1 = withdraw_shares_lp1 * stats_mid.total_deposits;
+    let expected_redemption_lp1 = scaled_redemption_lp1 / stats_mid.total_shares;
+    let redemption_remainder_lp1 = scaled_redemption_lp1 % stats_mid.total_shares;
+    assert!(
+        redemption_remainder_lp1 > 0,
+        "LP1 withdrawal must also produce a non-even redemption"
+    );
+
+    let returned_usdc_lp1 = te.pool.withdraw(&lp1, &withdraw_shares_lp1);
+    assert_eq!(returned_usdc_lp1, expected_redemption_lp1);
+
+    let stats_final = te.pool.get_stats();
+    let lp1_pos_final = te.pool.get_lp_position(&lp1);
+    let lp2_pos_final = te.pool.get_lp_position(&lp2);
+
+    assert_eq!(
+        stats_final.total_shares,
+        stats_mid.total_shares - withdraw_shares_lp1
+    );
+    assert_eq!(
+        stats_final.total_deposits,
+        stats_mid.total_deposits - returned_usdc_lp1
+    );
+    assert_eq!(
+        stats_final.total_shares,
+        lp1_pos_final.shares + lp2_pos_final.shares
+    );
+    assert_eq!(
+        lp1_pos_final.shares,
+        lp1_pos_after.shares - withdraw_shares_lp1
+    );
+    assert_eq!(lp2_pos_final.shares, lp2_pos_after.shares);
+
+    let sum_final_lp_values = lp1_pos_final.usdc_value + lp2_pos_final.usdc_value;
+    assert!(stats_final.total_deposits >= sum_final_lp_values);
+    assert!(stats_final.total_deposits - sum_final_lp_values < 2);
+}
+
+/// #960: Verifies accounting invariants when two LPs deposit before yield, creating
+/// a fractional share price ratio (151 / 150 = 1.006666...), followed by a partial
+/// withdrawal with non-even redemption.
+#[test]
+fn test_partial_withdrawal_rounding_preserves_accounting_invariants_pre_yield_lps() {
+    let te = setup();
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+
+    let lp1 = te.lp.clone();
+    let lp2 = create_lp_with_balance(&te, 100_000_000_000);
+
+    // Both LPs deposit before yield.
+    let lp1_dep = 10_000_000_000u128;
+    let lp2_dep = 20_000_000_000u128;
+    te.pool.deposit(&lp1, &lp1_dep);
+    te.pool.deposit(&lp2, &lp2_dep);
+
+    // Yield of 200_000_000 stroops is distributed into 30_000_000_000 total shares.
+    fund_and_repay_invoice(&te);
+
+    let stats_before = te.pool.get_stats();
+    assert_eq!(stats_before.total_shares, 30_000_000_000);
+    assert_eq!(stats_before.total_deposits, 30_200_000_000);
+
+    let lp1_pos_before = te.pool.get_lp_position(&lp1);
+    let lp2_pos_before = te.pool.get_lp_position(&lp2);
+
+    // LP1 partially withdraws 3_333_333_333 shares.
+    let withdraw_shares = 3_333_333_333u128;
+    assert!(withdraw_shares < lp1_pos_before.shares);
+
+    // Check non-even redemption:
+    let scaled = withdraw_shares * stats_before.total_deposits;
+    let expected_return = scaled / stats_before.total_shares;
+    let remainder = scaled % stats_before.total_shares;
+    assert!(remainder > 0, "must produce a non-even redemption");
+
+    let lp1_bal_before = usdc.balance(&lp1);
+    let pool_bal_before = usdc.balance(&te.pool_id);
+
+    let preview = te.pool.preview_withdraw(&withdraw_shares);
+    assert_eq!(preview, expected_return);
+
+    let actual_returned = te.pool.withdraw(&lp1, &withdraw_shares);
+    assert_eq!(actual_returned, expected_return);
+
+    let stats_after = te.pool.get_stats();
+    let lp1_pos_after = te.pool.get_lp_position(&lp1);
+    let lp2_pos_after = te.pool.get_lp_position(&lp2);
+
+    // Assert TotalShares and TotalDeposits.
+    assert_eq!(
+        stats_after.total_shares,
+        stats_before.total_shares - withdraw_shares
+    );
+    assert_eq!(
+        stats_after.total_deposits,
+        stats_before.total_deposits - actual_returned
+    );
+    assert_eq!(
+        stats_after.total_shares,
+        lp1_pos_after.shares + lp2_pos_after.shares
+    );
+
+    // Assert LP shares.
+    assert_eq!(
+        lp1_pos_after.shares,
+        lp1_pos_before.shares - withdraw_shares
+    );
+    assert_eq!(lp2_pos_after.shares, lp2_pos_before.shares);
+
+    // Assert token transfers.
+    assert_eq!(usdc.balance(&lp1) - lp1_bal_before, actual_returned as i128);
+    assert_eq!(
+        pool_bal_before - usdc.balance(&te.pool_id),
+        actual_returned as i128
+    );
+
+    // Assert remaining LP values satisfy documented integer formula.
+    assert_eq!(
+        lp1_pos_after.usdc_value,
+        (lp1_pos_after.shares * stats_after.total_deposits) / stats_after.total_shares
+    );
+    assert_eq!(
+        lp2_pos_after.usdc_value,
+        (lp2_pos_after.shares * stats_after.total_deposits) / stats_after.total_shares
+    );
+
+    // Non-withdrawing LP2 must not be diluted (value per share preserved or slightly higher).
+    assert!(
+        lp2_pos_after.usdc_value
+            >= (lp2_pos_before.shares * stats_before.total_deposits) / stats_before.total_shares
+    );
+
+    // Pool solvency invariant.
+    let sum_values = lp1_pos_after.usdc_value + lp2_pos_after.usdc_value;
+    assert!(stats_after.total_deposits >= sum_values);
+    assert!(stats_after.total_deposits - sum_values < 2);
 }
