@@ -508,9 +508,12 @@ impl InvoiceContract {
     /// let attestation = client.get_attestation(&invoice_id);
     /// ```
     pub fn get_attestation(env: Env, invoice_id: BytesN<32>) -> Option<Attestation> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Attestation(invoice_id))
+        let key = DataKey::Attestation(invoice_id);
+        let attestation: Option<Attestation> = env.storage().persistent().get(&key);
+        if attestation.is_some() {
+            bump_persistent(&env, &key);
+        }
+        attestation
     }
 
     /// Adds an asset to the allow-list of funding assets that `create`
@@ -3347,10 +3350,9 @@ fn decrement_status_count(env: &Env, status: InvoiceStatus) {
 }
 
 fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StatusCount(status as u32))
-        .unwrap_or(0u64)
+    let key = DataKey::StatusCount(status as u32);
+    bump_persistent(env, &key);
+    env.storage().persistent().get(&key).unwrap_or(0u64)
 }
 
 /// Computes the half-open `[start, end)` index range for one page of an index

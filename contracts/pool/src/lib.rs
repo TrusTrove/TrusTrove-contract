@@ -801,6 +801,24 @@ impl PoolContract {
     /// (remaining shares reach zero), `LPInitialDeposit` and `LPDepositCount`
     /// are removed so a subsequent deposit starts a fresh accounting cycle.
     ///
+    /// # Integer Accounting and Rounding Invariants
+    /// Both the redemption amount and the principal portion calculation use
+    /// integer division which truncates toward zero:
+    /// - `usdc_to_return = (shares * total_deposits) / total_shares`
+    /// - `principal_portion = (shares * lp_initial_deposit) / lp_shares`
+    ///
+    /// Across any partial withdrawal:
+    /// - `TotalShares` is decremented by exactly `shares`, strictly matching the
+    ///   sum of all surviving LP share balances.
+    /// - `TotalDeposits` is decremented by `usdc_to_return`. Because integer division
+    ///   rounds down, any fractional remainder stays in `TotalDeposits`, preserving
+    ///   solvency (`total_deposits >= sum(lp_position.usdc_value)`) and ensuring the
+    ///   effective share price for remaining shares never drops due to another LP's
+    ///   withdrawal.
+    /// - The LP's tracked principal is decremented by `principal_portion` (with any
+    ///   rounding remainder staying in `LPInitialDeposit`), and realised yield is
+    ///   credited as `usdc_to_return.saturating_sub(principal_portion)`.
+    ///
     /// # Returns
     /// * `u128` - The amount of USDC returned.
     ///
@@ -1088,8 +1106,14 @@ impl PoolContract {
     /// let remaining = client.allowance(&lp, &staking);
     /// ```
     pub fn allowance(env: Env, from: Address, spender: Address) -> i128 {
+        let key = DataKey::Allowance(from.clone(), spender.clone());
         match Self::live_allowance(&env, &from, &spender) {
-            Some(record) => record.amount,
+            Some(record) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                record.amount
+            }
             None => 0,
         }
     }
@@ -2229,9 +2253,22 @@ impl PoolContract {
     /// let funded = client.get_funded_amount(&invoice_id);
     /// ```
     pub fn get_funded_amount(env: Env, invoice_id: BytesN<32>) -> Option<u128> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::FundedInvoice(invoice_id))
+        let key = DataKey::FundedInvoice(invoice_id.clone());
+        let buyer_key = DataKey::FundedInvoiceBuyer(invoice_id);
+        if env.storage().persistent().has(&buyer_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&buyer_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+        match env.storage().persistent().get::<_, u128>(&key) {
+            Some(amount) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some(amount)
+            }
+            None => None,
+        }
     }
 
     /// Updates the pool's maximum utilization cap.
