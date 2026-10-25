@@ -801,6 +801,24 @@ impl PoolContract {
     /// (remaining shares reach zero), `LPInitialDeposit` and `LPDepositCount`
     /// are removed so a subsequent deposit starts a fresh accounting cycle.
     ///
+    /// # Integer Accounting and Rounding Invariants
+    /// Both the redemption amount and the principal portion calculation use
+    /// integer division which truncates toward zero:
+    /// - `usdc_to_return = (shares * total_deposits) / total_shares`
+    /// - `principal_portion = (shares * lp_initial_deposit) / lp_shares`
+    ///
+    /// Across any partial withdrawal:
+    /// - `TotalShares` is decremented by exactly `shares`, strictly matching the
+    ///   sum of all surviving LP share balances.
+    /// - `TotalDeposits` is decremented by `usdc_to_return`. Because integer division
+    ///   rounds down, any fractional remainder stays in `TotalDeposits`, preserving
+    ///   solvency (`total_deposits >= sum(lp_position.usdc_value)`) and ensuring the
+    ///   effective share price for remaining shares never drops due to another LP's
+    ///   withdrawal.
+    /// - The LP's tracked principal is decremented by `principal_portion` (with any
+    ///   rounding remainder staying in `LPInitialDeposit`), and realised yield is
+    ///   credited as `usdc_to_return.saturating_sub(principal_portion)`.
+    ///
     /// # Returns
     /// * `u128` - The amount of USDC returned.
     ///
