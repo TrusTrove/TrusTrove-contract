@@ -59,7 +59,13 @@ impl EscrowContract {
     /// ```
     pub fn __constructor(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
         require_not_paused(&env);
-        if pool_contract == usdc_asset || pool_contract == admin || usdc_asset == admin {
+        if pool_contract == usdc_asset
+            || pool_contract == admin
+            || usdc_asset == admin
+            || pool_contract == env.current_contract_address()
+            || usdc_asset == env.current_contract_address()
+            || admin == env.current_contract_address()
+        {
             panic_with_error!(&env, EscrowError::InvalidConfig);
         }
         admin.require_auth();
@@ -74,6 +80,65 @@ impl EscrowContract {
         // #867: every other contract announces initialization; escrow must
         // too, so an indexer sees admin/pool/asset without reading storage.
         events::contract_initialized(&env, &admin, &pool_contract, &usdc_asset);
+    }
+
+    /// Initializes the escrow contract with required references, including the invoice contract.
+    ///
+    /// Provides the explicit initialization path writing `InvoiceContract`
+    /// along with `Admin`, `PoolContract`, and `UsdcAsset`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `admin` - The admin address for this contract.
+    /// * `pool_contract` - The pool contract address.
+    /// * `usdc_asset` - The USDC asset address.
+    /// * `invoice_contract` - The invoice contract address.
+    ///
+    /// # Auth
+    /// Requires authorization from `admin`.
+    ///
+    /// # Panics
+    /// * `AlreadyInitialized` if the contract has already been initialized or constructed.
+    /// * `InvalidConfig` if any of `admin`, `pool_contract`, `usdc_asset`, `invoice_contract`,
+    ///   or this escrow contract alias each other.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        pool_contract: Address,
+        usdc_asset: Address,
+        invoice_contract: Address,
+    ) {
+        require_not_paused(&env);
+        if env.storage().instance().has(&DataKey::Admin) {
+            panic_with_error!(&env, EscrowError::AlreadyInitialized);
+        }
+        if pool_contract == usdc_asset
+            || pool_contract == admin
+            || usdc_asset == admin
+            || invoice_contract == admin
+            || invoice_contract == pool_contract
+            || invoice_contract == usdc_asset
+            || invoice_contract == env.current_contract_address()
+            || pool_contract == env.current_contract_address()
+            || usdc_asset == env.current_contract_address()
+            || admin == env.current_contract_address()
+        {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PoolContract, &pool_contract);
+        env.storage()
+            .instance()
+            .set(&DataKey::UsdcAsset, &usdc_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &invoice_contract);
+        Self::extend_instance_ttl(&env);
+        events::contract_initialized(&env, &admin, &pool_contract, &usdc_asset);
+        events::invoice_contract_set(&env, &admin, &invoice_contract);
     }
 
     /// Get a token client for the USDC asset stored in the contract.
@@ -188,14 +253,34 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the pool contract address is unset.
     ///
+    /// Returns the invoice contract address configured on escrow or pool.
+    ///
+    /// Returns the stored [`DataKey::InvoiceContract`] reference if configured
+    /// (via [`Self::initialize`] or [`Self::set_invoice_contract`]). If unconfigured,
+    /// falls back to reading from the configured pool's own `get_invoice_contract`
+    /// view (issue #820).
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if neither invoice contract nor pool contract address is set.
+    ///
     /// # Returns
-    /// * `Address` - The invoice contract address configured on the pool.
+    /// * `Address` - The invoice contract address.
     ///
     /// # Example
     /// ```ignore
     /// let invoice = client.get_invoice_contract();
     /// ```
     pub fn get_invoice_contract(env: Env) -> Address {
+        if let Some(invoice) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            return invoice;
+        }
         let pool: Address = env
             .storage()
             .instance()
@@ -209,7 +294,7 @@ impl EscrowContract {
     }
 
     /// Pins the invoice contract reference used to validate `release_to_pool`
-    /// (#997).
+    /// (#997) and `release_to_issuer`.
     ///
     /// Defense-in-depth on top of issue #820: `release_to_pool` resolves the
     /// invoice contract from the pool's own `get_invoice_contract` view and
@@ -235,8 +320,8 @@ impl EscrowContract {
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `InvalidConfig` if `invoice_contract` collides with the admin, the
     ///   pool contract, the USDC asset, or this escrow contract — mirroring
-    ///   the distinct-address rule enforced by
-    ///   constructed at deploy time via [`Self::__constructor`](Self::__constructor).
+    ///   the distinct-address rule enforced at deploy time via
+    ///   [`Self::__constructor`](Self::__constructor) and [`Self::initialize`](Self::initialize).
     ///
     /// # Returns
     /// * `()` - No value is returned. Emits `invoice_contract_set`.
@@ -342,7 +427,7 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if no escrow record exists for the invoice.
-    /// * `InvalidRecipient` if issuer is escrow or pool contract address.
+    /// * `InvalidRecipient` if issuer is escrow, pool, invoice contract, or token asset address.
     /// * `InvalidRecipient` if issuer does not match the stored issuer address.
     /// * `InvalidAmount` if the stored amount exceeds `i128::MAX` (checked
     ///   conversion fails before any transfer or record removal).
@@ -358,8 +443,19 @@ impl EscrowContract {
         require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
-        if issuer == env.current_contract_address() || issuer == pool {
+        let usdc = Self::get_usdc_asset(env.clone());
+        if issuer == env.current_contract_address() || issuer == pool || issuer == usdc {
             panic_with_error!(&env, EscrowError::InvalidRecipient);
+        }
+
+        if let Some(invoice_contract) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if issuer == invoice_contract {
+                panic_with_error!(&env, EscrowError::InvalidRecipient);
+            }
         }
 
         let key = DataKey::Locked(invoice_id.clone());
@@ -483,23 +579,30 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::PoolContract)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
-        let invoice_contract: Address = Self::get_invoice_contract(env.clone());
-        invoice_contract.require_auth();
+        let pool_resolved: Address = env.invoke_contract(
+            &pool,
+            &Symbol::new(&env, "get_invoice_contract"),
+            Vec::new(&env),
+        );
 
         // Issue #997: when the admin pinned the invoice contract reference
-        // via `set_invoice_contract`, the pool-resolved address must match
-        // it — a pool whose configuration drifted from the pin is a
-        // misconfiguration to reject, not a licence to redirect repayments.
+        // via `set_invoice_contract` or `initialize`, the pool-resolved address
+        // must match it — a pool whose configuration drifted from the stored
+        // reference is a misconfiguration to reject, not a licence to redirect repayments.
         // Deployments that never pinned a reference keep the #820 behaviour.
-        if let Some(pinned) = env
+        let invoice_contract: Address = if let Some(pinned) = env
             .storage()
             .instance()
             .get::<_, Address>(&DataKey::InvoiceContract)
         {
-            if pinned != invoice_contract {
+            if pinned != pool_resolved {
                 panic_with_error!(&env, EscrowError::InvalidConfig);
             }
-        }
+            pinned
+        } else {
+            pool_resolved
+        };
+        invoice_contract.require_auth();
 
         if repayment_amount == 0 || repayment_amount > i128::MAX as u128 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
