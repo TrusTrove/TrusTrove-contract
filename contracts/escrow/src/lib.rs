@@ -572,9 +572,15 @@ impl EscrowContract {
     /// let paid = client.was_released_to_issuer(&invoice_id);
     /// ```
     pub fn was_released_to_issuer(env: Env, invoice_id: BytesN<32>) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::IssuerReleased(invoice_id))
+        let key = DataKey::IssuerReleased(invoice_id);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            true
+        } else {
+            false
+        }
     }
 
     /// Handles an escrow default by returning the locked funds to the pool.
@@ -858,11 +864,16 @@ impl EscrowContract {
     /// let locked = client.get_locked(&invoice_id);
     /// ```
     pub fn get_locked(env: Env, invoice_id: BytesN<32>) -> u128 {
-        env.storage()
-            .persistent()
-            .get::<_, EscrowRecord>(&DataKey::Locked(invoice_id))
-            .map(|r| r.amount)
-            .unwrap_or(0)
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(r) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                r.amount
+            }
+            None => 0,
+        }
     }
 
     /// Returns the timestamp when the escrow was locked for an invoice.
@@ -885,11 +896,16 @@ impl EscrowContract {
     /// let locked_at = client.get_locked_at(&invoice_id);
     /// ```
     pub fn get_locked_at(env: Env, invoice_id: BytesN<32>) -> u64 {
-        env.storage()
-            .persistent()
-            .get::<_, EscrowRecord>(&DataKey::Locked(invoice_id))
-            .map(|r| r.locked_at)
-            .unwrap_or(0)
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(r) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                r.locked_at
+            }
+            None => 0,
+        }
     }
 
     /// Returns the history of escrow events for an invoice.
@@ -913,10 +929,15 @@ impl EscrowContract {
     /// ```
     pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
         let key = DataKey::History(invoice_id);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
+        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
+            Some(history) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                history
+            }
+            None => Vec::new(&env),
+        }
     }
 
     fn append_history(
