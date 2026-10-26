@@ -162,6 +162,7 @@ pub fn setup_full_protocol() -> FullProtocol {
     invoice.add_supported_asset(&usdc_id);
     invoice.set_pool_contract(&pool_id);
     invoice.set_escrow_contract(&escrow_id);
+    escrow.set_invoice_contract(&invoice_id);
 
     let agent_registry_id = env.register(MockAgentRegistry, ());
     let agent_registry = MockAgentRegistryClient::new(&env, &agent_registry_id);

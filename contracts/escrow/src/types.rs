@@ -116,8 +116,8 @@ pub enum DataKey {
     /// `release_to_pool` (#997) and recipient validation in `release_to_issuer`.
     /// Instance key; value type: `Address`.
     ///
-    /// Written by [`EscrowContract::initialize`] or [`EscrowContract::set_invoice_contract`]
-    /// (admin-authenticated). `release_to_pool` still resolves the invoice contract
+    /// Written by [`EscrowContract::set_invoice_contract`] (admin-authenticated)
+    /// as the required post-construction configuration step or migration path. `release_to_pool` still resolves the invoice contract
     /// it authorizes from the pool's `get_invoice_contract` view (#820), but when a pin
     /// is stored here that resolved address must equal the pin or the call is
     /// rejected with [`EscrowError::InvalidConfig`](crate::EscrowError::InvalidConfig) —

@@ -511,13 +511,14 @@ if [ -n "$ONLY_CONTRACT" ]; then
   _clear_keys=( "$ONLY_CONTRACT" )
   case "$ONLY_CONTRACT" in
     usdc_pair)
-      _clear_keys=( escrow_usdc pool_usdc pool_usdc_salt invoice_set_pool_initialized invoice_set_escrow_initialized )
+      _clear_keys=( escrow_usdc pool_usdc pool_usdc_salt invoice_set_pool_initialized invoice_set_escrow_initialized escrow_set_invoice_initialized )
       ;;
     xlm_pair)
-      _clear_keys=( escrow_xlm pool_xlm pool_xlm_salt invoice_set_pool_initialized invoice_set_escrow_initialized )
+      _clear_keys=( escrow_xlm pool_xlm pool_xlm_salt invoice_set_pool_initialized invoice_set_escrow_initialized escrow_xlm_set_invoice_initialized )
       ;;
     invoice)
       _clear_keys=( invoice invoice_set_pool_initialized invoice_set_escrow_initialized \
+                    escrow_set_invoice_initialized escrow_xlm_set_invoice_initialized \
                     invoice_add_asset_usdc_initialized invoice_add_asset_xlm_initialized \
                     invoice_set_agent_registry_initialized )
       ;;
@@ -745,6 +746,24 @@ echo "=== Wiring USDC escrow_contract into invoice_contract ==="
 invoke_init "invoice_set_escrow" "$INVOICE_ID" \
   -- set_escrow_contract \
   --escrow_contract "$ESCROW_USDC_ID"
+
+if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "usdc_pair" ]; then
+  echo ""
+  echo "=== Wiring USDC invoice_contract into escrow_contract ==="
+  invoke_init "escrow_set_invoice" "$ESCROW_USDC_ID" \
+    -- set_invoice_contract \
+    --invoice_contract "$INVOICE_ID"
+fi
+
+if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "xlm_pair" ]; then
+  if [ -n "${ESCROW_XLM_ID:-}" ]; then
+    echo ""
+    echo "=== Wiring XLM invoice_contract into escrow_contract ==="
+    invoke_init "escrow_xlm_set_invoice" "$ESCROW_XLM_ID" \
+      -- set_invoice_contract \
+      --invoice_contract "$INVOICE_ID"
+  fi
+fi
 
 # Without allow-listing, create rejects every invoice with UnsupportedAsset.
 # add_supported_asset is itself idempotent on-chain (a no-op for an asset

@@ -32,6 +32,13 @@ impl EscrowContract {
     /// there is no window in which the instance exists unconfigured, so no
     /// one can front-run initialization.
     ///
+    /// Escrow configuration follows the required two-phase initialization path:
+    /// 1. Construction: `__constructor(admin, pool_contract, usdc_asset)` atomically
+    ///    initializes the contract instance on deployment.
+    /// 2. Invoice reference configuration: `set_invoice_contract(invoice_contract)`
+    ///    is invoked by the admin to pin the invoice contract ([`DataKey::InvoiceContract`])
+    ///    and enforce distinctness across all configured references.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `admin` - The admin address for this contract.
@@ -42,7 +49,8 @@ impl EscrowContract {
     /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `InvalidConfig` if `pool_contract`, `usdc_asset`, and `admin` are not distinct addresses.
+    /// * `InvalidConfig` if `pool_contract`, `usdc_asset`, and `admin` are not distinct addresses,
+    ///   or if any of them alias this contract's own address.
     ///   A panic here aborts the deployment transaction, so no misconfigured
     ///   instance is ever created.
     ///   `AlreadyInitialized` is unreachable from this entry point (the
@@ -80,65 +88,6 @@ impl EscrowContract {
         // #867: every other contract announces initialization; escrow must
         // too, so an indexer sees admin/pool/asset without reading storage.
         events::contract_initialized(&env, &admin, &pool_contract, &usdc_asset);
-    }
-
-    /// Initializes the escrow contract with required references, including the invoice contract.
-    ///
-    /// Provides the explicit initialization path writing `InvoiceContract`
-    /// along with `Admin`, `PoolContract`, and `UsdcAsset`.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `admin` - The admin address for this contract.
-    /// * `pool_contract` - The pool contract address.
-    /// * `usdc_asset` - The USDC asset address.
-    /// * `invoice_contract` - The invoice contract address.
-    ///
-    /// # Auth
-    /// Requires authorization from `admin`.
-    ///
-    /// # Panics
-    /// * `AlreadyInitialized` if the contract has already been initialized or constructed.
-    /// * `InvalidConfig` if any of `admin`, `pool_contract`, `usdc_asset`, `invoice_contract`,
-    ///   or this escrow contract alias each other.
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        pool_contract: Address,
-        usdc_asset: Address,
-        invoice_contract: Address,
-    ) {
-        require_not_paused(&env);
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, EscrowError::AlreadyInitialized);
-        }
-        if pool_contract == usdc_asset
-            || pool_contract == admin
-            || usdc_asset == admin
-            || invoice_contract == admin
-            || invoice_contract == pool_contract
-            || invoice_contract == usdc_asset
-            || invoice_contract == env.current_contract_address()
-            || pool_contract == env.current_contract_address()
-            || usdc_asset == env.current_contract_address()
-            || admin == env.current_contract_address()
-        {
-            panic_with_error!(&env, EscrowError::InvalidConfig);
-        }
-        admin.require_auth();
-        env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage()
-            .instance()
-            .set(&DataKey::PoolContract, &pool_contract);
-        env.storage()
-            .instance()
-            .set(&DataKey::UsdcAsset, &usdc_asset);
-        env.storage()
-            .instance()
-            .set(&DataKey::InvoiceContract, &invoice_contract);
-        Self::extend_instance_ttl(&env);
-        events::contract_initialized(&env, &admin, &pool_contract, &usdc_asset);
-        events::invoice_contract_set(&env, &admin, &invoice_contract);
     }
 
     /// Get a token client for the USDC asset stored in the contract.
@@ -256,7 +205,7 @@ impl EscrowContract {
     /// Returns the invoice contract address configured on escrow or pool.
     ///
     /// Returns the stored [`DataKey::InvoiceContract`] reference if configured
-    /// (via [`Self::initialize`] or [`Self::set_invoice_contract`]). If unconfigured,
+    /// (via [`Self::set_invoice_contract`]). If unconfigured,
     /// falls back to reading from the configured pool's own `get_invoice_contract`
     /// view (issue #820).
     ///
@@ -321,7 +270,7 @@ impl EscrowContract {
     /// * `InvalidConfig` if `invoice_contract` collides with the admin, the
     ///   pool contract, the USDC asset, or this escrow contract — mirroring
     ///   the distinct-address rule enforced at deploy time via
-    ///   [`Self::__constructor`](Self::__constructor) and [`Self::initialize`](Self::initialize).
+    ///   [`Self::__constructor`](Self::__constructor).
     ///
     /// # Returns
     /// * `()` - No value is returned. Emits `invoice_contract_set`.
@@ -586,7 +535,7 @@ impl EscrowContract {
         );
 
         // Issue #997: when the admin pinned the invoice contract reference
-        // via `set_invoice_contract` or `initialize`, the pool-resolved address
+        // via `set_invoice_contract`, the pool-resolved address
         // must match it — a pool whose configuration drifted from the stored
         // reference is a misconfiguration to reject, not a licence to redirect repayments.
         // Deployments that never pinned a reference keep the #820 behaviour.
