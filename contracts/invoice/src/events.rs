@@ -1,3 +1,9 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
 pub fn invoice_created(
@@ -108,6 +114,11 @@ pub fn invoice_expired(env: &Env, invoice_id: &BytesN<32>) {
 pub fn expiry_window_set(env: &Env, window: u64) {
     env.events()
         .publish((Symbol::new(env, "expiry_window_set"),), window);
+}
+
+pub fn default_grace_seconds_set(env: &Env, seconds: u64) {
+    env.events()
+        .publish((Symbol::new(env, "default_grace_seconds_set"),), seconds);
 }
 
 /// Emitted once per `batch_create` call, after the per-invoice

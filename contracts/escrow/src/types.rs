@@ -112,4 +112,18 @@ pub enum DataKey {
     /// renumber every later variant and orphan the keys already written by
     /// deployed ledgers.
     IssuerReleased(BytesN<32>),
+    /// Invoice contract reference pinned by the admin as defense-in-depth for
+    /// `release_to_pool` (#997). Instance key; value type: `Address`.
+    ///
+    /// Written by [`EscrowContract::set_invoice_contract`] (admin-authenticated).
+    /// `release_to_pool` still resolves the invoice contract it authorizes
+    /// from the pool's `get_invoice_contract` view (#820), but when a pin is
+    /// stored here that resolved address must equal the pin or the call is
+    /// rejected with [`EscrowError::InvalidConfig`](crate::EscrowError::InvalidConfig) —
+    /// so a pool whose invoice-contract configuration drifted from the
+    /// escrow admin's pin cannot silently redirect repayments.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 7) — see the note on [`DataKey::IssuerReleased`].
+    InvoiceContract,
 }
