@@ -507,6 +507,35 @@ impl RegistryContract {
         }
     }
 
+    /// Returns the verification status of an address.
+    ///
+    /// Reads the profile entry from persistent storage and, when the entry
+    /// exists, extends its TTL using the same threshold and target duration
+    /// as the other profile reads ([`get_profile`](Self::get_profile),
+    /// [`is_verified`](Self::is_verified)) so applications that poll this
+    /// view cannot let actively-accessed profiles expire (#984).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The address to look up.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * Does not panic — unregistered addresses are reported as
+    ///   `Unregistered`. No profile entry is created and no TTL is extended
+    ///   for a profile that does not exist.
+    ///
+    /// # Returns
+    /// * `VerificationStatus` - `Unregistered` when no profile is stored for
+    ///   `address`, otherwise `Verified`, `Revoked`, or `Pending` decoded
+    ///   from the stored profile flags.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let status = client.get_verification_status(&issuer);
+    /// ```
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
         let key = DataKey::Profile(address);
         match env.storage().persistent().get::<_, Profile>(&key) {
@@ -759,15 +788,17 @@ impl RegistryContract {
     /// `address_reinstated` event so integrators can distinguish
     /// reinstatement from a generic verification toggle.
     ///
-    /// Like `revoke`, it is guarded by an idempotency check (#606): it only
-    /// operates on profiles whose `revoked` flag is set. Calling it on a
-    /// profile that was never revoked — a `Pending` profile or one that is
-    /// already `Verified` — is a no-op that returns `true` without writing
-    /// storage or emitting `address_reinstated`. This keeps `reinstate` from
-    /// being used as an undocumented alternate path to verify a `Pending`
-    /// profile (use `verify_profile` for that), and keeps the
-    /// `address_reinstated` event honest for off-chain indexers: it is only
-    /// ever emitted for an actual un-revocation.
+    /// # Permitted state transition (#982)
+    ///
+    /// `reinstate` accepts exactly one transition: **`Revoked -> Verified`**.
+    /// Profiles that are currently `Pending` (never completed verification)
+    /// or already `Verified` are rejected with
+    /// `RegistryError::InvalidProfileState` before any storage write. This
+    /// keeps `reinstate` from being used as an undocumented alternate path
+    /// to approve a `Pending` profile (use `verify_profile` for that) or as
+    /// a second verification for an already-`Verified` profile, and keeps
+    /// the `address_reinstated` event honest for off-chain indexers: it is
+    /// only ever emitted for an actual un-revocation.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -782,11 +813,14 @@ impl RegistryContract {
     /// * `RegistryError::NotInitialized` if the contract admin is not set
     ///   (contract was never initialized).
     /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    /// * `RegistryError::InvalidProfileState` if the stored profile is not
+    ///   currently revoked (`Pending` or `Verified`). The check runs before
+    ///   any state mutation, so a rejected call leaves the profile
+    ///   unchanged.
     ///
     /// # Returns
-    /// * `bool` - `true` when the profile is verified or the call required no
-    ///   action: a successful reinstatement, an already-verified profile, or
-    ///   a never-revoked (`Pending`) profile left untouched.
+    /// * `bool` - `true` when a revoked profile has been reinstated to
+    ///   verified.
     ///
     /// # Example
     /// ```ignore
@@ -802,8 +836,12 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        // #982: only `Revoked -> Verified` is permitted. Reject `Pending` and
+        // already-`Verified` profiles with a typed state error before any
+        // mutation, so reinstate can never approve a profile that never
+        // completed verification nor act as a second verification.
         if !profile.revoked() {
-            return true;
+            panic_with_error!(&env, RegistryError::InvalidProfileState);
         }
         profile.set_verified(true);
         profile.set_revoked(false);
