@@ -3,8 +3,9 @@
 extern crate std;
 
 use crate::{
-    DataKey, Profile, RegistryContract, RegistryContractClient, Role, VerificationStatus,
-    MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN, TTL_EXTEND_TO, TTL_THRESHOLD,
+    DataKey, Profile, RegistryContract, RegistryContractClient, RegistryError, Role,
+    VerificationStatus, MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN,
+    TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -985,6 +986,42 @@ fn test_duplicate_registration_panics() {
 // ============== CROSS-ROLE REGISTRATION GUARD (Issue #189) ==============
 
 #[test]
+fn test_register_issuer_then_buyer_preserves_issuer_profile() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let original_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Original issuer")
+        )
+    ];
+    let attempted_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Buyer attempt")
+        )
+    ];
+    env.ledger().set_timestamp(100);
+    client.register_issuer(&issuer, &original_metadata);
+    let before = client.get_profile(&issuer);
+    assert_eq!(before.registered_at, 100);
+
+    env.ledger().set_timestamp(200);
+    assert_eq!(
+        client.try_register_buyer(&issuer, &attempted_metadata),
+        Err(Ok(RegistryError::AlreadyRegistered.into()))
+    );
+
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.role(), Role::Issuer);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.registered_at, before.registered_at);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_register_issuer_then_buyer_panics() {
     let env = Env::default();
@@ -1043,6 +1080,42 @@ fn test_register_issuer_then_buyer_panics() {
         },
     }]);
     client.register_buyer(&issuer, &metadata);
+}
+
+#[test]
+fn test_register_buyer_then_issuer_preserves_buyer_profile() {
+    let (env, _admin, client) = setup();
+    let buyer = Address::generate(&env);
+    let original_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Original buyer")
+        )
+    ];
+    let attempted_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Issuer attempt")
+        )
+    ];
+    env.ledger().set_timestamp(100);
+    client.register_buyer(&buyer, &original_metadata);
+    let before = client.get_profile(&buyer);
+    assert_eq!(before.registered_at, 100);
+
+    env.ledger().set_timestamp(200);
+    assert_eq!(
+        client.try_register_issuer(&buyer, &attempted_metadata),
+        Err(Ok(RegistryError::AlreadyRegistered.into()))
+    );
+
+    let after = client.get_profile(&buyer);
+    assert_eq!(after.role(), Role::Buyer);
+    assert_eq!(after.packed_flags, before.packed_flags);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.registered_at, before.registered_at);
 }
 
 #[test]
@@ -1154,7 +1227,7 @@ fn test_batch_register_issuers_all_new() {
 
     let entries = vec![
         &env,
-        (issuer1.clone(), metadata1),
+        (issuer1.clone(), metadata1.clone()),
         (issuer2.clone(), metadata2),
         (issuer3.clone(), metadata3),
     ];
@@ -1169,6 +1242,7 @@ fn test_batch_register_issuers_all_new() {
     assert_eq!(client.get_profile(&issuer1).role(), crate::Role::Issuer);
     assert_eq!(client.get_profile(&issuer2).role(), crate::Role::Issuer);
     assert_eq!(client.get_profile(&issuer3).role(), crate::Role::Issuer);
+    assert_eq!(client.get_profile(&issuer1).metadata, metadata1);
 }
 
 #[test]
