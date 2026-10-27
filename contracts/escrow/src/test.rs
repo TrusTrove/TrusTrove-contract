@@ -2797,3 +2797,84 @@ fn test_datakey_invoice_contract_discriminant_is_preserved() {
     let restored = DataKey::from_val(&env, &val);
     assert!(matches!(restored, DataKey::InvoiceContract));
 }
+
+#[test]
+fn test_invoice_only_redeployment_pins_new_address_and_allows_release_to_pool() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = env.register(MockCaller, ());
+    let pool = env.register(poolmock::MockPool, ());
+    let old_invoice = env.register(MockCaller, ());
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&old_invoice);
+    let issuer = env.register(MockCaller, ());
+    let usdc = env.register(MockToken, ());
+
+    // Seed pool balance
+    let pool_bal_key = BalanceKey(pool.clone());
+    env.as_contract(&usdc, || {
+        env.storage()
+            .persistent()
+            .set(&pool_bal_key, &10_000_000_000_000i128);
+    });
+
+    // Deploy escrow with constructor (admin, pool, usdc)
+    let contract_id = env.register(EscrowContract, (admin.clone(), pool.clone(), usdc.clone()));
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // Initial deployment: admin pins the initial invoice contract
+    client.set_invoice_contract(&old_invoice);
+    assert_eq!(client.get_invoice_contract(), old_invoice);
+
+    let invoice_id = generate_invoice_id(&env, 108);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // Simulate invoice-only redeployment (--only invoice):
+    // 1. A new invoice contract is deployed
+    let new_invoice = env.register(MockCaller, ());
+    // 2. Pool is wired with the new invoice contract
+    poolmock::MockPoolClient::new(&env, &pool).set_invoice_contract(&new_invoice);
+    // 3. Surviving escrow is wired with the new invoice contract via set_invoice_contract
+    client.set_invoice_contract(&new_invoice);
+
+    // Assert the new address is pinned on the surviving escrow
+    assert_eq!(client.get_invoice_contract(), new_invoice);
+
+    // Settlement via release_to_pool succeeds with new invoice authorization (no InvalidConfig)
+    let pool_before = get_balance(&env, &usdc, &pool);
+    assert!(client.release_to_pool(&invoice_id, &amount));
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(
+        get_balance(&env, &usdc, &pool) - pool_before,
+        amount as i128
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_invoice_only_redeployment_updates_pinned_recipient_validation() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = env.register(MockCaller, ());
+    let pool = env.register(poolmock::MockPool, ());
+    let old_invoice = env.register(MockCaller, ());
+    let new_invoice = env.register(MockCaller, ());
+    let usdc = env.register(MockToken, ());
+
+    let contract_id = env.register(EscrowContract, (admin.clone(), pool.clone(), usdc.clone()));
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    // Initially pinned to old invoice
+    client.set_invoice_contract(&old_invoice);
+
+    // Invoice-only redeployment: repin to new invoice
+    client.set_invoice_contract(&new_invoice);
+    assert_eq!(client.get_invoice_contract(), new_invoice);
+
+    // release_to_issuer must reject recipient matching new_invoice (#7 InvalidRecipient)
+    let invoice_id = generate_invoice_id(&env, 109);
+    client.lock(&invoice_id, &1_000_000_000, &new_invoice);
+    client.release_to_issuer(&invoice_id, &new_invoice);
+}
