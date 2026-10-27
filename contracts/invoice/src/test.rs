@@ -382,6 +382,33 @@ fn test_get_attestation_persists_signed_payload_and_submission_time() {
 // ============== FAILURE-PATH TESTS FOR submit_attestation ==============
 
 #[test]
+fn test_submit_attestation_rejects_malformed_payload_with_typed_error() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // This is valid ScVal XDR but the wrong value type for AttestationPayload.
+    let payload = 0u32.to_xdr(&env);
+    let signature = BytesN::from_array(&env, &[0u8; 65]);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload, &signature);
+    let err = result
+        .expect_err("malformed payload must be rejected")
+        .expect("rejection should be a typed InvoiceError");
+
+    assert_eq!(err, InvoiceError::InvalidAmount.into());
+    assert!(client.get_attestation(&invoice_id).is_none());
+    let contract_id = client.address.clone();
+    let emitted_attestation = env.events().all().iter().any(|event| {
+        let (contract, topics, _) = event;
+        if contract != contract_id {
+            return false;
+        }
+        let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        topic0 == Symbol::new(&env, "attestation_submitted")
+    });
+    assert!(!emitted_attestation);
+}
+#[test]
 #[should_panic(expected = "Error(Contract, #21)")]
 fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
     let (env, client, issuer, buyer, _, usdc) = setup();
