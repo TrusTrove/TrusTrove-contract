@@ -94,6 +94,36 @@ Profile {
 }
 ```
 
+#### Batch issuer registration
+
+`batch_register_issuers` accepts a `Vec<(Address, Map<String, String>)>` of
+issuer addresses and metadata maps. The stored admin must authorize the call.
+Each batch may contain at most 50 entries; an empty batch is valid. All
+metadata maps are validated before registration: each may contain at most 20
+entries, with nonempty keys and values, keys no longer than 64 characters, and
+values no longer than 512 characters. Each validated metadata map is stored on
+its newly created issuer profile.
+
+Addresses already registered are skipped. If an address is repeated within a
+batch, its first occurrence registers it and subsequent occurrences are
+skipped. The returned `Vec<Address>` contains skipped addresses in the same
+order they were encountered in the input. For example, given an existing
+address followed by a new address twice, the result is `[existing, new]`:
+
+```rust,ignore
+let entries = vec![
+  &env,
+  (existing.clone(), map![&env]),
+  (new_issuer.clone(), map![&env]),
+  (new_issuer.clone(), map![&env]),
+];
+let skipped: Vec<Address> = client.batch_register_issuers(&entries);
+assert_eq!(skipped, vec![&env, existing, new_issuer]);
+```
+
+The exact skipped-vector behavior, including an address already stored and a
+duplicate within the batch, is covered by
+`test_batch_register_issuers_duplicate_accounting_and_event_counts`.
 #### Profile Flags
 
 `packed_flags` is a `u32` bitmask that encodes three boolean values. The bit

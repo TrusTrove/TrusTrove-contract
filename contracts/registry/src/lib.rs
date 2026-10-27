@@ -150,12 +150,48 @@ impl RegistryContract {
         true
     }
 
-    // Returns the list of addresses that were skipped (already registered) so
-    // the caller knows exactly which entries were not processed (#66).
-    //
-    // Only freshly created profiles are appended to the issuer enumeration
-    // index; entries skipped as already-registered are never indexed twice
-    // (#841).
+    /// Batch-registers issuer profiles.
+    ///
+    /// Each input is an `(Address, Map<String, String>)` pair. At most 50
+    /// entries are accepted per call; an empty batch is valid. Only the stored
+    /// admin may call this method, and the admin must authorize the call.
+    ///
+    /// Every metadata map is validated before any profile is created. A map
+    /// may contain at most 20 entries; keys and values must be nonempty, keys
+    /// may be at most 64 characters, and values may be at most 512 characters.
+    /// Validated metadata maps are stored on newly created profiles.
+    ///
+    /// Addresses already registered before the call are skipped. If an
+    /// address occurs more than once in the batch, its first occurrence is
+    /// registered and later occurrences are skipped. The returned vector
+    /// contains skipped addresses in input encounter order.
+    ///
+    /// # Panics
+    /// * `RegistryError::BatchSizeExceeded` if `entries.len() > 50`.
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    /// * `RegistryError::InvalidMetadata` if any supplied metadata map is
+    ///   invalid. Validation happens before registration, so no profiles are
+    ///   created when any map is invalid.
+    ///
+    /// # Returns
+    /// * `Vec<Address>` - Addresses skipped because they were already
+    ///   registered, in input encounter order.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let entries = vec![
+    ///     &env,
+    ///     (existing.clone(), map![&env]),
+    ///     (new_issuer.clone(), map![&env]),
+    ///     (new_issuer.clone(), map![&env]),
+    /// ];
+    /// let skipped: Vec<Address> = client.batch_register_issuers(&entries);
+    /// assert_eq!(skipped, vec![&env, existing, new_issuer]);
+    /// ```
+    ///
+    /// Only newly created profiles are appended to the issuer enumeration
+    /// index; skipped addresses are never indexed twice.
     pub fn batch_register_issuers(
         env: Env,
         entries: Vec<(Address, Map<String, String>)>,
