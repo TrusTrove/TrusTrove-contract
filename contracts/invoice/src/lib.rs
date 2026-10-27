@@ -1292,6 +1292,8 @@ impl InvoiceContract {
     /// * `InvoiceError::AttestationExpired` if the ledger timestamp is
     ///   already past the payload's `valid_until` (issue #823); equality
     ///   on the boundary second is accepted.
+    /// * `InvoiceError::InvalidRiskScore` if the payload's `risk_score` is
+    ///   greater than 10,000.
     /// * `InvoiceError::UntrustedSigner` if the recovered signer is not an
     ///   active agent in the agent-registry, or its registered pubkey
     ///   doesn't match the recovered key.
@@ -1324,6 +1326,9 @@ impl InvoiceContract {
 
         let decoded: AttestationPayload = AttestationPayload::from_xdr(&env, &payload)
             .unwrap_or_else(|_| panic_with_error!(&env, InvoiceError::InvalidAmount));
+        if decoded.risk_score > 10_000 {
+            panic_with_error!(&env, InvoiceError::InvalidRiskScore);
+        }
         if decoded.domain_separator != BytesN::from_array(&env, &ATTESTATION_DOMAIN_SEPARATOR) {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
         }

@@ -381,6 +381,89 @@ fn test_get_attestation_persists_signed_payload_and_submission_time() {
 
 // ============== FAILURE-PATH TESTS FOR submit_attestation ==============
 
+fn signed_attestation_for_risk_score(
+    env: &Env,
+    client: &InvoiceContractClient,
+    invoice_id: &BytesN<32>,
+    risk_score: u32,
+) -> (soroban_sdk::Bytes, BytesN<65>) {
+    let agent_id = Symbol::new(env, "risk_score_agent");
+    let registry_id = env.register(MockAgentRegistry, ());
+    MockAgentRegistryClient::new(env, &registry_id).register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(env),
+        },
+    );
+    client.set_agent_registry_contract(&registry_id);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score,
+        evidence_hash: BytesN::from_array(env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    (payload_bytes, BytesN::from_array(env, &sig_bytes))
+}
+
+#[test]
+fn test_submit_attestation_accepts_and_stores_zero_risk_score() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) = signed_attestation_for_risk_score(&env, &client, &invoice_id, 0);
+
+    client.submit_attestation(&invoice_id, &payload, &signature);
+
+    assert_eq!(client.get_attestation(&invoice_id).unwrap().risk_score, 0);
+}
+
+#[test]
+fn test_submit_attestation_accepts_and_stores_maximum_risk_score() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) =
+        signed_attestation_for_risk_score(&env, &client, &invoice_id, 10_000);
+
+    client.submit_attestation(&invoice_id, &payload, &signature);
+
+    assert_eq!(
+        client.get_attestation(&invoice_id).unwrap().risk_score,
+        10_000
+    );
+}
+
+#[test]
+fn test_submit_attestation_rejects_risk_score_above_maximum_with_typed_error() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) =
+        signed_attestation_for_risk_score(&env, &client, &invoice_id, 10_001);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload, &signature);
+    let err = result
+        .expect_err("risk score above 10,000 must be rejected")
+        .expect("rejection should be a typed InvoiceError");
+    assert_eq!(err, InvoiceError::InvalidRiskScore.into());
+    assert!(client.get_attestation(&invoice_id).is_none());
+}
+
 #[test]
 #[should_panic(expected = "Error(Contract, #21)")]
 fn test_submit_attestation_untrusted_signer_wrong_pubkey() {
