@@ -1464,7 +1464,14 @@ fn test_create_registry_external_failure() {
     let result = env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
         &client.address,
         &Symbol::new(&env, "create"),
-        (issuer.clone(), buyer.clone(), face_value, due_date, usdc_asset.clone()).into_val(&env),
+        (
+            issuer.clone(),
+            buyer.clone(),
+            face_value,
+            due_date,
+            usdc_asset.clone(),
+        )
+            .into_val(&env),
     );
 
     // The registry raises contract error 99 via panic_with_error!; that trap
@@ -1488,8 +1495,7 @@ fn test_create_registry_external_failure() {
             .unwrap_or(0)
     });
     assert_eq!(
-        final_counter,
-        initial_counter,
+        final_counter, initial_counter,
         "Counter must not advance on registry failure"
     );
 
