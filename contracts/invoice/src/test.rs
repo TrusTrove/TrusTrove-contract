@@ -1437,12 +1437,11 @@ fn test_create_registry_external_failure() {
 
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
-
-    let contract_id = env.register_contract(None, InvoiceContract);
-    let client = InvoiceContractClient::new(&env, &contract_id);
-
     let admin = Address::generate(&env);
-    client.initialize(&admin, &failing_registry_id);
+
+    // Deploy invoice contract with constructor (issue #827 migration)
+    let contract_id = env.register(InvoiceContract, (admin.clone(), failing_registry_id.clone()));
+    let client = InvoiceContractClient::new(&env, &contract_id);
 
     let usdc_asset = env.register_contract(None, MockToken);
     client.add_supported_asset(&usdc_asset);
@@ -1451,13 +1450,12 @@ fn test_create_registry_external_failure() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
     // Capture initial Counter state
-    let initial_counter: u64 = env
-        .as_contract(&client.address, || {
-            env.storage()
-                .instance()
-                .get(&crate::DataKey::Counter)
-                .unwrap_or(0)
-        });
+    let initial_counter: u64 = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&crate::DataKey::Counter)
+            .unwrap_or(0)
+    });
 
     // Record event count before the call
     let events_before = env.events().all().len();
@@ -1466,9 +1464,19 @@ fn test_create_registry_external_failure() {
     let result = env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
         &client.address,
         &Symbol::new(&env, "create"),
-        (issuer.clone(), buyer.clone(), face_value, due_date, usdc_asset.clone()).into_val(&env),
+        (
+            issuer.clone(),
+            buyer.clone(),
+            face_value,
+            due_date,
+            usdc_asset.clone(),
+        )
+            .into_val(&env),
     );
-    assert!(result.is_err(), "registry failure must cause transaction to fail");
+    assert!(
+        result.is_err(),
+        "registry failure must cause transaction to fail"
+    );
 
     // Document and assert the expected host vs contract error boundary:
     // The registry trap causes a host-level contract error (not a Soroban InvoiceError).
@@ -1490,13 +1498,12 @@ fn test_create_registry_external_failure() {
     );
 
     // Verify Counter did not advance
-    let final_counter: u64 = env
-        .as_contract(&client.address, || {
-            env.storage()
-                .instance()
-                .get(&crate::DataKey::Counter)
-                .unwrap_or(0)
-        });
+    let final_counter: u64 = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&crate::DataKey::Counter)
+            .unwrap_or(0)
+    });
     assert_eq!(
         final_counter, initial_counter,
         "Counter should not advance on registry failure"
