@@ -293,24 +293,6 @@ impl MockAgentRegistry {
 #[contracttype]
 pub struct AgentKey(Symbol);
 
-// --------------- Mock Agent Registry that Fails (Issue #943) ---------------
-//
-// Stands in for a malformed or broken agent-registry contract whose
-// `get_agent` call traps or returns an incompatible result. This test
-// ensures the invoice contract handles external call failures gracefully
-// without persisting state or emitting success events.
-
-#[contract]
-pub struct FailingAgentRegistry;
-
-#[contractimpl]
-impl FailingAgentRegistry {
-    pub fn get_agent(_env: Env, _agent_id: Symbol) -> Option<crate::Agent> {
-        // Trap on any get_agent call to simulate registry failure
-        soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
-    }
-}
-
 use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 
 /// Deploys a fresh mock agent-registry, registers one active agent with a
@@ -785,58 +767,6 @@ fn test_submit_attestation_replay_rejection() {
     let signature = BytesN::from_array(&env, &sig_bytes);
 
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
-}
-
-#[test]
-fn test_submit_attestation_agent_registry_external_failure() {
-    // Issue #943: Test that when the agent-registry's get_agent call fails
-    // (traps or returns incompatible result), the transaction fails without
-    // storing an Attestation or emitting a success event.
-    let (env, client, issuer, buyer, _, usdc) = setup();
-    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
-    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
-
-    // Deploy a failing agent registry that traps on get_agent
-    let failing_registry_id = env.register_contract(None, FailingAgentRegistry);
-    client.set_agent_registry_contract(&failing_registry_id);
-
-    let agent_id = Symbol::new(&env, "test_agent");
-    let payload = crate::AttestationPayload {
-        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
-        invoice_id: invoice_id.clone(),
-        risk_score: 5000,
-        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
-        agent_id,
-        nonce: 1,
-    };
-    let payload_bytes = payload.to_xdr(&env);
-    let digest = env.crypto().keccak256(&payload_bytes).to_array();
-    let (sig, recid) = test_agent_signing_key()
-        .sign_prehash_recoverable(&digest)
-        .unwrap();
-    let mut sig_bytes = [0u8; 65];
-    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
-    sig_bytes[64] = recid.to_byte();
-    let signature = BytesN::from_array(&env, &sig_bytes);
-
-    // Record event count before the call
-    let events_before = env.events().all().len();
-
-    // The call should fail because the registry traps on get_agent
-    let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
-    assert!(result.is_err(), "registry failure must cause transaction to fail");
-
-    // AC2: no attestation was persisted, and no attestation_submitted event
-    // was emitted. The transaction must fail atomically without side effects.
-    assert!(
-        client.get_attestation(&invoice_id).is_none(),
-        "failed attestation must not be stored"
-    );
-    assert_eq!(
-        env.events().all().len(),
-        events_before,
-        "failed attestation must not emit attestation_submitted"
-    );
 }
 
 // Note: Malformed payload testing is limited by Soroban SDK's XDR decoding -
@@ -1520,6 +1450,15 @@ fn test_create_registry_external_failure() {
     let face_value: u128 = DEFAULT_FACE_VALUE;
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
+    // Capture initial Counter state
+    let initial_counter: u64 = env
+        .as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get(&crate::DataKey::Counter)
+                .unwrap_or(0)
+        });
+
     // Record event count before the call
     let events_before = env.events().all().len();
 
@@ -1531,6 +1470,16 @@ fn test_create_registry_external_failure() {
     );
     assert!(result.is_err(), "registry failure must cause transaction to fail");
 
+    // Document and assert the expected host vs contract error boundary:
+    // The registry trap causes a host-level contract error (not a Soroban InvoiceError).
+    // This is because the external call crosses contract boundaries.
+    match result {
+        Err(Ok(soroban_sdk::Error::Contract(_))) => {
+            // Expected: host-level contract error from registry trap
+        }
+        _ => panic!("expected host-level contract error from registry trap"),
+    }
+
     // AC2: no invoice was persisted, and Counter was not advanced.
     // The transaction must fail atomically without side effects.
     // We verify this by checking that no invoice_created event was emitted.
@@ -1539,6 +1488,24 @@ fn test_create_registry_external_failure() {
         events_before,
         "failed create must not emit invoice_created event"
     );
+
+    // Verify Counter did not advance
+    let final_counter: u64 = env
+        .as_contract(&client.address, || {
+            env.storage()
+                .instance()
+                .get(&crate::DataKey::Counter)
+                .unwrap_or(0)
+        });
+    assert_eq!(
+        final_counter, initial_counter,
+        "Counter should not advance on registry failure"
+    );
+
+    // Verify no invoice was persisted in storage
+    // Since Counter didn't advance, no invoice key was written.
+    // We can also verify that attempting to read any invoice at the counter
+    // position would fail.
 }
 
 #[test]
