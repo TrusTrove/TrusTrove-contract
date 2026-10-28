@@ -1433,23 +1433,26 @@ fn test_create_registry_external_failure() {
     env.mock_all_auths();
 
     // Deploy a failing registry that traps on is_verified
-    let failing_registry_id = env.register_contract(None, FailingRegistry);
+    let failing_registry_id = env.register(FailingRegistry, ());
 
     let issuer = Address::generate(&env);
     let buyer = Address::generate(&env);
     let admin = Address::generate(&env);
 
     // Deploy invoice contract with constructor (issue #827 migration)
-    let contract_id = env.register(InvoiceContract, (admin.clone(), failing_registry_id.clone()));
+    let contract_id = env.register(
+        InvoiceContract,
+        (admin.clone(), failing_registry_id.clone()),
+    );
     let client = InvoiceContractClient::new(&env, &contract_id);
 
-    let usdc_asset = env.register_contract(None, MockToken);
+    let usdc_asset = env.register(MockToken, ());
     client.add_supported_asset(&usdc_asset);
 
     let face_value: u128 = DEFAULT_FACE_VALUE;
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
 
-    // Capture initial Counter state
+    // Capture initial Counter state (initialized to 0 by constructor).
     let initial_counter: u64 = env.as_contract(&client.address, || {
         env.storage()
             .instance()
@@ -1457,47 +1460,27 @@ fn test_create_registry_external_failure() {
             .unwrap_or(0)
     });
 
-    // Record event count before the call
-    let events_before = env.events().all().len();
-
-    // The call should fail because the registry traps on is_verified
+    // The call should fail because the registry traps on is_verified.
     let result = env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
         &client.address,
         &Symbol::new(&env, "create"),
-        (
-            issuer.clone(),
-            buyer.clone(),
-            face_value,
-            due_date,
-            usdc_asset.clone(),
-        )
-            .into_val(&env),
-    );
-    assert!(
-        result.is_err(),
-        "registry failure must cause transaction to fail"
+        (issuer.clone(), buyer.clone(), face_value, due_date, usdc_asset.clone()).into_val(&env),
     );
 
-    // Document and assert the expected host vs contract error boundary:
-    // The registry trap causes a host-level contract error (not a Soroban InvoiceError).
-    // This is because the external call crosses contract boundaries.
-    match result {
-        Err(Ok(soroban_sdk::Error::Contract(_))) => {
-            // Expected: host-level contract error from registry trap
-        }
-        _ => panic!("expected host-level contract error from registry trap"),
-    }
-
-    // AC2: no invoice was persisted, and Counter was not advanced.
-    // The transaction must fail atomically without side effects.
-    // We verify this by checking that no invoice_created event was emitted.
+    // The registry raises contract error 99 via panic_with_error!; that trap
+    // propagates through require_verified's infallible invoke_contract and is
+    // caught at the outer try_invoke_contract as Err(Ok(_)) — a captured
+    // contract error, not a raw host trap (Err(Err(_))).
+    // Host/contract error boundary: the failing cross-contract call surfaces as
+    // a Soroban contract error with code 99, not as an InvoiceError variant.
     assert_eq!(
-        env.events().all().len(),
-        events_before,
-        "failed create must not emit invoice_created event"
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(99))),
+        "registry trap must surface as contract error 99"
     );
 
-    // Verify Counter did not advance
+    // AC2: Counter did not advance — the increment happens only after both
+    // require_verified calls pass, so a trap at the first one leaves it untouched.
     let final_counter: u64 = env.as_contract(&client.address, || {
         env.storage()
             .instance()
@@ -1505,14 +1488,49 @@ fn test_create_registry_external_failure() {
             .unwrap_or(0)
     });
     assert_eq!(
-        final_counter, initial_counter,
-        "Counter should not advance on registry failure"
+        final_counter,
+        initial_counter,
+        "Counter must not advance on registry failure"
     );
 
-    // Verify no invoice was persisted in storage
-    // Since Counter didn't advance, no invoice key was written.
-    // We can also verify that attempting to read any invoice at the counter
-    // position would fail.
+    // AC2: No invoice was persisted. save_invoice (persistent storage write)
+    // only runs after the Counter increment, which itself only runs after both
+    // require_verified calls pass. Because the registry trapped first, the
+    // DataKey::Invoice entry for the would-be invoice id was never written.
+    // The invoice id is deterministic: sha256(issuer_xdr || buyer_xdr ||
+    // face_value_be || due_date_be || counter_be || asset_xdr) with counter=0.
+    // We verify the persistent-storage absence directly.
+    let issuer_xdr = issuer.clone().to_xdr(&env);
+    let buyer_xdr = buyer.clone().to_xdr(&env);
+    let asset_xdr = usdc_asset.clone().to_xdr(&env);
+    let mut hash_input = soroban_sdk::Bytes::new(&env);
+    hash_input.append(&issuer_xdr);
+    hash_input.append(&buyer_xdr);
+    hash_input.extend_from_array(&face_value.to_be_bytes());
+    hash_input.extend_from_array(&due_date.to_be_bytes());
+    hash_input.extend_from_array(&initial_counter.to_be_bytes());
+    hash_input.append(&asset_xdr);
+    let candidate_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
+
+    let invoice_absent = env.as_contract(&client.address, || {
+        !env.storage()
+            .persistent()
+            .has(&crate::DataKey::Invoice(candidate_id.clone()))
+    });
+    assert!(
+        invoice_absent,
+        "no invoice must be persisted when registry traps during create"
+    );
+
+    // AC2: No invoice_created event was emitted (the event fires only after
+    // save_invoice, which was never reached). SDK >=22 resets the event buffer
+    // per top-level invocation, so the failed create must produce no events.
+    let events_after = env.events().all();
+    assert_eq!(
+        events_after.len(),
+        0,
+        "failed create must not emit any invoice contract events"
+    );
 }
 
 #[test]
