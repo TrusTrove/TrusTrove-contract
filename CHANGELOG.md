@@ -32,7 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parties can move a share holder's allowance under the spender's own
   auth (#756)
 - `pool`: SEP-41 metadata `decimals`, `name` and `symbol`, all three supplied
-  to `initialize` and stored per instance, so a pool funding an asset with
+  to the constructor (`__constructor` since #827, formerly `initialize`) and
+  stored per instance, so a pool funding an asset with
   other than 7 decimals reports the precision its shares actually have
   (#757)
 - `pool`: `allowance_approved` event emitted on every successful
@@ -42,14 +43,56 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   while funded, `None` before funding and after repayment/default (#839)
 - `pool`: `protocol_fee_updated` event assertion coverage for
   `set_protocol_fee` (#767)
-- Deployment scripts now pass the full `pool.initialize` argument list
-  (`funding_asset`, `registry_contract`, `treasury`, `min_initial_deposit`,
+- Deployment scripts now pass the full `pool` constructor argument list
+  (`__constructor` since #827, formerly `initialize`: `funding_asset`,
+  `registry_contract`, `treasury`, `min_initial_deposit`,
   `share_name`, `share_symbol`, `share_decimals`)
 
 ### Changed
 
-- `pool.initialize` accepts three new arguments: `share_name`, `share_symbol`
+- `registry`, `invoice`, `escrow`, `pool` and `pool_factory`: the `initialize`
+  entry point is replaced by a protocol `__constructor`, so deployment and
+  initialization are now a single atomic transaction (issue #827). There is
+  no longer a window in which a deployed contract exists but is uninitialized,
+  the `AlreadyInitialized` error codes are unreachable (kept as reserved
+  discriminants), and `scripts/deploy.sh` / `scripts/deploy.ps1` deploy each
+  contract with its constructor arguments — pre-computing the pool's
+  salt-derived address so escrow can be constructed against it in one step.
+  In-place `upgrade` calls never re-run the constructor; storage migrations
+  need an explicit entry point (see `docs/STORAGE.md`, Upgrade Path).
+- `pool`'s constructor (`__constructor` since #827, formerly `initialize`)
+  accepts three new arguments: `share_name`, `share_symbol`
   and `share_decimals`
+- `invoice`: **breaking, attestation wire format (v2).** `AttestationPayload`
+  gains `contract_address`, `network_id` and `valid_until`, and
+  `ATTESTATION_DOMAIN_SEPARATOR` is bumped from `…v1_` to `…v2_`. Agents in
+  the `underwrite-contract` repo must emit the new layout in lockstep;
+  v1-signed payloads no longer decode (#822, #823). See
+  `docs/AGENT_REGISTRY_INTERFACE.md` for the normative spec
+- `invoice`: `create` now rejects any `face_value < MIN_FACE_VALUE`
+  (100 000 stroops = 0.01 USDC) with `InvalidFaceValue`, instead of only
+  rejecting zero (#824)
+- `scripts/deploy.sh` / `scripts/verify.sh`: after every `initialize` the
+  deployer's own address is read back from the chain via `get_admin` and a
+  mismatch aborts the deployment; `verify.sh` now compares `get_admin`
+  against the deployer for registry, invoice, both pools and both escrows
+  instead of just printing it (#825)
+
+### Security
+
+- `invoice`: attestation signatures are now bound to the verifying contract
+  instance and network id, closing cross-deployment/cross-network replay of
+  attestations (`PayloadBindingMismatch`, new error #29) (#822)
+- `invoice`: attestations expire. `valid_until` (seconds, ledger timestamp)
+  is enforced at `submit_attestation` and again at
+  `list_for_financing`/`batch_list_for_financing` with the new
+  `AttestationExpired` error (#30) (#823)
+- `invoice`: dust face values that can never be funded (pool's
+  `funded_amount` rounds them to zero) can no longer be created to bloat
+  the issuer/buyer/status indexes (#824)
+- `scripts`: front-run initialization of freshly deployed contracts is
+  detected post-`initialize` by asserting on-chain `get_admin` equals the
+  deployer, with an explicit redeploy procedure on mismatch (#825)
 
 ### Testing
 
@@ -59,6 +102,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `invoice`: verify repayment balances before, at, and after maturity through
   the real pool and escrow, including installments and large-value overflow
   regression coverage (#948)
+
+- `pool`: cover the refund-transfer failure path of
+  `receive_repayment_with_refund` with a token stub that fails *after*
+  applying its balance moves, proving the settlement accounting
+  (`TotalDeposits`, `TotalFunded`, `ActiveInvoiceCount`, the `FundedInvoice`
+  entry) and the buyer's balance are rolled back together with the failed
+  transfer, so a failed refund cannot leave a partially settled invoice (#968)
+
+- `pool`: cover the `get_lp_position` share-price overflow at the public view
+  boundary with a seeded overflowing state (total shares, total deposits and
+  LP shares), asserting the typed `PoolError::Overflow` (#13) and that the
+  failed read leaves the pool state untouched (#972)
 
 - `pool.deposit` gained regression coverage pinning the behaviour the
   internal `mint` helper refactor relies on: the `lp_deposited` event

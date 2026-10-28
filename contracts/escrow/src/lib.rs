@@ -26,7 +26,18 @@ pub struct EscrowContract;
 
 #[contractimpl]
 impl EscrowContract {
-    /// Initializes the escrow contract and stores required contract references.
+    /// Constructs the escrow contract and stores required contract references.
+    ///
+    /// Runs atomically at deploy time (Soroban protocol constructor, #827):
+    /// there is no window in which the instance exists unconfigured, so no
+    /// one can front-run initialization.
+    ///
+    /// Escrow configuration follows the required two-phase initialization path:
+    /// 1. Construction: `__constructor(admin, pool_contract, usdc_asset)` atomically
+    ///    initializes the contract instance on deployment.
+    /// 2. Invoice reference configuration: `set_invoice_contract(invoice_contract)`
+    ///    is invoked by the admin to pin the invoice contract ([`DataKey::InvoiceContract`])
+    ///    and enforce distinctness across all configured references.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -38,22 +49,31 @@ impl EscrowContract {
     /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `AlreadyInitialized` if the contract has already been initialized.
-    /// * `InvalidConfig` if `pool_contract`, `usdc_asset`, and `admin` are not distinct addresses.
+    /// * `InvalidConfig` if `pool_contract`, `usdc_asset`, and `admin` are not distinct addresses,
+    ///   or if any of them alias this contract's own address.
+    ///   A panic here aborts the deployment transaction, so no misconfigured
+    ///   instance is ever created.
+    ///   `AlreadyInitialized` is unreachable from this entry point (the
+    ///   protocol invokes the constructor exactly once) and is kept only for
+    ///   error-code stability.
     ///
     /// # Returns
     /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin, &pool, &usdc);
+    /// // Deploy-and-construct in a single operation:
+    /// // env.register(EscrowContract, (admin, pool, usdc))
     /// ```
-    pub fn initialize(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
+    pub fn __constructor(env: Env, admin: Address, pool_contract: Address, usdc_asset: Address) {
         require_not_paused(&env);
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, EscrowError::AlreadyInitialized);
-        }
-        if pool_contract == usdc_asset || pool_contract == admin || usdc_asset == admin {
+        if pool_contract == usdc_asset
+            || pool_contract == admin
+            || usdc_asset == admin
+            || pool_contract == env.current_contract_address()
+            || usdc_asset == env.current_contract_address()
+            || admin == env.current_contract_address()
+        {
             panic_with_error!(&env, EscrowError::InvalidConfig);
         }
         admin.require_auth();
@@ -182,14 +202,34 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the pool contract address is unset.
     ///
+    /// Returns the invoice contract address configured on escrow or pool.
+    ///
+    /// Returns the stored [`DataKey::InvoiceContract`] reference if configured
+    /// (via [`Self::set_invoice_contract`]). If unconfigured,
+    /// falls back to reading from the configured pool's own `get_invoice_contract`
+    /// view (issue #820).
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if neither invoice contract nor pool contract address is set.
+    ///
     /// # Returns
-    /// * `Address` - The invoice contract address configured on the pool.
+    /// * `Address` - The invoice contract address.
     ///
     /// # Example
     /// ```ignore
     /// let invoice = client.get_invoice_contract();
     /// ```
     pub fn get_invoice_contract(env: Env) -> Address {
+        if let Some(invoice) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            return invoice;
+        }
         let pool: Address = env
             .storage()
             .instance()
@@ -200,6 +240,63 @@ impl EscrowContract {
             &Symbol::new(&env, "get_invoice_contract"),
             Vec::new(&env),
         )
+    }
+
+    /// Pins the invoice contract reference used to validate `release_to_pool`
+    /// (#997) and `release_to_issuer`.
+    ///
+    /// Defense-in-depth on top of issue #820: `release_to_pool` resolves the
+    /// invoice contract from the pool's own `get_invoice_contract` view and
+    /// requires its authorization. Storing the expected reference here lets
+    /// the escrow admin validate that resolution — when a pin is stored and
+    /// the pool's view drifts from it, settlement is rejected with
+    /// `InvalidConfig` instead of silently following the pool's
+    /// configuration.
+    ///
+    /// Optional by design: a deployment wired before this entry point existed
+    /// keeps the #820 behaviour (pool-resolved authorization) until the
+    /// admin pins a reference; no re-initialization is required.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_contract` - The invoice contract address to pin.
+    ///
+    /// # Auth
+    /// * Requires `admin.require_auth()` — only the stored admin may pin or
+    ///   repin the reference.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the contract has not been initialized.
+    /// * `InvalidConfig` if `invoice_contract` collides with the admin, the
+    ///   pool contract, the USDC asset, or this escrow contract — mirroring
+    ///   the distinct-address rule enforced at deploy time via
+    ///   [`Self::__constructor`](Self::__constructor).
+    ///
+    /// # Returns
+    /// * `()` - No value is returned. Emits `invoice_contract_set`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_invoice_contract(&invoice);
+    /// ```
+    pub fn set_invoice_contract(env: Env, invoice_contract: Address) {
+        require_not_paused(&env);
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        let pool = Self::get_pool_contract(env.clone());
+        let usdc = Self::get_usdc_asset(env.clone());
+        if invoice_contract == admin
+            || invoice_contract == pool
+            || invoice_contract == usdc
+            || invoice_contract == env.current_contract_address()
+        {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &invoice_contract);
+        events::invoice_contract_set(&env, &admin, &invoice_contract);
+        Self::extend_instance_ttl(&env);
     }
 
     /// Locks USDC in escrow against a funded invoice.
@@ -239,7 +336,7 @@ impl EscrowContract {
         }
 
         let usdc = Self::usdc_client(&env);
-        usdc.transfer(&pool, &env.current_contract_address(), &(amount as i128));
+        usdc.transfer(&pool, env.current_contract_address(), &(amount as i128));
 
         let record = EscrowRecord {
             invoice_id: invoice_id.clone(),
@@ -279,7 +376,7 @@ impl EscrowContract {
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if no escrow record exists for the invoice.
-    /// * `InvalidRecipient` if issuer is escrow or pool contract address.
+    /// * `InvalidRecipient` if issuer is escrow, pool, invoice contract, or token asset address.
     /// * `InvalidRecipient` if issuer does not match the stored issuer address.
     /// * `InvalidAmount` if the stored amount exceeds `i128::MAX` (checked
     ///   conversion fails before any transfer or record removal).
@@ -295,8 +392,19 @@ impl EscrowContract {
         require_not_paused(&env);
         let pool = Self::require_pool_auth(&env);
 
-        if issuer == env.current_contract_address() || issuer == pool {
+        let usdc = Self::get_usdc_asset(env.clone());
+        if issuer == env.current_contract_address() || issuer == pool || issuer == usdc {
             panic_with_error!(&env, EscrowError::InvalidRecipient);
+        }
+
+        if let Some(invoice_contract) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if issuer == invoice_contract {
+                panic_with_error!(&env, EscrowError::InvalidRecipient);
+            }
         }
 
         let key = DataKey::Locked(invoice_id.clone());
@@ -306,7 +414,8 @@ impl EscrowContract {
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotFound));
 
-        if issuer != record.issuer {
+        let recorded_issuer = record.issuer.clone();
+        if issuer != recorded_issuer {
             panic_with_error!(&env, EscrowError::InvalidRecipient);
         }
 
@@ -317,7 +426,9 @@ impl EscrowContract {
         // invalid token amount.
         let amount = i128::try_from(record.amount)
             .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
-        usdc.transfer(&env.current_contract_address(), &issuer, &amount);
+        // Pay from the locked invoice record, never from the caller-supplied
+        // address after it has merely passed validation.
+        usdc.transfer(&env.current_contract_address(), &recorded_issuer, &amount);
 
         Self::append_history(
             &env,
@@ -340,7 +451,7 @@ impl EscrowContract {
             .persistent()
             .extend_ttl(&released_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
-        events::released_to_issuer(&env, &invoice_id, &issuer, record.amount);
+        events::released_to_issuer(&env, &invoice_id, &recorded_issuer, record.amount);
         true
     }
 
@@ -356,8 +467,14 @@ impl EscrowContract {
     /// the live `Locked` record (principal still in escrow) or the
     /// [`DataKey::IssuerReleased`] marker written by
     /// [`Self::release_to_issuer`] (principal already paid out). Whichever
-    /// exists is consumed, so `release_to_pool` can succeed at most once per
+    /// exists is consumed, so a full settlement can succeed at most once per
     /// funded invoice.
+    ///
+    /// Repayment may be partial: when a live lock holds more than
+    /// `repayment_amount`, the record is kept with its `amount` reduced by the
+    /// repaid portion and its original `locked_at` unchanged, so the escrow
+    /// still custodies the outstanding principal. Repaying the remainder (or
+    /// any amount at least equal to the residual) removes the record.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -373,11 +490,19 @@ impl EscrowContract {
     /// direct caller — never by an unrelated address, and never by a
     /// buyer-signed transaction pretending to carry the pool's authorization.
     ///
+    /// When the admin has pinned a reference with
+    /// [`Self::set_invoice_contract`] (#997), that pin is validated against
+    /// the pool-resolved address, so settlement additionally requires the
+    /// pool's configuration to match the escrow admin's pin.
+    ///
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
     /// * `NotFound` if neither a lock record nor an issuer-release marker
     ///   exists for the invoice (unknown invoice or replayed release).
-    /// * `InvalidAmount` if `repayment_amount` is zero.
+    /// * `InvalidAmount` if `repayment_amount` is zero or exceeds `i128::MAX`.
+    /// * `InvalidConfig` if a pinned invoice contract (see
+    ///   [`Self::set_invoice_contract`]) differs from the invoice contract
+    ///   configured on the pool (#997).
     ///
     /// # Returns
     /// * `bool` - `true` when funds are returned.
@@ -403,7 +528,29 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::PoolContract)
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
-        let invoice_contract: Address = Self::get_invoice_contract(env.clone());
+        let pool_resolved: Address = env.invoke_contract(
+            &pool,
+            &Symbol::new(&env, "get_invoice_contract"),
+            Vec::new(&env),
+        );
+
+        // Issue #997: when the admin pinned the invoice contract reference
+        // via `set_invoice_contract`, the pool-resolved address
+        // must match it — a pool whose configuration drifted from the stored
+        // reference is a misconfiguration to reject, not a licence to redirect repayments.
+        // Deployments that never pinned a reference keep the #820 behaviour.
+        let invoice_contract: Address = if let Some(pinned) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if pinned != pool_resolved {
+                panic_with_error!(&env, EscrowError::InvalidConfig);
+            }
+            pinned
+        } else {
+            pool_resolved
+        };
         invoice_contract.require_auth();
 
         if repayment_amount == 0 || repayment_amount > i128::MAX as u128 {
@@ -412,8 +559,11 @@ impl EscrowContract {
 
         let key = DataKey::Locked(invoice_id.clone());
         let released_key = DataKey::IssuerReleased(invoice_id.clone());
-        let locked = env.storage().persistent().has(&key);
-        if !locked && !env.storage().persistent().has(&released_key) {
+        // Repayment can be partial: when a live lock covers more than this
+        // repayment, the residual stays locked (with its original
+        // `locked_at`) so custody keeps matching the outstanding principal.
+        let mut record: Option<EscrowRecord> = env.storage().persistent().get(&key);
+        if record.is_none() && !env.storage().persistent().has(&released_key) {
             panic_with_error!(&env, EscrowError::NotFound);
         }
 
@@ -431,8 +581,16 @@ impl EscrowContract {
             repayment_amount,
             None,
         );
-        if locked {
-            env.storage().persistent().remove(&key);
+        if let Some(mut record) = record.take() {
+            if repayment_amount < record.amount {
+                record.amount -= repayment_amount;
+                env.storage().persistent().set(&key, &record);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            } else {
+                env.storage().persistent().remove(&key);
+            }
         } else {
             env.storage().persistent().remove(&released_key);
         }
@@ -466,9 +624,15 @@ impl EscrowContract {
     /// let paid = client.was_released_to_issuer(&invoice_id);
     /// ```
     pub fn was_released_to_issuer(env: Env, invoice_id: BytesN<32>) -> bool {
-        env.storage()
-            .persistent()
-            .has(&DataKey::IssuerReleased(invoice_id))
+        let key = DataKey::IssuerReleased(invoice_id);
+        if env.storage().persistent().has(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            true
+        } else {
+            false
+        }
     }
 
     /// Handles an escrow default by returning the locked funds to the pool.
@@ -532,7 +696,10 @@ impl EscrowContract {
         }
 
         let now = env.ledger().timestamp();
-        if now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
+        // A timestamp rollback (or a malformed record seeded with a future
+        // `locked_at`) must fail the grace-period check as a typed
+        // authorization error, not underflow `now - locked_at`.
+        if now < record.locked_at || now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
@@ -749,11 +916,16 @@ impl EscrowContract {
     /// let locked = client.get_locked(&invoice_id);
     /// ```
     pub fn get_locked(env: Env, invoice_id: BytesN<32>) -> u128 {
-        env.storage()
-            .persistent()
-            .get::<_, EscrowRecord>(&DataKey::Locked(invoice_id))
-            .map(|r| r.amount)
-            .unwrap_or(0)
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(r) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                r.amount
+            }
+            None => 0,
+        }
     }
 
     /// Returns the timestamp when the escrow was locked for an invoice.
@@ -776,11 +948,16 @@ impl EscrowContract {
     /// let locked_at = client.get_locked_at(&invoice_id);
     /// ```
     pub fn get_locked_at(env: Env, invoice_id: BytesN<32>) -> u64 {
-        env.storage()
-            .persistent()
-            .get::<_, EscrowRecord>(&DataKey::Locked(invoice_id))
-            .map(|r| r.locked_at)
-            .unwrap_or(0)
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(r) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                r.locked_at
+            }
+            None => 0,
+        }
     }
 
     /// Returns the history of escrow events for an invoice.
@@ -804,10 +981,15 @@ impl EscrowContract {
     /// ```
     pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
         let key = DataKey::History(invoice_id);
-        env.storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env))
+        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
+            Some(history) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                history
+            }
+            None => Vec::new(&env),
+        }
     }
 
     fn append_history(

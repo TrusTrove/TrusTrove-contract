@@ -8,17 +8,17 @@
 pub use trusttrove_ttl::EXTEND_TO as TTL_EXTEND_TO;
 pub use trusttrove_ttl::THRESHOLD as TTL_THRESHOLD;
 
-/// Default minimum initial deposit floor, used when `initialize` is not given
-/// an explicit `min_initial_deposit` and as the fallback for pool instances
-/// that predate the admin-configurable minimum. Prevents share-price griefing
+/// Default minimum initial deposit floor, used as the fallback for pool
+/// instances predating the admin-configurable minimum (the `__constructor`
+/// always supplies an explicit `min_initial_deposit`). Prevents share-price griefing
 /// by requiring the initial deposit in an empty pool to be at least this
 /// floor.
 ///
 /// This value assumes 7-decimal stroops (1 unit = 10_000_000 stroops), which
 /// only holds for the pool's originally supported asset. Under the factory
 /// model each instance funds a different asset, so a deploy for an asset with
-/// different decimals should pass its own `min_initial_deposit` to
-/// `initialize` rather than rely on this default.
+/// different decimals should pass its own `min_initial_deposit` to its
+/// `__constructor` rather than rely on this default.
 pub const DEFAULT_MIN_INITIAL_DEPOSIT: u128 = 10_000_000;
 
 /// Maximum protocol fee in basis points (2000 bps = 20%).
@@ -49,7 +49,8 @@ pub const SUGGESTED_DISCOUNT_FLOOR_BPS: u32 = 100;
 pub const SUGGESTED_DISCOUNT_CEILING_BPS: u32 = 5_000;
 
 /// Default decimal places reported by an LP share token's SEP-41 `decimals()`,
-/// used as the fallback for pool instances that predate `initialize` taking a
+/// used as the fallback for pool instances that predate the constructor
+/// taking a
 /// `share_decimals` argument.
 ///
 /// Shares are issued against the funding asset's base units — 1 USDC is
