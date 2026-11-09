@@ -22,4 +22,10 @@ pub enum RegistryError {
     /// The `caller` passed to `verify_profile` is neither the stored admin
     /// nor the stored verifier (#732).
     Unauthorized = 9,
+    /// The requested profile state transition is not permitted (#982).
+    /// `reinstate` only accepts profiles that are currently revoked
+    /// (`Revoked -> Verified`); calling it on a `Pending` or already
+    /// `Verified` profile fails with this error instead of silently
+    /// approving a profile that never completed verification.
+    InvalidProfileState = 10,
 }

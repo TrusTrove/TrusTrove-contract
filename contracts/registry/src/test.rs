@@ -286,6 +286,8 @@ fn test_reinstate_unregistered_panics() {
     client.reinstate(&unknown);
 }
 
+// ============== ISSUE #982: reinstate ONLY ALLOWS Revoked -> Verified ==============
+
 #[test]
 fn test_reinstate_on_pending_profile_does_not_verify() {
     let (env, _admin, client) = setup();
