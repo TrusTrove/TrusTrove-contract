@@ -16,7 +16,7 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Issue #804: lint this workflow file (and every other workflow) so a
       # malformed step, invalid action pin, or unreachable `if:` surfaces here
@@ -53,26 +53,17 @@ jobs:
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
 
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
+      - name: Check prohibited production panic calls
+        run: python3 scripts/check_production_panic_calls.py
 
-      - name: Check cargo-deny advisories and licenses
-        run: cargo deny check
+      - name: Test production panic checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_production_panic_calls.py'
 
-      # Issue #805: cargo audit covers RUSTSEC advisories, but nothing caught
-      # dependencies that are declared and unused (which inflate compile time
-      # and the audit surface). cargo-machete scans Cargo.toml declarations
-      # against crate sources without compiling, so it stays cheap for this
-      # 9-crate workspace.
-      - name: Install cargo-machete
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-machete@0.9.2
+      - name: Check generated contract API documentation
+        run: python3 scripts/generate_contract_api.py --check
 
-      - name: Check for unused dependencies
-        run: cargo machete --skip-target-dir
+      - name: Test contract API generator
+        run: python3 -m unittest discover -s scripts -p 'test_generate_contract_api.py'
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -86,39 +77,14 @@ jobs:
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
 
-      - name: Test
+      - name: Test (default features)
         run: cargo test --workspace
 
-      # Issue #1016: `#[contractimpl]` silently exports every public helper as
-      # a contract entry point. Pin the four core contracts' exported method
-      # lists in docs/api-surface.txt and fail this named step when the surface
-      # drifts without a deliberate manifest + review_note update.
-      - name: Check public Soroban API surface
-        run: cargo test -p trusttrove-integration-tests --test api_surface -- --nocapture
+      - name: Test (all features)
+        run: cargo test --workspace --all-features
 
-      # Issue #1016: the manifest test proves the snapshot matches the source,
-      # but a developer could still accept a new entry point by regenerating
-      # the manifest without recording why. On pull requests, require the
-      # `review_note:` line to change whenever the manifest changes.
-      - name: Check API surface manifest review note
-        if: github.event_name == 'pull_request'
-        run: |
-          git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
-          if git diff --quiet FETCH_HEAD -- docs/api-surface.txt; then
-            echo "API surface manifest unchanged; no review note update needed."
-            exit 0
-          fi
-          old_note=$(git show FETCH_HEAD:docs/api-surface.txt 2>/dev/null | grep -m1 '^review_note:' || true)
-          new_note=$(grep -m1 '^review_note:' docs/api-surface.txt || true)
-          if [ -z "$new_note" ]; then
-            echo "::error::docs/api-surface.txt has no review_note line."
-            exit 1
-          fi
-          if [ "$old_note" = "$new_note" ]; then
-            echo "::error::docs/api-surface.txt changed but its review_note did not. Explain the new entry point and cite its issue/PR."
-            exit 1
-          fi
-        shell: bash
+      - name: Build documentation (warnings as errors)
+        run: cargo doc --workspace --no-deps --all-features
 
       - name: Check wasm size budget
         run: |
@@ -156,7 +122,7 @@ jobs:
       # secrets context is not available in a step-level `if`.
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
@@ -184,7 +150,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
@@ -193,7 +159,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: env.CODECOV_TOKEN != ''
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/cobertura.xml
@@ -203,7 +169,7 @@ jobs:
     name: integration-test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1

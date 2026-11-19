@@ -3,6 +3,10 @@ use soroban_sdk::contracterror;
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PoolError {
+    /// No longer reachable from the contract: state setup moved to the
+    /// protocol constructor (`__constructor`, #827), which the ledger invokes
+    /// exactly once at deploy time. The code stays reserved so error numbers
+    /// never get re-assigned to a different meaning.
     AlreadyInitialized = 1,
     NotInitialized = 2,
     InvalidAmount = 4,
@@ -36,4 +40,20 @@ pub enum PoolError {
     /// cap bounds the worst-case cost of a single batch so a caller cannot
     /// exceed the per-transaction budget by batching.
     BatchSizeExceeded = 26,
+    /// `receive_repayment_with_refund` was given a refund destination that
+    /// does not match the buyer recorded on the configured invoice contract
+    /// (`get_buyer`). The refund is invoice-computed data, so its destination
+    /// must be the invoice's canonical buyer (#969).
+    BuyerMismatch = 27,
+    /// The invoice's `discount_bps` is below the admin-configured minimum
+    /// discount floor (`DataKey::MinDiscountBps`, set via `set_min_discount`),
+    /// so funding it would deploy LP capital at less than the pool's yield
+    /// floor. Never triggers while the floor is at its default of `0`
+    /// (issue #829).
+    DiscountBelowMinimum = 28,
+    /// `handle_default` asked the invoice contract to persist the `Defaulted`
+    /// status and it reported that the transition did not happen. The pool
+    /// books no loss in that case, so an invoice that is still active can
+    /// never leave the pool reporting a realised loss (#971).
+    InvoiceDefaultNotRecorded = 29,
 }

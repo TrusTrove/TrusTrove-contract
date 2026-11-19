@@ -94,6 +94,36 @@ Profile {
 }
 ```
 
+#### Batch issuer registration
+
+`batch_register_issuers` accepts a `Vec<(Address, Map<String, String>)>` of
+issuer addresses and metadata maps. The stored admin must authorize the call.
+Each batch may contain at most 50 entries; an empty batch is valid. All
+metadata maps are validated before registration: each may contain at most 20
+entries, with nonempty keys and values, keys no longer than 64 characters, and
+values no longer than 512 characters. Each validated metadata map is stored on
+its newly created issuer profile.
+
+Addresses already registered are skipped. If an address is repeated within a
+batch, its first occurrence registers it and subsequent occurrences are
+skipped. The returned `Vec<Address>` contains skipped addresses in the same
+order they were encountered in the input. For example, given an existing
+address followed by a new address twice, the result is `[existing, new]`:
+
+```rust,ignore
+let entries = vec![
+  &env,
+  (existing.clone(), map![&env]),
+  (new_issuer.clone(), map![&env]),
+  (new_issuer.clone(), map![&env]),
+];
+let skipped: Vec<Address> = client.batch_register_issuers(&entries);
+assert_eq!(skipped, vec![&env, existing, new_issuer]);
+```
+
+The exact skipped-vector behavior, including an address already stored and a
+duplicate within the batch, is covered by
+`test_batch_register_issuers_duplicate_accounting_and_event_counts`.
 #### Profile Flags
 
 `packed_flags` is a `u32` bitmask that encodes three boolean values. The bit
@@ -206,6 +236,21 @@ let status = if !profile_exists {
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
+
+#### Supported Asset Allow-List
+
+| DataKey | Type | Description | TTL extended |
+|---------|------|-------------|--------------|
+| `SupportedAsset(Address)` | `bool` | Funding-asset allow-list marker | On write (`add_supported_asset`, including idempotent re-adds) and on use (`is_supported_asset`, `create`'s `SupportedAsset` check), issue #863 |
+
+The marker is persistent storage while `SupportedAssetCount` (above,
+instance storage) is re-bumped by every admin write. Without the write and
+use-time extensions the marker could lapse underneath a still-in-use
+asset; `remove_supported_asset` early-returns on a missing marker, so the
+lapse would leave `SupportedAssetCount` permanently out of sync with
+membership (issue #863). Keep-alive strategy: bump-on-write plus
+bump-on-use, the same policy as the index keys (#832) and `StatusCount`
+(#830).
 
 #### Invoice Structure
 
@@ -386,6 +431,7 @@ The `History` vector entries are never removed — they form an append-only log 
 | `ShareName` | `String` | SEP-41 `name()` of this pool's LP share token | `initialize()` |
 | `ShareSymbol` | `String` | SEP-41 `symbol()` of this pool's LP share token | `initialize()` |
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
+| `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 
 ### Persistent Storage
 
@@ -429,6 +475,7 @@ deposit would create it.
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `FundedInvoice(BytesN<32>)` | `u128` | Funded amount keyed by invoice ID |
+| `FundedInvoiceBuyer(BytesN<32>)` | `Address` | Buyer snapshotted from the invoice contract at funding time (issue #969). `receive_repayment_with_refund` rejects a refund destination that differs from it. Removed together with `FundedInvoice` on settlement. |
 
 ### Protocol Fee & Yield Distribution Math
 
@@ -445,12 +492,12 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + (5 × number_of_LPs) + (1 × number_of_funded_invoices).**
+**Approximately 8 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
 
 In practice most pools will have:
 - 8 instance keys (constant)
 - 5 keys per active LP
-- 1 key per funded invoice (removed on repayment/default)
+- 2 keys per funded invoice (removed on repayment/default)
 
 ---
 
@@ -501,3 +548,45 @@ unchanged, and an `upgraded` event carrying the new Wasm hash is emitted. Calls
 from any address other than the stored admin fail authorization. Protect the admin
 with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
 document for the redeployment rollback procedure.
+
+### Construction vs. upgrade (issue #827)
+
+Initialization and upgrades are now distinct mechanisms:
+
+* **Fresh deploys.** Each contract's configuration keys (`Admin`, the wired
+  contract references, and the asset/metadata entries) are seeded exactly once
+  by a protocol `__constructor`, which runs automatically inside the deploy
+  transaction (`CreateContractV2` with `CreateContractArgsV2`). Deploy and
+  initialization are atomic: a contract address that exists on-chain is always fully constructed
+  and admin-authenticated, and there is no window in which a deployed contract
+  is uninitialized and exploitable. The former `initialize()` entry points no
+  longer exist; the `AlreadyInitialized` error codes remain defined but are
+  unreachable, retained only as reserved discriminants.
+* **Upgrades.** `upgrade` swaps the Wasm in place and does **not** re-run the
+  constructor — constructor arguments are part of neither the contract address
+  nor the stored configuration after deployment. Any storage migration a new
+  Wasm version requires must therefore be done explicitly (e.g. an admin-gated
+  migration entry point) rather than by re-initializing.
+
+### Upgrading a pool with in-flight funded invoices (issue #969)
+
+`FundedInvoiceBuyer` is written by `fund_invoice`, so invoices funded before
+this key existed have a live `FundedInvoice` entry but no buyer snapshot.
+`receive_repayment_with_refund` rejects a missing snapshot with
+`PoolError::BuyerMismatch`, because the destination cannot be verified.
+
+Upgrade procedure:
+
+1. Swap the pool Wasm with `upgrade(new_wasm_hash)` as usual.
+2. For every invoice that was already funded before the upgrade, call
+   `pool.backfill_funded_invoice_buyer(invoice_id)`. The entry point is
+   permissionless and moves no funds: it reads the canonical buyer from the
+   configured invoice contract (`get_buyer`) and writes only the missing
+   snapshot. It returns `false` and overwrites nothing when a snapshot already
+   exists, so repeating the call (or calling it for post-upgrade invoices) is
+   safe. It panics with `InvoiceNotFound` when the invoice has no live funded
+   entry.
+
+Until step 2 runs, an affected invoice's refundable repayment still reverts
+fail-closed; the invoice itself is otherwise unaffected and can be backfilled
+at any later point.

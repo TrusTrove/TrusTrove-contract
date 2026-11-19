@@ -3,7 +3,10 @@ use soroban_sdk::contracterror;
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EscrowError {
-    /// Returned when attempting to initialize a contract that has already been initialized.
+    /// No longer reachable: state setup moved to the protocol constructor
+    /// (`__constructor`, #827), which the ledger invokes exactly once at
+    /// deploy time. The code stays reserved so error numbers never get
+    /// re-assigned to a different meaning.
     AlreadyInitialized = 1,
     /// Returned when no escrow record exists for the given invoice ID.
     NotFound = 2,
@@ -17,7 +20,8 @@ pub enum EscrowError {
     NotInitialized = 6,
     /// Returned when releasing funds to a recipient that is invalid (e.g., not the invoice issuer).
     InvalidRecipient = 7,
-    /// Returned when attempting to initialize with colliding addresses (e.g., pool_contract == usdc_asset).
+    /// Returned when constructing (`__constructor`, issue #827) with colliding
+    /// addresses (e.g., pool_contract == usdc_asset).
     InvalidConfig = 8,
     /// Returned when `set_timeout_window` is given a zero window or one above `MAX_TIMEOUT_WINDOW_SECONDS`.
     InvalidTimeoutWindow = 9,
