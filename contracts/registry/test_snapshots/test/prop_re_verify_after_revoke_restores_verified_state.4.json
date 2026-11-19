@@ -37,16 +37,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "nB35G_YO5"
-                      },
-                      "val": {
-                        "string": "07Bd9T5qY_qctrS8"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -425,16 +416,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "nB35G_YO5"
-                            },
-                            "val": {
-                              "string": "07Bd9T5qY_qctrS8"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {

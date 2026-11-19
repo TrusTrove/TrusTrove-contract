@@ -37,7 +37,32 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "_F"
+                      },
+                      "val": {
+                        "string": "H9793B__T__D_cucP2_"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "m9_Kk"
+                      },
+                      "val": {
+                        "string": "dY_1iizI_qke3_Rb"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "y7WiSTJ_"
+                      },
+                      "val": {
+                        "string": "_a"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -134,7 +159,32 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "_F"
+                            },
+                            "val": {
+                              "string": "H9793B__T__D_cucP2_"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "m9_Kk"
+                            },
+                            "val": {
+                              "string": "dY_1iizI_qke3_Rb"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "y7WiSTJ_"
+                            },
+                            "val": {
+                              "string": "_a"
+                            }
+                          }
+                        ]
                       }
                     },
                     {

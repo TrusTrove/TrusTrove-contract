@@ -31,13 +31,54 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "function_name": "register_buyer",
+              "function_name": "register_issuer",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": []
+                  "map": [
+                    {
+                      "key": {
+                        "string": "JPh"
+                      },
+                      "val": {
+                        "string": "3_n0H"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "TJ_"
+                      },
+                      "val": {
+                        "string": "U_T_nULu_ztR776I2"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "Upt_lQwn"
+                      },
+                      "val": {
+                        "string": "_e29E_2___Ml"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "VX8_x_yC9X"
+                      },
+                      "val": {
+                        "string": "4"
+                      }
+                    },
+                    {
+                      "key": {
+                        "string": "xi_lvb8Et"
+                      },
+                      "val": {
+                        "string": "Jd0___M_u9B_h"
+                      }
+                    }
+                  ]
                 }
               ]
             }
@@ -360,7 +401,48 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": []
+                        "map": [
+                          {
+                            "key": {
+                              "string": "JPh"
+                            },
+                            "val": {
+                              "string": "3_n0H"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "TJ_"
+                            },
+                            "val": {
+                              "string": "U_T_nULu_ztR776I2"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "Upt_lQwn"
+                            },
+                            "val": {
+                              "string": "_e29E_2___Ml"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "VX8_x_yC9X"
+                            },
+                            "val": {
+                              "string": "4"
+                            }
+                          },
+                          {
+                            "key": {
+                              "string": "xi_lvb8Et"
+                            },
+                            "val": {
+                              "string": "Jd0___M_u9B_h"
+                            }
+                          }
+                        ]
                       }
                     },
                     {
@@ -368,7 +450,7 @@
                         "symbol": "packed_flags"
                       },
                       "val": {
-                        "u32": 5
+                        "u32": 4
                       }
                     },
                     {
@@ -400,7 +482,7 @@
                 {
                   "vec": [
                     {
-                      "symbol": "Buyer"
+                      "symbol": "Issuer"
                     }
                   ]
                 }
@@ -424,7 +506,7 @@
                     {
                       "vec": [
                         {
-                          "symbol": "Buyer"
+                          "symbol": "Issuer"
                         }
                       ]
                     }
@@ -453,7 +535,7 @@
                 {
                   "vec": [
                     {
-                      "symbol": "Buyer"
+                      "symbol": "Issuer"
                     }
                   ]
                 },
@@ -480,7 +562,7 @@
                     {
                       "vec": [
                         {
-                          "symbol": "Buyer"
+                          "symbol": "Issuer"
                         }
                       ]
                     },

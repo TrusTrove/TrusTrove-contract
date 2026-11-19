@@ -31,7 +31,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
-              "function_name": "register_buyer",
+              "function_name": "register_issuer",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -40,42 +40,26 @@
                   "map": [
                     {
                       "key": {
-                        "string": "B7r6hA67"
+                        "string": "WlpX5Q_"
                       },
                       "val": {
-                        "string": "J74AR_w_"
+                        "string": "8"
                       }
                     },
                     {
                       "key": {
-                        "string": "Quyj19cj_v"
+                        "string": "p"
                       },
                       "val": {
-                        "string": "1_EC_cEh_rzHa"
+                        "string": "oGG_31nu"
                       }
                     },
                     {
                       "key": {
-                        "string": "_6_f_rj3"
+                        "string": "z8_u_"
                       },
                       "val": {
-                        "string": "fw"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "__"
-                      },
-                      "val": {
-                        "string": "_ajEnyXsy__o9Ta"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "g4_37j6uY"
-                      },
-                      "val": {
-                        "string": "lqIJI_NL_W3WTDq_E0"
+                        "string": "__mrGJ_Tx22_2_5g_"
                       }
                     }
                   ]
@@ -178,42 +162,26 @@
                         "map": [
                           {
                             "key": {
-                              "string": "B7r6hA67"
+                              "string": "WlpX5Q_"
                             },
                             "val": {
-                              "string": "J74AR_w_"
+                              "string": "8"
                             }
                           },
                           {
                             "key": {
-                              "string": "Quyj19cj_v"
+                              "string": "p"
                             },
                             "val": {
-                              "string": "1_EC_cEh_rzHa"
+                              "string": "oGG_31nu"
                             }
                           },
                           {
                             "key": {
-                              "string": "_6_f_rj3"
+                              "string": "z8_u_"
                             },
                             "val": {
-                              "string": "fw"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "__"
-                            },
-                            "val": {
-                              "string": "_ajEnyXsy__o9Ta"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "g4_37j6uY"
-                            },
-                            "val": {
-                              "string": "lqIJI_NL_W3WTDq_E0"
+                              "string": "__mrGJ_Tx22_2_5g_"
                             }
                           }
                         ]
@@ -224,7 +192,7 @@
                         "symbol": "packed_flags"
                       },
                       "val": {
-                        "u32": 1
+                        "u32": 0
                       }
                     },
                     {
@@ -256,7 +224,7 @@
                 {
                   "vec": [
                     {
-                      "symbol": "Buyer"
+                      "symbol": "Issuer"
                     }
                   ]
                 }
@@ -280,7 +248,7 @@
                     {
                       "vec": [
                         {
-                          "symbol": "Buyer"
+                          "symbol": "Issuer"
                         }
                       ]
                     }
@@ -309,7 +277,7 @@
                 {
                   "vec": [
                     {
-                      "symbol": "Buyer"
+                      "symbol": "Issuer"
                     }
                   ]
                 },
@@ -336,7 +304,7 @@
                     {
                       "vec": [
                         {
-                          "symbol": "Buyer"
+                          "symbol": "Issuer"
                         }
                       ]
                     },

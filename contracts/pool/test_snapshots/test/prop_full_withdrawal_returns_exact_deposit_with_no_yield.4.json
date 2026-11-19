@@ -239,7 +239,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "u128": "209215360461"
+                  "u128": "514923132303"
                 }
               ]
             }
@@ -261,7 +261,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "u128": "209215360461"
+                  "u128": "514923132303"
                 }
               ]
             }
@@ -1215,6 +1215,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "MinDiscountBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "MinInitialDeposit"
                             }
                           ]
@@ -1407,7 +1419,7 @@
             },
             "ext": "v0"
           },
-          4095
+          2000000
         ]
       ],
       [
@@ -1452,7 +1464,7 @@
             },
             "ext": "v0"
           },
-          4095
+          2000000
         ]
       ],
       [

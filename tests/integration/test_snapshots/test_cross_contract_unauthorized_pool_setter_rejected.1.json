@@ -417,6 +417,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "MinDiscountBps"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 0
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "MinInitialDeposit"
                             }
                           ]

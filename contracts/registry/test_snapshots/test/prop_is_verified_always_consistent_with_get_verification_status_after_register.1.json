@@ -37,32 +37,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "DT_W___"
-                      },
-                      "val": {
-                        "string": "eBII4T6PeFFKuS"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_H"
-                      },
-                      "val": {
-                        "string": "vMPfe8s1Uqi_h"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_Tm"
-                      },
-                      "val": {
-                        "string": "_SE__X7841k_"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -159,32 +134,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "DT_W___"
-                            },
-                            "val": {
-                              "string": "eBII4T6PeFFKuS"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "_H"
-                            },
-                            "val": {
-                              "string": "vMPfe8s1Uqi_h"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "_Tm"
-                            },
-                            "val": {
-                              "string": "_SE__X7841k_"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
