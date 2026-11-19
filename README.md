@@ -24,7 +24,7 @@
     <img src="https://img.shields.io/codecov/c/github/TrusTrove/TrusTrove-contract?label=coverage" />
   </a>
   <img src="https://img.shields.io/badge/rust-1.85.0-orange" />
-  <img src="https://img.shields.io/badge/soroban--sdk-21.7.6-blueviolet" />
+  <img src="https://img.shields.io/badge/soroban--sdk-23.5.3-blueviolet" />
   <img src="https://img.shields.io/badge/network-Stellar%20Testnet-00c9a7" />
   <img src="https://img.shields.io/github/license/TrusTrove/TrusTrove-contract" />
 </p>
@@ -39,7 +39,7 @@
 
 ## What is TrusTrove?
 
-TrusTrove is a decentralized trade finance protocol on Stellar. SMEs tokenize unpaid invoices and receive immediate USDC funding from a shared liquidity pool. Liquidity providers deposit USDC and earn yield from discount fees when invoices repay. No banks, no brokers — four Soroban smart contracts handle everything.
+TrusTrove is a decentralized trade finance protocol on Stellar. SMEs tokenize unpaid invoices and receive immediate USDC funding from a shared liquidity pool. Liquidity providers deposit USDC and earn yield from discount fees when invoices repay. No banks, no brokers — five deployable Soroban contracts power the protocol.
 
 ---
 
@@ -148,7 +148,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
-- Requires an active risk attestation from an authorized Underwrite agent.
+- Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -193,6 +193,8 @@ handle_default(invoice_id) → bool
 set_protocol_fee(fee_bps, treasury) → bool   ← admin only
 get_protocol_fee_bps() → u32
 get_treasury() → Address
+set_min_discount(bps) → bool               ← admin only, yield floor enforced in fund_invoice (#829)
+get_min_discount_bps() → u32
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
@@ -204,6 +206,173 @@ decimals() → u32                     ← per-instance, set at initialize
 name() → String                      ← set at initialize()
 symbol() → String                    ← set at initialize()
 ```
+
+---
+
+<!-- BEGIN GENERATED CONTRACT API -->
+### Canonical public contract API
+
+Generated from current contractimpl declarations by python3 scripts/generate_contract_api.py --write.
+These are client-facing signatures: the framework-provided env: Env parameter is omitted; all other argument names/types and return types are taken from the Rust declarations. Methods without an explicit return type are shown as returning ().
+
+| Contract | Public function | Client-facing signature |
+|---|---|---|
+| Registry | `__constructor` | `__constructor(admin: Address) -> ()` |
+| Registry | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Registry | `register_issuer` | `register_issuer(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `batch_register_issuers` | `batch_register_issuers(entries: Vec<(Address, Map<String, String>)>) -> Vec<Address>` |
+| Registry | `batch_register_buyers` | `batch_register_buyers(entries: Vec<(Address, Map<String, String>)>) -> Vec<Address>` |
+| Registry | `register_buyer` | `register_buyer(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `update_profile` | `update_profile(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `update_metadata` | `update_metadata(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `get_profile` | `get_profile(address: Address) -> Profile` |
+| Registry | `is_verified` | `is_verified(address: Address) -> bool` |
+| Registry | `get_verification_status` | `get_verification_status(address: Address) -> VerificationStatus` |
+| Registry | `get_role` | `get_role(address: Address) -> Option<Role>` |
+| Registry | `get_profile_count` | `get_profile_count(role: Role) -> u32` |
+| Registry | `list_profiles` | `list_profiles(role: Role, start: u32, limit: u32) -> Vec<Address>` |
+| Registry | `revoke` | `revoke(address: Address) -> bool` |
+| Registry | `reinstate` | `reinstate(address: Address) -> bool` |
+| Registry | `verify_profile` | `verify_profile(caller: Address, address: Address, verify: bool) -> bool` |
+| Registry | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
+| Registry | `transfer_admin` | `transfer_admin(new_admin: Address) -> ()` |
+| Registry | `set_verifier` | `set_verifier(verifier: Address) -> ()` |
+| Registry | `remove_verifier` | `remove_verifier() -> ()` |
+| Registry | `get_verifier` | `get_verifier() -> Option<Address>` |
+| Registry | `pause` | `pause() -> ()` |
+| Registry | `unpause` | `unpause() -> ()` |
+| Registry | `get_admin` | `get_admin() -> Address` |
+| Invoice | `__constructor` | `__constructor(admin: Address, registry_contract: Address) -> ()` |
+| Invoice | `get_admin` | `get_admin() -> Option<Address>` |
+| Invoice | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Invoice | `get_registry_contract` | `get_registry_contract() -> Option<Address>` |
+| Invoice | `set_pool_contract` | `set_pool_contract(pool_contract: Address) -> ()` |
+| Invoice | `get_pool_contract` | `get_pool_contract() -> Option<Address>` |
+| Invoice | `set_agent_registry_contract` | `set_agent_registry_contract(agent_registry_contract: Address) -> ()` |
+| Invoice | `get_agent_registry_contract` | `get_agent_registry_contract() -> Option<Address>` |
+| Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
+| Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
+| Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
+| Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
+| Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
+| Invoice | `get_supported_asset_count` | `get_supported_asset_count() -> u32` |
+| Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
+| Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
+| Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
+| Invoice | `batch_list_for_financing` | `batch_list_for_financing(entries: Vec<(BytesN<32>, u32)>) -> Vec<BytesN<32>>` |
+| Invoice | `cancel` | `cancel(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `submit_attestation` | `submit_attestation(invoice_id: BytesN<32>, payload: Bytes, signature: BytesN<65>) -> ()` |
+| Invoice | `mark_funded` | `mark_funded(invoice_id: BytesN<32>, pool_address: Address, asset_address: Address, funded_amount: u128) -> bool` |
+| Invoice | `mark_shipped` | `mark_shipped(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `confirm_delivery` | `confirm_delivery(invoice_id: BytesN<32>, confirmer: Address) -> bool` |
+| Invoice | `repay_partial` | `repay_partial(invoice_id: BytesN<32>, amount: u128) -> bool` |
+| Invoice | `repay` | `repay(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `repay_early` | `repay_early(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `trigger_default` | `trigger_default(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `set_default_grace_seconds` | `set_default_grace_seconds(seconds: u64) -> ()` |
+| Invoice | `get_default_grace_seconds` | `get_default_grace_seconds() -> u64` |
+| Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
+| Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
+| Invoice | `expire_listing` | `expire_listing(invoice_id: BytesN<32>, caller: Address) -> bool` |
+| Invoice | `get_status` | `get_status(invoice_id: BytesN<32>) -> u32` |
+| Invoice | `has_status_membership` | `has_status_membership(status: InvoiceStatus, invoice_id: BytesN<32>) -> bool` |
+| Invoice | `get_face_value` | `get_face_value(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_remaining_balance` | `get_remaining_balance(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_repaid_amount` | `get_repaid_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
+| Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
+| Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
+| Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
+| Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
+| Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
+| Invoice | `get_invoice_count_by_buyer` | `get_invoice_count_by_buyer(address: Address) -> u32` |
+| Invoice | `get_counts` | `get_counts() -> Map<String, u64>` |
+| Invoice | `get_issuer` | `get_issuer(invoice_id: BytesN<32>) -> Address` |
+| Invoice | `get_buyer` | `get_buyer(invoice_id: BytesN<32>) -> Address` |
+| Invoice | `get_due_date` | `get_due_date(invoice_id: BytesN<32>) -> u64` |
+| Invoice | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
+| Invoice | `pause` | `pause() -> ()` |
+| Invoice | `unpause` | `unpause() -> ()` |
+| Escrow | `__constructor` | `__constructor(admin: Address, pool_contract: Address, usdc_asset: Address) -> ()` |
+| Escrow | `get_usdc_asset` | `get_usdc_asset() -> Address` |
+| Escrow | `get_admin` | `get_admin() -> Address` |
+| Escrow | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Escrow | `get_pool_contract` | `get_pool_contract() -> Address` |
+| Escrow | `get_invoice_contract` | `get_invoice_contract() -> Address` |
+| Escrow | `set_invoice_contract` | `set_invoice_contract(invoice_contract: Address) -> ()` |
+| Escrow | `lock` | `lock(invoice_id: BytesN<32>, amount: u128, issuer: Address) -> bool` |
+| Escrow | `release_to_issuer` | `release_to_issuer(invoice_id: BytesN<32>, issuer: Address) -> bool` |
+| Escrow | `release_to_pool` | `release_to_pool(invoice_id: BytesN<32>, repayment_amount: u128) -> bool` |
+| Escrow | `was_released_to_issuer` | `was_released_to_issuer(invoice_id: BytesN<32>) -> bool` |
+| Escrow | `handle_default` | `handle_default(invoice_id: BytesN<32>, caller: Address) -> bool` |
+| Escrow | `set_timeout_window` | `set_timeout_window(window: u64) -> ()` |
+| Escrow | `get_timeout_window` | `get_timeout_window() -> u64` |
+| Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
+| Escrow | `pause` | `pause() -> ()` |
+| Escrow | `unpause` | `unpause() -> ()` |
+| Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
+| Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
+| Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
+| Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
+| Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
+| Pool | `decimals` | `decimals() -> u32` |
+| Pool | `name` | `name() -> String` |
+| Pool | `symbol` | `symbol() -> String` |
+| Pool | `get_admin` | `get_admin() -> Address` |
+| Pool | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Pool | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
+| Pool | `pause` | `pause() -> ()` |
+| Pool | `unpause` | `unpause() -> ()` |
+| Pool | `get_fee_bps` | `get_fee_bps() -> u32` |
+| Pool | `get_treasury_address` | `get_treasury_address() -> Address` |
+| Pool | `get_invoice_contract` | `get_invoice_contract() -> Address` |
+| Pool | `get_escrow_contract` | `get_escrow_contract() -> Address` |
+| Pool | `deposit` | `deposit(lp: Address, usdc_amount: u128) -> u128` |
+| Pool | `preview_deposit` | `preview_deposit(usdc_amount: u128) -> u128` |
+| Pool | `preview_withdraw` | `preview_withdraw(shares: u128) -> u128` |
+| Pool | `withdraw` | `withdraw(lp: Address, shares: u128) -> u128` |
+| Pool | `transfer` | `transfer(from: Address, to: Address, amount: i128) -> ()` |
+| Pool | `transfer_shares` | `transfer_shares(from: Address, to: Address, amount: i128) -> ()` |
+| Pool | `approve` | `approve(from: Address, spender: Address, amount: i128, expiration_ledger: u32) -> ()` |
+| Pool | `allowance` | `allowance(from: Address, spender: Address) -> i128` |
+| Pool | `transfer_from` | `transfer_from(spender: Address, from: Address, to: Address, amount: i128) -> ()` |
+| Pool | `fund_invoice` | `fund_invoice(invoice_id: BytesN<32>) -> bool` |
+| Pool | `batch_fund_invoice` | `batch_fund_invoice(invoice_ids: Vec<BytesN<32>>) -> Vec<BytesN<32>>` |
+| Pool | `receive_repayment` | `receive_repayment(invoice_id: BytesN<32>, amount: u128) -> bool` |
+| Pool | `receive_repayment_with_refund` | `receive_repayment_with_refund(invoice_id: BytesN<32>, amount: u128, refund: u128, buyer: Address) -> bool` |
+| Pool | `backfill_funded_invoice_buyer` | `backfill_funded_invoice_buyer(invoice_id: BytesN<32>) -> bool` |
+| Pool | `handle_default` | `handle_default(invoice_id: BytesN<32>) -> bool` |
+| Pool | `balance` | `balance(id: Address) -> i128` |
+| Pool | `total_supply` | `total_supply() -> i128` |
+| Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
+| Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
+| Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |
+| Pool | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> Option<u128>` |
+| Pool | `set_max_utilization` | `set_max_utilization(admin: Address, new_cap_bps: u32) -> bool` |
+| Pool | `set_protocol_fee` | `set_protocol_fee(fee_bps: u32, treasury: Address) -> bool` |
+| Pool | `get_protocol_fee_bps` | `get_protocol_fee_bps() -> u32` |
+| Pool | `get_treasury` | `get_treasury() -> Address` |
+| Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
+| Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
+| Pool Factory | `__constructor` | `__constructor(admin: Address) -> ()` |
+| Pool Factory | `register_asset` | `register_asset(asset: Address, pool_wasm_hash: BytesN<32>, invoice_contract: Address, escrow_contract: Address) -> Address` |
+| Pool Factory | `register_existing_pool` | `register_existing_pool(asset: Address, pool_address: Address) -> ()` |
+| Pool Factory | `get_pool_for_asset` | `get_pool_for_asset(asset: Address) -> Option<Address>` |
+| Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
+| Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
+
+**Total: 151 public entry points across five deployable contracts.**
+
+The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
+<!-- END GENERATED CONTRACT API -->
 
 ---
 
@@ -259,7 +428,7 @@ Pool ──[shares]──► LP
 The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
 
 
-Before listing, an Underwrite agent must sign an `AttestationPayload` (containing `domain_separator`, `invoice_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`) off-chain with a secp256k1 key. Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
+Before listing, an Underwrite agent must sign an `AttestationPayload` (v2 layout: `domain_separator`, `invoice_id`, `contract_address`, `network_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`) off-chain with a secp256k1 key. `contract_address` and `network_id` bind the signature to one deployed invoice contract on one network, so attestations cannot replay across testnet/mainnet or redeploys (issue #822); `valid_until` (seconds, ledger timestamp) bounds how long the assessment unlocks listing (issue #823). Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice, and with `AttestationExpired` once the stored attestation's `valid_until` has passed. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
 
 ```
 No fund movement. Invoice status: Created → Listed.
@@ -312,6 +481,8 @@ Invoice status: → Repaid
 `repay_early` is restricted to `Confirmed` invoices strictly before `due_date`; `repay` accepts `Funded`, `Active`, or `Confirmed` at any time and also refunds the unearned discount before maturity. Partial installments accumulate in escrow and settle at the pool only when the final one clears the balance. See [Repayment Timing and Refund Math](./docs/LIMITATIONS.md#repayment-timing-and-refund-math) for the allowed statuses, formulas, and worked examples.
 
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
+
+**Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
@@ -369,12 +540,74 @@ Verify on [Stellar Expert Testnet](https://stellar.expert/explorer/testnet)
 
 ---
 
-## Quick Start
+## Asset Decimals and Amount Conversion
+
+### Seven-Decimal USDC Assumption
+
+All contracts treat USDC as having **7 decimal places**: `1 USDC = 10_000_000 stroops`.
+This assumption is enforced at the contract level and is critical for correct
+amount interpretation.
+
+### Token Interface Amount Type
+
+All amount fields across the four contract crates use `u128` and are
+**denominated in stroops** (the base unit of the funding asset). The token
+client (e.g., `soroban_sdk::token::Client`) handles the conversion between
+human-readable units and stroops, but the contracts always work in stroops.
+
+Conversion rules:
+- **Human unit → stroops**: `amount_in_stroops = amount_in_human * 10_000_000`
+- **stroops → human unit**: `amount_in_human = amount_in_stroops / 10_000_000`
+- Rounding: integer division truncates (floor), so `1 stroop = 0.0000001 USDC`;
+the smallest representable human amount is `1 USDC = 10_000_000 stroops`.
+
+### Where Conversion Is Prohibited
+
+Conversion between human units and stroops must **not** be performed inside
+contract code. All contracts operate exclusively in stroops. Any conversion
+must happen off-chain (in wallet UI, indexer, or integration code). The
+contracts will reject amounts that would overflow `u128` or violate the
+protocol's arithmetic invariants.
+
+### Deployment and Test Examples
+
+The following examples show the same USDC amount expressed in both human
+units and stroops, for use in deployment scripts and test fixtures:
+
+| Human Amount | Stroops (u128) | Context |
+|-------------|----------------|---------|
+| `1 USDC` | `10_000_000` | `DEFAULT_MIN_INITIAL_DEPOSIT` in pool tests |
+| `100 USDC` | `1_000_000_000` | Typical test deposit amount |
+| `1_000_000 USDC` | `100_000_000_000_000` | Large deposit / share price testing |
+| `10_000_000 USDC` (1M) | `10_000_000_000_000_000` | Max test deposit |
+
+**Rust test example** (from `contracts/pool/src/test.rs`):
+
+```rust
+// Deposit 10_000_000_000 stroops (= 1000 USDC)
+let shares = te.pool.deposit(&te.lp, &10_000_000_000);
+```
+
+**Deployment example** (from `scripts/deploy.sh`):
+
+```bash
+# Fund the pool with 1_000_000 USDC (10_000_000_000_000 stroops)
+as_contract(&usdc_id, || {
+    env.storage().persistent().set(&lp_bal_key, &10_000_000_000_000_000i128);
+});
+```
+
+### Summary
+- USDC = 7 decimals → 1 USDC = 10_000_000 stroops
+- All contract amounts are `u128` in stroops
+- Convert human ↔ stroops off-chain only
+- Integer division truncates; smallest human unit = 1 USDC
+
 
 ### Prerequisites
 
 - Rust 1.85.0 (required — other versions either have WASM bugs or are blocked by Stellar CLI)
-- [Stellar CLI](https://github.com/stellar/stellar-cli) (latest)
+- [Stellar CLI](https://github.com/stellar/stellar-cli) v23 or newer (the contracts build against soroban-sdk 23 / protocol 23)
 - [jq](https://jqlang.github.io/jq/download/) (latest) — required by `scripts/maintainer/update-readme-addresses.sh`, which runs automatically at the end of `deploy.sh`
 
 ### 1. Install Rust 1.85.0
@@ -542,7 +775,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 3 | `NotAuthorized` | Caller lacks required authorization |
 | 4 | `IssuerNotVerified` | Issuer is not verified in the registry contract |
 | 5 | `BuyerNotVerified` | Buyer is not verified in the registry contract |
-| 6 | `InvalidFaceValue` | Face value is zero |
+| 6 | `InvalidFaceValue` | Face value below `MIN_FACE_VALUE` (dust, zero included) |
 | 7 | `InvalidDueDate` | Due date is in the past or exceeds maximum invoice lifetime |
 | 8 | `InvalidStatusTransition` | Status does not allow the requested operation |
 | 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
@@ -565,6 +798,8 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
 | 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
+| 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
+| 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |
 
 #### Pool Contract (`PoolError`)
 
@@ -590,4 +825,3 @@ MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 ## Contributors
 
 [![Contributors](https://contrib.rocks/image?repo=TrusTrove/TrusTrove-contract)](https://github.com/TrusTrove/TrusTrove-contract/graphs/contributors)
-// fix

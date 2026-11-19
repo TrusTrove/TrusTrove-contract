@@ -16,7 +16,21 @@ jobs:
   build-and-test:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+
+      # Issue #804: lint this workflow file (and every other workflow) so a
+      # malformed step, invalid action pin, or unreachable `if:` surfaces here
+      # instead of breaking a real run. Runs before the Rust setup because it
+      # needs no toolchain, so syntax errors fail fast and cheap.
+      - name: Install actionlint
+        run: |
+          bash <(curl -sSfL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) 1.7.11
+          ./actionlint -version
+        shell: bash
+
+      - name: Lint workflow files
+        run: ./actionlint -color
+        shell: bash
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
@@ -39,6 +53,18 @@ jobs:
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
 
+      - name: Check prohibited production panic calls
+        run: python3 scripts/check_production_panic_calls.py
+
+      - name: Test production panic checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_production_panic_calls.py'
+
+      - name: Check generated contract API documentation
+        run: python3 scripts/generate_contract_api.py --check
+
+      - name: Test contract API generator
+        run: python3 -m unittest discover -s scripts -p 'test_generate_contract_api.py'
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -51,8 +77,14 @@ jobs:
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
 
-      - name: Test
+      - name: Test (default features)
         run: cargo test --workspace
+
+      - name: Test (all features)
+        run: cargo test --workspace --all-features
+
+      - name: Build documentation (warnings as errors)
+        run: cargo doc --workspace --no-deps --all-features
 
       - name: Check wasm size budget
         run: |
@@ -90,7 +122,7 @@ jobs:
       # secrets context is not available in a step-level `if`.
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
@@ -118,7 +150,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
@@ -127,7 +159,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: env.CODECOV_TOKEN != ''
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/cobertura.xml
@@ -137,7 +169,7 @@ jobs:
     name: integration-test
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@v1
