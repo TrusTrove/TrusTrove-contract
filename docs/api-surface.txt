@@ -1,0 +1,163 @@
+# TrusTrove public Soroban API surface manifest.
+#
+# Each `contract <name>` block lists every exported entry point (a public
+# function inside a `#[contractimpl]` block) for that contract, one per line
+# and sorted. `tests/integration/tests/api_surface.rs` regenerates this list
+# from the contract sources and fails on any difference, so an accidental new
+# entry point or a removed one cannot land without a deliberate snapshot
+# update.
+#
+# When the surface changes intentionally:
+#   1. Update the affected contract block(s) below.
+#   2. Replace `review_note:` with the issue/PR that justified the change,
+#      e.g. `review_note: add batch_fund_invoice (#1234)`.
+#   3. Re-run `cargo test --workspace`.
+review_note: initial manifest for issue #1016
+contract escrow
+get_admin
+get_history
+get_invoice_contract
+get_locked
+get_locked_at
+get_pool_contract
+get_timeout_window
+get_usdc_asset
+handle_default
+initialize
+lock
+pause
+release_after_timeout
+release_to_issuer
+release_to_pool
+set_invoice_contract
+set_timeout_window
+unpause
+upgrade
+was_released_to_issuer
+end
+contract invoice
+add_supported_asset
+batch_create
+batch_list_for_financing
+cancel
+confirm_delivery
+create
+expire_listing
+get
+get_admin
+get_agent_registry_contract
+get_attestation
+get_buyer
+get_by_buyer
+get_by_issuer
+get_by_status
+get_counts
+get_discount_bps
+get_due_date
+get_escrow_contract
+get_expiry_window
+get_face_value
+get_funded_amount
+get_funding_asset
+get_funding_context
+get_funding_terms
+get_invoice_count_by_buyer
+get_invoice_count_by_issuer
+get_issuer
+get_pool_contract
+get_registry_contract
+get_remaining_balance
+get_repaid_amount
+get_status
+get_supported_asset_count
+has_status_membership
+initialize
+is_supported_asset
+list_for_financing
+mark_defaulted
+mark_funded
+mark_shipped
+pause
+remove_supported_asset
+repay
+repay_early
+repay_partial
+set_agent_registry_contract
+set_escrow_contract
+set_expiry_window
+set_pool_contract
+submit_attestation
+transfer_ownership
+trigger_default
+unpause
+upgrade
+end
+contract pool
+allowance
+approve
+balance
+batch_fund_invoice
+decimals
+deposit
+fund_invoice
+get_admin
+get_escrow_contract
+get_fee_bps
+get_funded_amount
+get_funding_asset
+get_invoice_contract
+get_lp_position
+get_protocol_fee_bps
+get_stats
+get_suggested_discount_bps
+get_treasury
+get_treasury_address
+get_usdc_asset
+get_utilization_rate
+handle_default
+initialize
+name
+pause
+preview_deposit
+preview_withdraw
+receive_repayment
+receive_repayment_with_refund
+set_max_utilization
+set_protocol_fee
+symbol
+total_supply
+transfer
+transfer_from
+transfer_ownership
+transfer_shares
+unpause
+upgrade
+withdraw
+end
+contract registry
+batch_register_buyers
+batch_register_issuers
+get_admin
+get_profile
+get_profile_count
+get_role
+get_verification_status
+get_verifier
+initialize
+is_verified
+list_profiles
+pause
+register_buyer
+register_issuer
+reinstate
+remove_verifier
+revoke
+set_verifier
+transfer_admin
+transfer_ownership
+unpause
+update_metadata
+update_profile
+upgrade
+verify_profile
+end

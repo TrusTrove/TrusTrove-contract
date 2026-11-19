@@ -722,8 +722,9 @@ impl PoolContract {
     ///
     /// # Panics
     /// * `NotInitialized` if the pool is not initialized.
-    /// * `InvalidAmount` if `usdc_amount` is zero or is below the configured
-    ///   minimum for an initial deposit.
+    /// * `InvalidAmount` if `usdc_amount` is zero, exceeds `i128::MAX` (issue
+    ///   #1018 — it must be convertible to the token's `i128` amount), or is
+    ///   below the configured minimum for an initial deposit.
     /// * `MinimumDeposit` if the amount rounds down to zero shares.
     /// * `Overflow` if `usdc_amount * total_shares` overflows `u128`.
     ///
@@ -2520,7 +2521,13 @@ impl PoolContract {
     }
 
     fn shares_for_deposit(env: &Env, usdc_amount: u128) -> u128 {
-        if usdc_amount == 0 {
+        // Issue #1018: the token transfer takes an `i128`, so an amount above
+        // `i128::MAX` would wrap negative at `usdc_amount as i128` — with a
+        // lenient token that silently moves funds backwards while still
+        // minting `usdc_amount` shares. Reject it up front with the same
+        // typed error as a zero deposit, before any share math or token call
+        // (mirrors escrow's `InvalidAmount` boundary check).
+        if usdc_amount == 0 || usdc_amount > i128::MAX as u128 {
             panic_with_error!(env, PoolError::InvalidAmount);
         }
 

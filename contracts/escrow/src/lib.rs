@@ -962,6 +962,14 @@ impl EscrowContract {
 
     /// Returns the history of escrow events for an invoice.
     ///
+    /// Reading a live history entry also renews its persistent TTL (issue
+    /// #1010). History is only written by lock/release/default paths, so an
+    /// invoice that has been settled and then only read by an indexer or a
+    /// dispute workflow would otherwise let its audit log become
+    /// archival-eligible even though the record is still needed. Missing
+    /// entries stay missing — only an existing key is extended, matching the
+    /// read-triggered TTL policy used by the pool's `get_lp_position`.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice to query.
