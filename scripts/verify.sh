@@ -70,13 +70,65 @@ verify_check() {
   echo ""
 }
 
+# ---------------------------------------------------------------------------
+# On-chain admin verification (issue #825)
+#
+# `initialize` authorizes whatever admin address is passed in, so a
+# front-runner can initialize a freshly deployed contract with their own
+# admin before the deployer's initialize lands. In that case the deployer's
+# own call fails with AlreadyInitialized and every later admin operation
+# belongs to the attacker. This check reads `get_admin` back from each
+# contract and requires it to equal the deployer address.
+# ---------------------------------------------------------------------------
+DEPLOYER_ADDRESS=$("$STELLAR" keys address "$DEPLOYER_ACCOUNT" 2>&1) || {
+  echo "Error: Could not resolve address for key '$DEPLOYER_ACCOUNT': $DEPLOYER_ADDRESS" >&2
+  exit 1
+}
+DEPLOYER_ADDRESS="$(printf '%s' "$DEPLOYER_ADDRESS" | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+echo "  Deployer address : $DEPLOYER_ADDRESS"
+echo ""
+
+verify_admin_match() {
+  local name="$1"
+  local contract_id="$2"
+  local output
+
+  echo "Verifying $name admin matches deployer..."
+  if ! output=$("$STELLAR" contract invoke \
+      --id "$contract_id" \
+      --source "$DEPLOYER_ACCOUNT" \
+      --network testnet \
+      -- get_admin 2>&1); then
+    echo "  [FAIL] $name get_admin invocation failed (uninitialized or front-run?):"
+    echo "  Error: $output"
+    FAILED=1
+    echo ""
+    return
+  fi
+  output="$(printf '%s' "$output" | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+  if [ "$output" = "$DEPLOYER_ADDRESS" ]; then
+    echo "  [PASS] $name admin is the deployer ($output)"
+  else
+    echo "  [FAIL] $name admin is '$output', expected deployer '$DEPLOYER_ADDRESS'."
+    echo "         POSSIBLE FRONT-RUN INITIALIZATION — do not use this deployment;"
+    echo "         redeploy with ./scripts/deploy.sh --fresh (see DEPLOYMENT.md)."
+    FAILED=1
+  fi
+  echo ""
+}
+
 echo "=== Running Contract Verification Queries ==="
 
-# 1. Registry Contract - get_admin
-CMD_REGISTRY=("$STELLAR" contract invoke --id "$REGISTRY_CONTRACT_ID" --source "$DEPLOYER_ACCOUNT" --network testnet -- get_admin)
-verify_check "registry_contract (get_admin)" "${CMD_REGISTRY[@]}"
+# 0. Admin ownership on every initialized contract (issue #825). All four
+#    contracts expose get_admin on main.
+verify_admin_match "registry_contract" "$REGISTRY_CONTRACT_ID"
+verify_admin_match "invoice_contract" "$INVOICE_CONTRACT_ID"
+verify_admin_match "pool_usdc_contract" "$POOL_USDC_CONTRACT_ID"
+verify_admin_match "pool_xlm_contract" "$POOL_XLM_CONTRACT_ID"
+verify_admin_match "escrow_usdc_contract" "$ESCROW_USDC_CONTRACT_ID"
+verify_admin_match "escrow_xlm_contract" "$ESCROW_XLM_CONTRACT_ID"
 
-# 2. Invoice Contract - get_counts
+# 1. Invoice Contract - get_counts
 CMD_INVOICE=("$STELLAR" contract invoke --id "$INVOICE_CONTRACT_ID" --source "$DEPLOYER_ACCOUNT" --network testnet -- get_counts)
 verify_check "invoice_contract (get_counts)" "${CMD_INVOICE[@]}"
 

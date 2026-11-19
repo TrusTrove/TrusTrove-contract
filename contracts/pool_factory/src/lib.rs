@@ -1,8 +1,7 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, vec, xdr::ToXdr, Address, BytesN, Env, IntoVal,
-    String, Symbol, Vec,
+    contract, contractimpl, panic_with_error, xdr::ToXdr, Address, BytesN, Env, String, Symbol, Vec,
 };
 
 mod constants;
@@ -17,9 +16,6 @@ pub use constants::*;
 pub use errors::*;
 pub use types::*;
 
-/// Function name of the pool contract's initializer, invoked on every instance
-/// this factory deploys.
-const POOL_INITIALIZE: &str = "initialize";
 /// Function name of the invoice contract's registry getter, used by
 /// `register_asset` to resolve the registry a new pool instance must verify
 /// issuer/buyer profiles against.
@@ -30,7 +26,11 @@ pub struct PoolFactoryContract;
 
 #[contractimpl]
 impl PoolFactoryContract {
-    /// Initializes the pool factory with an admin address.
+    /// Constructs the pool factory with an admin address.
+    ///
+    /// Runs atomically at deploy time (Soroban protocol constructor, #827):
+    /// there is no window in which the factory exists without an admin, so no
+    /// one can front-run initialization.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -40,19 +40,20 @@ impl PoolFactoryContract {
     /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `AlreadyInitialized` if the contract has already been initialized.
+    /// A panic aborts the deployment transaction, so an unconfigured factory
+    /// is never created. `AlreadyInitialized` is unreachable from this entry
+    /// point (the protocol invokes the constructor exactly once) and is kept
+    /// only for error-code stability.
     ///
     /// # Returns
     /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin);
+    /// // Deploy-and-construct in a single operation:
+    /// // env.register(PoolFactoryContract, (admin,))
     /// ```
-    pub fn initialize(env: Env, admin: Address) {
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, PoolFactoryError::AlreadyInitialized);
-        }
+    pub fn __constructor(env: Env, admin: Address) {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::AssetCount, &0u32);
@@ -63,10 +64,13 @@ impl PoolFactoryContract {
     /// pool.
     ///
     /// This is the factory's core function: it deploys a fresh instance of the
-    /// pool Wasm identified by `pool_wasm_hash`, initializes it for `asset`,
-    /// and records the asset -> pool mapping so `get_pool_for_asset` (and the
-    /// invoice contract, the frontend, and any other integrator) can find the
-    /// instance later.
+    /// pool Wasm identified by `pool_wasm_hash`, constructing it for `asset`
+    /// in the same ledger operation (#827), and records the asset -> pool
+    /// mapping so `get_pool_for_asset` (and the invoice contract, the
+    /// frontend, and any other integrator) can find the instance later. The
+    /// pool's `__constructor` runs as part of the create-contract call, so
+    /// there is never an on-chain window in which a factory-deployed pool
+    /// exists without its admin and wiring.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -75,17 +79,18 @@ impl PoolFactoryContract {
     /// * `pool_wasm_hash` - Hash of the uploaded pool Wasm to deploy. Must
     ///   already be present in the ledger.
     /// * `invoice_contract` - The invoice contract the new pool funds invoices
-    ///   from. Must be initialized.
+    ///   from. Must be constructed.
     /// * `escrow_contract` - The escrow contract the new pool locks and settles
-    ///   invoice funds through. Must already be initialized with the same
-    ///   `asset`, since `pool::initialize` cross-checks the escrow's configured
-    ///   asset against its own.
+    ///   invoice funds through. Must already be constructed with the same
+    ///   `asset`, since `pool::__constructor` cross-checks the escrow's
+    ///   configured asset against its own.
     ///
     /// # Auth
-    /// Requires authorization from the admin stored at `initialize`. The
-    /// deployment needs no authorization of its own: the new instance's
+    /// Requires authorization from the admin stored at construction. The
+    /// deployment itself needs no authorization of its own: the new instance's
     /// deployer is this factory, which the caller has already authorized by
-    /// invoking `register_asset`.
+    /// invoking `register_asset`. The pool constructor's `admin.require_auth()`
+    /// is satisfied by the same signature that authorized this call.
     ///
     /// # Instance identity
     /// The instance is deployed with this factory as the deploying contract and
@@ -103,7 +108,7 @@ impl PoolFactoryContract {
     /// (a pool pointed at a registry that is not the one its invoices were
     /// checked against would reject invoices the invoice contract had already
     /// accepted). The factory's admin becomes the new pool's admin and its
-    /// initial treasury, which `pool::initialize` explicitly allows.
+    /// initial treasury, which `pool::__constructor` explicitly allows.
     ///
     /// # Panics
     /// * `NotInitialized` if the factory has not been initialized.
@@ -114,8 +119,11 @@ impl PoolFactoryContract {
     /// * `PoolError::InvalidConfiguration` if the pool rejects the resulting
     ///   address set (for example if the factory admin is also one of the
     ///   invoice/escrow/asset/registry addresses).
-    /// * `PoolError::EscrowAssetMismatch` if `escrow_contract` was initialized
+    /// * `PoolError::EscrowAssetMismatch` if `escrow_contract` was constructed
     ///   with a different asset than `asset`.
+    ///
+    /// A failure of the constructor aborts the create-contract operation, so
+    /// no half-initialized instance is recorded.
     ///
     /// # Returns
     /// * `Address` - The address of the newly deployed pool instance.
@@ -135,25 +143,34 @@ impl PoolFactoryContract {
         admin.require_auth();
         Self::assert_unregistered(&env, &asset);
 
-        // Deploy the instance with this factory as the deploying contract. The
-        // deployer address plus the salt fix the instance address, so the
-        // address is known to the caller before the transaction is even built.
+        let registry_contract = Self::registry_of(&env, &invoice_contract);
+
+        // Construct-and-deploy in one step (#827): the pool's __constructor
+        // runs inside the create-contract ledger operation, so the instance
+        // either exists fully wired or not at all. The deployer address plus
+        // the salt fix the instance address, so it is known to the caller
+        // before the transaction is even built.
         let pool_address = env
             .deployer()
             .with_current_contract(Self::asset_salt(&env, &asset))
-            .deploy(pool_wasm_hash);
+            .deploy_v2(
+                pool_wasm_hash,
+                (
+                    admin.clone(),
+                    invoice_contract.clone(),
+                    escrow_contract.clone(),
+                    asset.clone(),
+                    registry_contract,
+                    admin.clone(),
+                    DEFAULT_MIN_INITIAL_DEPOSIT,
+                    String::from_str(&env, DEFAULT_SHARE_NAME),
+                    String::from_str(&env, DEFAULT_SHARE_SYMBOL),
+                    DEFAULT_SHARE_DECIMALS,
+                ),
+            );
 
-        Self::initialize_pool(
-            &env,
-            &admin,
-            &asset,
-            &pool_address,
-            &invoice_contract,
-            &escrow_contract,
-        );
-
-        // Recorded last, so a lookup can never observe a pool that has been
-        // deployed but not yet initialized.
+        // Recorded after deployment, so a lookup can never observe a pool
+        // that failed its constructor.
         Self::record_pool(&env, &asset, &pool_address);
         events::pool_instance_created(&env, &asset, &pool_address);
         pool_address
@@ -176,7 +193,7 @@ impl PoolFactoryContract {
     /// # Panics
     /// * `NotInitialized` if the factory has not been initialized.
     /// * `AssetAlreadyRegistered` if the asset is already registered.
-    /// * `InvalidPool` if `pool_address` does not expose a pool initialized
+    /// * `InvalidPool` if `pool_address` does not expose a pool constructed
     ///   for `asset`.
     ///
     /// # Returns
@@ -358,45 +375,19 @@ impl PoolFactoryContract {
         BytesN::from_array(env, &digest.to_array())
     }
 
-    /// Initializes a freshly deployed pool instance.
+    /// Reads back the registry contract that `invoice_contract` was wired to.
     ///
-    /// Args are passed positionally to `pool::initialize`, whose signature is
-    /// `(admin, invoice_contract, escrow_contract, funding_asset,
-    /// registry_contract, treasury, min_initial_deposit, share_name,
-    /// share_symbol, share_decimals)`.
-    ///
-    /// The three share-metadata args are the factory-wide defaults documented
-    /// on `DEFAULT_SHARE_NAME`: `register_asset` is not given per-asset names,
-    /// so there is nothing more accurate to pass here.
-    fn initialize_pool(
-        env: &Env,
-        admin: &Address,
-        asset: &Address,
-        pool_address: &Address,
-        invoice_contract: &Address,
-        escrow_contract: &Address,
-    ) {
+    /// The factory derives the new pool's registry from the invoice contract
+    /// rather than taking it as a parameter, so the pool and the invoice
+    /// contract can never disagree about which profile registry they check
+    /// against (see the "Registry wiring" section on `register_asset`).
+    fn registry_of(env: &Env, invoice_contract: &Address) -> Address {
         let registry_contract: Option<Address> = env.invoke_contract(
             invoice_contract,
             &Symbol::new(env, INVOICE_GET_REGISTRY),
             Vec::new(env),
         );
-        let registry_contract = registry_contract
-            .unwrap_or_else(|| panic_with_error!(env, PoolFactoryError::InvoiceNotInitialized));
-
-        let args = vec![
-            env,
-            admin.to_val(),
-            invoice_contract.to_val(),
-            escrow_contract.to_val(),
-            asset.to_val(),
-            registry_contract.to_val(),
-            admin.to_val(),
-            DEFAULT_MIN_INITIAL_DEPOSIT.into_val(env),
-            String::from_str(env, DEFAULT_SHARE_NAME).to_val(),
-            String::from_str(env, DEFAULT_SHARE_SYMBOL).to_val(),
-            DEFAULT_SHARE_DECIMALS.into_val(env),
-        ];
-        env.invoke_contract::<()>(pool_address, &Symbol::new(env, POOL_INITIALIZE), args);
+        registry_contract
+            .unwrap_or_else(|| panic_with_error!(env, PoolFactoryError::InvoiceNotInitialized))
     }
 }

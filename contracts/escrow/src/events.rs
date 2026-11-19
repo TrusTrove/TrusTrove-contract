@@ -1,6 +1,13 @@
+// soroban-sdk >= 22 deprecates `Events::publish` in favour of the
+// `#[contractevent]` macro. The topic tuples below are the documented
+// on-wire event format (see docs/EVENTS.md) and consumers index them
+// positionally; migrating them is a schema change, not an SDK repair,
+// so it is deliberately out of scope for the #826 upgrade.
+#![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
-/// Emitted by `initialize` when the escrow is first configured, so indexers
+/// Emitted by `__constructor` when the escrow is first configured (issue
+/// #827 moved initialization into the deploy transaction), so indexers
 /// following escrow deployments can see the admin, pool and funding asset
 /// from the event alone. Matches the `contract_initialized` convention used
 /// by the invoice and registry contracts (#867).

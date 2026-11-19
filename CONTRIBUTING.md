@@ -107,9 +107,10 @@ behavior and reserve stubs for the single call you need to make fail.
 - Per-crate `setup()` helpers (for example in `contracts/pool/src/test.rs`) add
   domain defaults such as a funded LP, raised utilization cap, and invoice
   attestation.
-- Contract initialization order is invoice → escrow → pool. `pool.initialize`
-  cross-checks `escrow.get_usdc_asset()`, so an uninitialized or mismatched
-  escrow fails immediately.
+- Contracts are configured through their `__constructor` at deploy time
+  (`env.register(Contract, (args...))`), in the order invoice → escrow → pool.
+  The pool constructor cross-checks `escrow.get_usdc_asset()`, so a missing or
+  mismatched escrow makes the deployment itself fail.
 - Token balances for `MockToken` can be seeded with `mint`:
   `MockTokenClient::new(&env, &usdc_id).mint(&lp, &1_000_000_000);`.
   Balances are persistent `TKey(address)` entries; reading them through
@@ -210,10 +211,10 @@ contract storage) so the observation survives the rollback.
 
 ## RUSTSEC advisory exceptions
 
-CI runs `cargo audit` against `audit.toml` in the repo root. If a RUSTSEC
+CI runs `cargo audit` using `.cargo/audit.toml`. If a RUSTSEC
 advisory affects a transitive dependency and has no available fix, do not
 disable or skip the audit step. Instead add a time-boxed, justified entry to
-`audit.toml`:
+`.cargo/audit.toml`:
 
 ```toml
 [advisories]
