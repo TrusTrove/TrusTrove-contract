@@ -6,7 +6,8 @@
 #![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, Symbol};
 
-/// Emitted by `initialize` when the escrow is first configured, so indexers
+/// Emitted by `__constructor` when the escrow is first configured (issue
+/// #827 moved initialization into the deploy transaction), so indexers
 /// following escrow deployments can see the admin, pool and funding asset
 /// from the event alone. Matches the `contract_initialized` convention used
 /// by the invoice and registry contracts (#867).

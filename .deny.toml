@@ -22,6 +22,13 @@ ignore = [
   # explicitly that no safe upgrade is available (upstream is archived), so the
   # only route out is an upstream ark-* release picked up by soroban-env-host.
   { id = "RUSTSEC-2024-0388", reason = "transitive via soroban-env-host 23.0.1 -> ark-ff/ark-ec; no fixed version exists" },
+  # crypto-bigint 0.5.5 is reached only through soroban-env-host 23.0.1 ->
+  # k256 0.13.4 -> elliptic-curve 0.13.8. env-host is a native test/CI
+  # dependency and is not part of the deployed wasm contracts. The advisory's
+  # fix is crypto-bigint >=0.7.6, which requires k256 0.14; env-host 23.0.1
+  # pins k256 ^0.13.3, so no compatible upgrade exists until an upstream
+  # soroban-env-host release moves that pin. Revisit on the next SDK bump.
+  { id = "RUSTSEC-2026-0387", reason = "transitive via soroban-env-host 23.0.1 -> k256 0.13.4; native test-only, no 0.5.x fix" },
 ]
 
 [licenses]

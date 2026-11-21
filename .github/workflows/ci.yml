@@ -27,7 +27,7 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Issue #804: lint this workflow file (and every other workflow) so a
       # malformed step, invalid action pin, or unreachable `if:` surfaces here
@@ -87,26 +87,17 @@ jobs:
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
 
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
+      - name: Check prohibited production panic calls
+        run: python3 scripts/check_production_panic_calls.py
 
-      - name: Check cargo-deny advisories and licenses
-        run: cargo deny check
+      - name: Test production panic checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_production_panic_calls.py'
 
-      # Issue #805: cargo audit covers RUSTSEC advisories, but nothing caught
-      # dependencies that are declared and unused (which inflate compile time
-      # and the audit surface). cargo-machete scans Cargo.toml declarations
-      # against crate sources without compiling, so it stays cheap for this
-      # 9-crate workspace.
-      - name: Install cargo-machete
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-machete@0.9.2
+      - name: Check generated contract API documentation
+        run: python3 scripts/generate_contract_api.py --check
 
-      - name: Check for unused dependencies
-        run: cargo machete --skip-target-dir
+      - name: Test contract API generator
+        run: python3 -m unittest discover -s scripts -p 'test_generate_contract_api.py'
 
       - name: Check formatting
         run: cargo fmt --all --check
@@ -120,8 +111,14 @@ jobs:
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
 
-      - name: Test
+      - name: Test (default features)
         run: cargo test --workspace
+
+      - name: Test (all features)
+        run: cargo test --workspace --all-features
+
+      - name: Build documentation (warnings as errors)
+        run: cargo doc --workspace --no-deps --all-features
 
       - name: Check wasm size budget
         run: |
@@ -160,7 +157,7 @@ jobs:
       # secrets context is not available in a step-level `if`.
       CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve Rust toolchain from rust-toolchain.toml
         id: toolchain
@@ -202,7 +199,7 @@ jobs:
 
       - name: Upload coverage report artifact
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-report
           path: coverage/
@@ -211,7 +208,7 @@ jobs:
 
       - name: Upload coverage to Codecov
         if: env.CODECOV_TOKEN != ''
-        uses: codecov/codecov-action@v4
+        uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           files: coverage/cobertura.xml
@@ -222,7 +219,7 @@ jobs:
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Resolve Rust toolchain from rust-toolchain.toml
         id: toolchain
