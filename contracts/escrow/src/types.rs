@@ -113,12 +113,13 @@ pub enum DataKey {
     /// deployed ledgers.
     IssuerReleased(BytesN<32>),
     /// Invoice contract reference pinned by the admin as defense-in-depth for
-    /// `release_to_pool` (#997). Instance key; value type: `Address`.
+    /// `release_to_pool` (#997) and recipient validation in `release_to_issuer`.
+    /// Instance key; value type: `Address`.
     ///
-    /// Written by [`EscrowContract::set_invoice_contract`] (admin-authenticated).
-    /// `release_to_pool` still resolves the invoice contract it authorizes
-    /// from the pool's `get_invoice_contract` view (#820), but when a pin is
-    /// stored here that resolved address must equal the pin or the call is
+    /// Written by [`EscrowContract::set_invoice_contract`] (admin-authenticated)
+    /// as the required post-construction configuration step or migration path. `release_to_pool` still resolves the invoice contract
+    /// it authorizes from the pool's `get_invoice_contract` view (#820), but when a pin
+    /// is stored here that resolved address must equal the pin or the call is
     /// rejected with [`EscrowError::InvalidConfig`](crate::EscrowError::InvalidConfig) —
     /// so a pool whose invoice-contract configuration drifted from the
     /// escrow admin's pin cannot silently redirect repayments.
