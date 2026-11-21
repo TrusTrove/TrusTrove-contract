@@ -56,4 +56,8 @@ pub enum PoolError {
     /// books no loss in that case, so an invoice that is still active can
     /// never leave the pool reporting a realised loss (#971).
     InvoiceDefaultNotRecorded = 29,
+    /// The caller is not (or did not authorize) the contract's stored admin,
+    /// or a setter's caller-supplied `admin` argument does not match the
+    /// stored admin (`set_max_utilization`, issue #821).
+    NotAuthorized = 30,
 }
