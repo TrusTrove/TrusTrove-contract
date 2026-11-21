@@ -3,6 +3,10 @@ use soroban_sdk::contracterror;
 #[contracterror]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum InvoiceError {
+    /// No longer reachable from the contract: state setup moved to the
+    /// protocol constructor (`__constructor`, #827), which the ledger invokes
+    /// exactly once at deploy time. The code stays reserved so error numbers
+    /// never get re-assigned to a different meaning.
     AlreadyInitialized = 1,
     NotFound = 2,
     NotAuthorized = 3,
@@ -47,4 +51,8 @@ pub enum InvoiceError {
     /// before `list_for_financing` ran (issue #823). Staleness check on
     /// the ledger timestamp, strict `>` semantics.
     AttestationExpired = 30,
+    /// An attestation payload contains a risk score above 10,000 basis points.
+    InvalidRiskScore = 31,
+    /// The signature recovery byte is outside Soroban's supported range.
+    InvalidRecoveryId = 32,
 }

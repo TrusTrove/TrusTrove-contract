@@ -85,10 +85,10 @@ report is published as the `coverage-report` artifact on every CI run.
 
 ## RUSTSEC advisory exceptions
 
-CI runs `cargo audit` against `audit.toml` in the repo root. If a RUSTSEC
+CI runs `cargo audit` using `.cargo/audit.toml`. If a RUSTSEC
 advisory affects a transitive dependency and has no available fix, do not
 disable or skip the audit step. Instead add a time-boxed, justified entry to
-`audit.toml`:
+`.cargo/audit.toml`:
 
 ```toml
 [advisories]

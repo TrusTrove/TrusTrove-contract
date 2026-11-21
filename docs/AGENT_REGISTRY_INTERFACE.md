@@ -122,7 +122,7 @@ pub struct AttestationPayload {
 | `invoice_id` | MUST equal the `invoice_id` argument, else `InvalidAmount` (#16). |
 | `contract_address` | MUST equal `env.current_contract_address()` — the deployed invoice contract this signature is for (issue #822), else `PayloadBindingMismatch` (#29). |
 | `network_id` | MUST equal `env.ledger().network_id()` (the 32-byte network identifier of the executing ledger, carried verbatim into the payload by the signer), else `PayloadBindingMismatch` (#29). |
-| `risk_score` | Basis points, intended range 0–10000. **Not range-checked on-chain** — stored as-is. |
+| `risk_score` | Basis points in the inclusive range 0–10000. Values above 10000 are rejected with `InvalidRiskScore` (#31); values in range are stored as-is. |
 | `evidence_hash` | Opaque 32-byte hash of the off-chain evidence. Stored as-is. |
 | `agent_id` | Passed to `get_agent`. Because it is inside the signed bytes, a relayer cannot swap it. |
 | `nonce` | Caller-chosen. **Not tracked on-chain** — the one-attestation-per-invoice rule is the replay guard. |
@@ -185,14 +185,15 @@ Checks run in this order; the first failure aborts the call.
 | 2 | Invoice `invoice_id` exists | `NotFound` (#2) |
 | 3 | No attestation already stored for `invoice_id` | `AlreadyAttested` (#22) |
 | 4 | `payload` decodes as `AttestationPayload` | `InvalidAmount` (#16) |
-| 5 | `domain_separator` matches | `InvalidAmount` (#16) |
-| 6 | `payload.invoice_id == invoice_id` | `InvalidAmount` (#16) |
-| 7 | `payload.contract_address == env.current_contract_address()` and `payload.network_id == env.ledger().network_id()` | `PayloadBindingMismatch` (#29) |
-| 8 | `env.ledger().timestamp() <= payload.valid_until` | `AttestationExpired` (#30) |
-| 9 | Signature recovers to a public key | host crypto error (not a TrusTrove code) |
-| 10 | `AgentRegistryContract` is configured | `NotFound` (#2) |
-| 11 | `get_agent(agent_id)` call succeeds and decodes as `Option<Agent>` | host error (registry trapped, missing function, or shape mismatch per §2.1) |
-| 12 | Result is `Some(agent)` with `agent.active && agent.pubkey == recovered` | `UntrustedSigner` (#21) |
+| 5 | `payload.risk_score <= 10000` | `InvalidRiskScore` (#31) |
+| 6 | `domain_separator` matches | `InvalidAmount` (#16) |
+| 7 | `payload.invoice_id == invoice_id` | `InvalidAmount` (#16) |
+| 8 | `payload.contract_address == env.current_contract_address()` and `payload.network_id == env.ledger().network_id()` | `PayloadBindingMismatch` (#29) |
+| 9 | `env.ledger().timestamp() <= payload.valid_until` | `AttestationExpired` (#30) |
+| 10 | Signature recovers to a public key | host crypto error (not a TrusTrove code) |
+| 11 | `AgentRegistryContract` is configured | `NotFound` (#2) |
+| 12 | `get_agent(agent_id)` call succeeds and decodes as `Option<Agent>` | host error (registry trapped, missing function, or shape mismatch per §2.1) |
+| 13 | Result is `Some(agent)` with `agent.active && agent.pubkey == recovered` | `UntrustedSigner` (#21) |
 
 On success the contract stores an `Attestation { agent_id, risk_score,
 evidence_hash, submitted_at, valid_until }` under

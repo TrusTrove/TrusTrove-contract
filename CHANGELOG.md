@@ -32,7 +32,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   parties can move a share holder's allowance under the spender's own
   auth (#756)
 - `pool`: SEP-41 metadata `decimals`, `name` and `symbol`, all three supplied
-  to `initialize` and stored per instance, so a pool funding an asset with
+  to the constructor (`__constructor` since #827, formerly `initialize`) and
+  stored per instance, so a pool funding an asset with
   other than 7 decimals reports the precision its shares actually have
   (#757)
 - `pool`: `allowance_approved` event emitted on every successful
@@ -42,13 +43,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   while funded, `None` before funding and after repayment/default (#839)
 - `pool`: `protocol_fee_updated` event assertion coverage for
   `set_protocol_fee` (#767)
-- Deployment scripts now pass the full `pool.initialize` argument list
-  (`funding_asset`, `registry_contract`, `treasury`, `min_initial_deposit`,
+- Deployment scripts now pass the full `pool` constructor argument list
+  (`__constructor` since #827, formerly `initialize`: `funding_asset`,
+  `registry_contract`, `treasury`, `min_initial_deposit`,
   `share_name`, `share_symbol`, `share_decimals`)
 
 ### Changed
 
-- `pool.initialize` accepts three new arguments: `share_name`, `share_symbol`
+- `registry`, `invoice`, `escrow`, `pool` and `pool_factory`: the `initialize`
+  entry point is replaced by a protocol `__constructor`, so deployment and
+  initialization are now a single atomic transaction (issue #827). There is
+  no longer a window in which a deployed contract exists but is uninitialized,
+  the `AlreadyInitialized` error codes are unreachable (kept as reserved
+  discriminants), and `scripts/deploy.sh` / `scripts/deploy.ps1` deploy each
+  contract with its constructor arguments — pre-computing the pool's
+  salt-derived address so escrow can be constructed against it in one step.
+  In-place `upgrade` calls never re-run the constructor; storage migrations
+  need an explicit entry point (see `docs/STORAGE.md`, Upgrade Path).
+- `pool`'s constructor (`__constructor` since #827, formerly `initialize`)
+  accepts three new arguments: `share_name`, `share_symbol`
   and `share_decimals`
 - `invoice`: **breaking, attestation wire format (v2).** `AttestationPayload`
   gains `contract_address`, `network_id` and `valid_until`, and

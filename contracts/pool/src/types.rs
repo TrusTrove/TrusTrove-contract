@@ -125,7 +125,16 @@ pub enum DataKey {
     /// Admin-configured minimum invoice discount floor (yield floor), in
     /// basis points, enforced by `fund_invoice` (issue #829). Defaults to `0`
     /// — no floor — so behavior is unchanged until an admin opts in.
-    /// Appended last, per the comment above `RegistryContract`: new variants
-    /// must keep being appended so existing storage keys are never re-encoded.
+    /// Appended after `ShareDecimals`, per the comment above
+    /// `RegistryContract`: new variants must keep being appended so existing
+    /// storage keys are never re-encoded.
     MinDiscountBps,
+    /// Canonical buyer of a funded invoice, snapshotted from the invoice
+    /// contract's `get_funding_context` at funding time and removed together
+    /// with the `FundedInvoice` entry. `receive_repayment_with_refund`
+    /// verifies its refund destination against this record (#969): during
+    /// settlement the invoice contract is the active caller, so Soroban's
+    /// no-re-entry rule forbids reading `get_buyer` at that point.
+    /// Appended after `MinDiscountBps` to keep existing discriminants stable.
+    FundedInvoiceBuyer(BytesN<32>),
 }

@@ -33,6 +33,9 @@ pub const MAX_FACE_VALUE: u128 = u128::MAX / 10_000;
 /// in the future). The value is ~10 years (10 * 365 * 24 * 60 * 60).
 pub const MAX_INVOICE_LIFETIME_SECONDS: u64 = 10 * 365 * 24 * 60 * 60;
 
+/// Default delay after an invoice's due date before it can be defaulted.
+pub const DEFAULT_GRACE_SECONDS: u64 = 24 * 60 * 60;
+
 /// Fixed 32-byte domain separator that Underwrite agents must include in
 /// the [`AttestationPayload`] they sign. Binds a signature to this
 /// contract's attestation scheme specifically, so it can't be replayed
@@ -115,7 +118,11 @@ impl InvoiceContract {
             .extend_ttl(&inv_key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
-    /// Initializes the invoice contract with admin and registry references.
+    /// Constructs the invoice contract with admin and registry references.
+    ///
+    /// Runs atomically at deploy time (Soroban protocol constructor, #827):
+    /// there is no window in which the instance exists without its admin and
+    /// registry wiring, so no one can front-run initialization.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -126,22 +133,24 @@ impl InvoiceContract {
     /// Requires authorization from `admin`.
     ///
     /// # Panics
-    /// * `InvoiceError::AlreadyInitialized` if the contract has already been initialized.
     /// * `InvoiceError::InvalidConfiguration` if the registry address equals
-    ///   the admin or this invoice contract.
+    ///   the admin or this invoice contract. A panic here aborts the
+    ///   deployment transaction, so no partially wired instance is ever
+    ///   created.
+    ///   `InvoiceError::AlreadyInitialized` is unreachable from this entry
+    ///   point (the protocol invokes the constructor exactly once) and is
+    ///   kept only for error-code stability.
     ///
     /// # Returns
     /// * `()` - No value is returned.
     ///
     /// # Example
     /// ```ignore
-    /// client.initialize(&admin, &registry_address);
+    /// // Deploy-and-construct in a single operation:
+    /// // env.register(InvoiceContract, (admin, registry_address))
     /// ```
-    pub fn initialize(env: Env, admin: Address, registry_contract: Address) {
+    pub fn __constructor(env: Env, admin: Address, registry_contract: Address) {
         require_not_paused(&env);
-        if env.storage().instance().has(&DataKey::Admin) {
-            panic_with_error!(&env, InvoiceError::AlreadyInitialized);
-        }
         admin.require_auth();
         Self::assert_valid_wiring_address(&env, &registry_contract, &admin, None, Vec::new(&env));
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -499,9 +508,12 @@ impl InvoiceContract {
     /// let attestation = client.get_attestation(&invoice_id);
     /// ```
     pub fn get_attestation(env: Env, invoice_id: BytesN<32>) -> Option<Attestation> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Attestation(invoice_id))
+        let key = DataKey::Attestation(invoice_id);
+        let attestation: Option<Attestation> = env.storage().persistent().get(&key);
+        if attestation.is_some() {
+            bump_persistent(&env, &key);
+        }
+        attestation
     }
 
     /// Adds an asset to the allow-list of funding assets that `create`
@@ -516,6 +528,8 @@ impl InvoiceContract {
     ///
     /// # Panics
     /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    /// * `InvoiceError::MathOverflow` if the supported-asset counter is already
+    ///   at `u32::MAX`. The asset is not written in that case.
     ///
     /// # Returns
     /// * `()` - No value is returned.
@@ -557,9 +571,12 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::SupportedAssetCount)
             .unwrap_or(0);
+        let next_count = count
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
         env.storage()
             .instance()
-            .set(&DataKey::SupportedAssetCount, &(count + 1));
+            .set(&DataKey::SupportedAssetCount, &next_count);
         env.storage().persistent().set(&key, &true);
         // Issue #863: without this the marker was left at the default
         // persistence bump, could lapse while `SupportedAssetCount` (an
@@ -1280,6 +1297,8 @@ impl InvoiceContract {
     /// * `InvoiceError::AttestationExpired` if the ledger timestamp is
     ///   already past the payload's `valid_until` (issue #823); equality
     ///   on the boundary second is accepted.
+    /// * `InvoiceError::InvalidRiskScore` if the payload's `risk_score` is
+    ///   greater than 10,000.
     /// * `InvoiceError::UntrustedSigner` if the recovered signer is not an
     ///   active agent in the agent-registry, or its registered pubkey
     ///   doesn't match the recovered key.
@@ -1312,6 +1331,9 @@ impl InvoiceContract {
 
         let decoded: AttestationPayload = AttestationPayload::from_xdr(&env, &payload)
             .unwrap_or_else(|_| panic_with_error!(&env, InvoiceError::InvalidAmount));
+        if decoded.risk_score > 10_000 {
+            panic_with_error!(&env, InvoiceError::InvalidRiskScore);
+        }
         if decoded.domain_separator != BytesN::from_array(&env, &ATTESTATION_DOMAIN_SEPARATOR) {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
@@ -1343,6 +1365,11 @@ impl InvoiceContract {
         let mut rs = [0u8; 64];
         rs.copy_from_slice(&sig_bytes[0..64]);
         let recovery_id = sig_bytes[64] as u32;
+        // Soroban's secp256k1_recover accepts recovery ids in the range 0..=3.
+        // Reject malformed signatures before invoking host crypto.
+        if recovery_id > 3 {
+            panic_with_error!(&env, InvoiceError::InvalidRecoveryId);
+        }
         let sig_rs = BytesN::from_array(&env, &rs);
 
         let hash = env.crypto().keccak256(&payload);
@@ -1948,11 +1975,11 @@ impl InvoiceContract {
         true
     }
 
-    /// Triggers default on a past-due invoice.
+    /// Triggers default after an invoice's due date and grace period have passed.
     ///
-    /// Default is permitted once `now >= due_date` — the due date has been
-    /// reached or passed. This is consistent with the `create` check that
-    /// rejects `due_date <= now` (due dates must be in the future).
+    /// Default is permitted only when `now > due_date + default_grace_seconds`.
+    /// The grace period defaults to [`DEFAULT_GRACE_SECONDS`] and can be
+    /// changed by the contract admin with `set_default_grace_seconds`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1960,14 +1987,15 @@ impl InvoiceContract {
     ///
     /// # Auth
     /// No authorization is required. Anyone may trigger a default once the due
-    /// date has passed. This removes the single-point-of-failure risk of an
-    /// admin-only gate and ensures LP loss recognition is timely.
+    /// date and configured grace period have passed. This removes the
+    /// single-point-of-failure risk of an admin-only gate and ensures LP loss
+    /// recognition is timely.
     ///
     /// # Panics
     /// * `InvoiceError::NotFound` if the invoice or funding pool cannot be found.
     /// * `InvoiceError::InvalidStatusTransition` if invoice is not `Funded`, `Active`, or `Confirmed`.
-    /// * `InvoiceError::DueDateNotPassed` if `now < due_date` — the due date
-    ///   has not yet been reached.
+    /// * `InvoiceError::DueDateNotPassed` if `now <= due_date + default_grace_seconds`.
+    /// * `InvoiceError::MathOverflow` if adding the grace period to the due date overflows.
     /// * `InvoiceError::CrossContractCallFailed` if the pool returns `false` from
     ///   `handle_default`.
     ///
@@ -1978,23 +2006,6 @@ impl InvoiceContract {
     /// ```ignore
     /// client.trigger_default(&invoice_id);
     /// ```
-    ///
-    /// # Coupling with escrow's minimum lock window
-    /// This function's due-date gate (`now >= due_date`) is independent of,
-    /// and has no awareness of, the escrow contract's own
-    /// `DEFAULT_MIN_LOCK_SECONDS` grace period (60s from the escrow lock
-    /// timestamp, roughly `funded_at`). If `due_date` is reached less than
-    /// that window after the invoice was funded, the downstream default call
-    /// may panic from the escrow constraint. The whole transaction reverts, so
-    /// the invoice remains unchanged. The call transitively invokes
-    /// `escrow.handle_default()` (via `pool.handle_default`), which may panic
-    /// with `EscrowError::NotAuthorized`. The whole transaction reverts, so
-    /// there is no persistent state inconsistency, but the caller sees a
-    /// revert originating from a constraint this contract does not itself
-    /// enforce or expose. See
-    /// `test_trigger_default_reverts_when_escrow_grace_period_not_elapsed`
-    /// for a pinned repro.
-    ///
     pub fn trigger_default(env: Env, invoice_id: BytesN<32>) -> bool {
         require_not_paused(&env);
         let inv_key = DataKey::Invoice(invoice_id.clone());
@@ -2010,7 +2021,16 @@ impl InvoiceContract {
         if !valid_transition {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        if env.ledger().timestamp() < invoice.due_date {
+        let grace_seconds: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(DEFAULT_GRACE_SECONDS);
+        let default_after = invoice
+            .due_date
+            .checked_add(grace_seconds)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+        if env.ledger().timestamp() <= default_after {
             panic_with_error!(&env, InvoiceError::DueDateNotPassed);
         }
 
@@ -2041,6 +2061,55 @@ impl InvoiceContract {
             events::invoice_defaulted(&env, &invoice_id);
         }
         true
+    }
+
+    /// Sets the delay after an invoice's due date before it may be defaulted.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `seconds` - The grace period in seconds.
+    ///
+    /// # Auth
+    /// Requires authorization from the contract admin.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotInitialized` if the contract admin is unavailable.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned.
+    pub fn set_default_grace_seconds(env: Env, seconds: u64) {
+        require_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DefaultGraceSeconds, &seconds);
+        events::default_grace_seconds_set(&env, seconds);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the configured delay after an invoice's due date before it may be defaulted.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u64` - The grace period in seconds, or [`DEFAULT_GRACE_SECONDS`] if unset.
+    pub fn get_default_grace_seconds(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(DEFAULT_GRACE_SECONDS)
     }
 
     /// Marks an invoice as defaulted, called by the pool contract during
@@ -3296,10 +3365,9 @@ fn decrement_status_count(env: &Env, status: InvoiceStatus) {
 }
 
 fn read_status_count(env: &Env, status: InvoiceStatus) -> u64 {
-    env.storage()
-        .persistent()
-        .get(&DataKey::StatusCount(status as u32))
-        .unwrap_or(0u64)
+    let key = DataKey::StatusCount(status as u32);
+    bump_persistent(env, &key);
+    env.storage().persistent().get(&key).unwrap_or(0u64)
 }
 
 /// Computes the half-open `[start, end)` index range for one page of an index
