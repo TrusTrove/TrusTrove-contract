@@ -289,44 +289,51 @@ fn test_reinstate_unregistered_panics() {
 // ============== ISSUE #982: reinstate ONLY ALLOWS Revoked -> Verified ==============
 
 #[test]
-fn test_reinstate_on_pending_profile_does_not_verify() {
+fn test_reinstate_on_pending_profile_rejects_with_invalid_state() {
     let (env, _admin, client) = setup();
     let issuer = Address::generate(&env);
     client.register_issuer(&issuer, &map![&env]);
 
     // The profile is Pending: never verified, never revoked. `reinstate` is
     // the inverse of `revoke` and must not act as an undocumented alternate
-    // path to verify a Pending profile (#606).
-    let result = client.reinstate(&issuer);
-    assert!(result);
+    // path to verify a Pending profile (#982); the call is rejected with the
+    // typed state error instead.
+    assert_eq!(
+        client.try_reinstate(&issuer),
+        Err(Ok(RegistryError::InvalidProfileState.into()))
+    );
     let events_after_call = env.events().all();
     assert!(!client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
         VerificationStatus::Pending
     );
-    // No `address_reinstated` event and no other emission: the call is a
-    // no-op. sdk >=22 buffers only this call's own events.
+    // The rejected call changes no state and emits no event. sdk >=22 buffers
+    // only this call's own events.
     assert_eq!(events_after_call.len(), 0);
 }
 
 #[test]
-fn test_reinstate_on_verified_profile_is_idempotent_noop() {
+fn test_reinstate_on_verified_profile_rejects_with_invalid_state() {
     let (env, admin, client) = setup();
     let issuer = Address::generate(&env);
     client.register_issuer(&issuer, &map![&env]);
     client.verify_profile(&admin, &issuer, &true);
 
-    // Already Verified (never revoked): reinstate must not rewrite storage or
-    // re-emit `address_reinstated`, mirroring `revoke`'s idempotency guard (#606).
-    assert!(client.reinstate(&issuer));
+    // Already Verified (never revoked): only `Revoked -> Verified` is a
+    // permitted transition, so a second reinstatement is rejected rather
+    // than silently re-emitting `address_reinstated` (#982).
+    assert_eq!(
+        client.try_reinstate(&issuer),
+        Err(Ok(RegistryError::InvalidProfileState.into()))
+    );
     let events_after_call = env.events().all();
     assert!(client.is_verified(&issuer));
     assert_eq!(
         client.get_verification_status(&issuer),
         VerificationStatus::Verified
     );
-    // Idempotent no-op: the reinstate call emits nothing of its own.
+    // The rejected call emits nothing of its own.
     assert_eq!(events_after_call.len(), 0);
 }
 
@@ -389,7 +396,7 @@ fn count_events_named(env: &Env, name: &str) -> u32 {
 
 /// A `reinstate` call against a `Pending` profile is rejected as a state
 /// transition: the stored profile is left exactly as it was and no event is
-/// emitted (#983).
+/// emitted (#982).
 ///
 /// `Pending` is the state of a freshly registered profile. `reinstate` is the
 /// inverse of `revoke`, so it must never double as an alternate path to
@@ -413,22 +420,25 @@ fn test_reinstate_on_pending_profile_leaves_profile_unchanged() {
     assert!(!profile_before.revoked());
     let events_before = env.events().all();
 
-    // The no-op path returns before any storage work, so the profile entry's
-    // remaining TTL must not be renewed either. Read the TTL around the
-    // call — `get_profile` above extends it, so it cannot be sampled after
-    // the call.
+    // The state check rejects the call before any storage work, so the
+    // profile entry's remaining TTL must not be renewed either. Read the TTL
+    // around the call — `get_profile` above extends it, so it cannot be
+    // sampled after the call.
     let contract_id = client.address.clone();
     let key = DataKey::Profile(issuer.clone());
     let ttl_before_reinstate: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
 
-    assert!(client.reinstate(&issuer));
+    assert_eq!(
+        client.try_reinstate(&issuer),
+        Err(Ok(RegistryError::InvalidProfileState.into()))
+    );
 
     let ttl_after_reinstate: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
     assert_eq!(
         ttl_after_reinstate, ttl_before_reinstate,
-        "a no-op reinstate must not write to the profile entry"
+        "a rejected reinstate must not write to the profile entry"
     );
 
     // The whole profile record survives the call untouched: role, both
@@ -449,11 +459,11 @@ fn test_reinstate_on_pending_profile_leaves_profile_unchanged() {
 
 /// A `reinstate` call against an already `Verified` profile is rejected as a
 /// state transition: the stored profile is left exactly as it was and no
-/// event is emitted (#983).
+/// event is emitted (#982).
 ///
-/// This is the idempotency guard introduced with `revoke` (#606). Without it
-/// a second `reinstate` would re-emit `address_reinstated` and off-chain
-/// indexers would read it as a fresh un-revocation.
+/// This keeps `address_reinstated` honest for off-chain indexers: a second
+/// `reinstate` would otherwise re-emit it, and indexers would read that as a
+/// fresh un-revocation.
 #[test]
 fn test_reinstate_on_verified_profile_leaves_profile_unchanged() {
     let (env, admin, client) = setup();
@@ -473,22 +483,25 @@ fn test_reinstate_on_verified_profile_leaves_profile_unchanged() {
     assert!(!profile_before.revoked());
     let events_before = env.events().all();
 
-    // The no-op path returns before any storage work, so the profile entry's
-    // remaining TTL must not be renewed either. Read the TTL around the
-    // call — `get_profile` above extends it, so it cannot be sampled after
-    // the call.
+    // The state check rejects the call before any storage work, so the
+    // profile entry's remaining TTL must not be renewed either. Read the TTL
+    // around the call — `get_profile` above extends it, so it cannot be
+    // sampled after the call.
     let contract_id = client.address.clone();
     let key = DataKey::Profile(issuer.clone());
     let ttl_before_reinstate: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
 
-    assert!(client.reinstate(&issuer));
+    assert_eq!(
+        client.try_reinstate(&issuer),
+        Err(Ok(RegistryError::InvalidProfileState.into()))
+    );
 
     let ttl_after_reinstate: u32 =
         env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
     assert_eq!(
         ttl_after_reinstate, ttl_before_reinstate,
-        "a no-op reinstate must not write to the profile entry"
+        "a rejected reinstate must not write to the profile entry"
     );
 
     // The whole profile record survives the call untouched.
@@ -600,7 +613,8 @@ fn test_reinstate_extends_profile_ttl() {
 }
 
 /// A reinstatement emits exactly one `address_reinstated` event, and a
-/// follow-up call against the now-`Verified` profile emits none (#983).
+/// follow-up call against the now-`Verified` profile is rejected without
+/// emitting a second one (#982).
 ///
 /// `address_reinstated` is the only signal an indexer gets for an
 /// un-revocation, so it must be published exactly once per real transition.
@@ -619,13 +633,16 @@ fn test_reinstate_emits_exactly_one_address_reinstated_event() {
     // invocation, so each assertion below inspects the buffer of the call it
     // just made, rather than a cumulative stream. The "exactly once per real
     // transition" property is preserved: the reinstate that changes state
-    // emits one, the no-op reinstate emits none of its own.
+    // emits one, the rejected follow-up emits none of its own.
     assert!(client.reinstate(&issuer));
     assert_eq!(count_events_named(&env, "address_reinstated"), 1);
 
-    // The profile is `Verified` now, so the second call takes the no-op path
-    // and must not publish a second event.
-    assert!(client.reinstate(&issuer));
+    // The profile is `Verified` now, so the second call is rejected as an
+    // invalid transition and must not publish a second event.
+    assert_eq!(
+        client.try_reinstate(&issuer),
+        Err(Ok(RegistryError::InvalidProfileState.into()))
+    );
     assert_eq!(count_events_named(&env, "address_reinstated"), 0);
 }
 
