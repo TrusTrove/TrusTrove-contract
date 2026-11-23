@@ -51,4 +51,8 @@ pub enum InvoiceError {
     /// before `list_for_financing` ran (issue #823). Staleness check on
     /// the ledger timestamp, strict `>` semantics.
     AttestationExpired = 30,
+    /// An attestation payload contains a risk score above 10,000 basis points.
+    InvalidRiskScore = 31,
+    /// The signature recovery byte is outside Soroban's supported range.
+    InvalidRecoveryId = 32,
 }

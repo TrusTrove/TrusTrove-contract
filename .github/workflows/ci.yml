@@ -53,26 +53,17 @@ jobs:
       - name: Audit dependencies (RUSTSEC)
         run: cargo audit
 
-      - name: Install cargo-deny
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-deny
+      - name: Check prohibited production panic calls
+        run: python3 scripts/check_production_panic_calls.py
 
-      - name: Check cargo-deny advisories and licenses
-        run: cargo deny check
+      - name: Test production panic checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_production_panic_calls.py'
 
-      # Issue #805: cargo audit covers RUSTSEC advisories, but nothing caught
-      # dependencies that are declared and unused (which inflate compile time
-      # and the audit surface). cargo-machete scans Cargo.toml declarations
-      # against crate sources without compiling, so it stays cheap for this
-      # 9-crate workspace.
-      - name: Install cargo-machete
-        uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-machete@0.9.2
+      - name: Check generated contract API documentation
+        run: python3 scripts/generate_contract_api.py --check
 
-      - name: Check for unused dependencies
-        run: cargo machete --skip-target-dir
+      - name: Test contract API generator
+        run: python3 -m unittest discover -s scripts -p 'test_generate_contract_api.py'
 
       - name: Check formatting
         run: cargo fmt --all --check

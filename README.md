@@ -39,7 +39,7 @@
 
 ## What is TrusTrove?
 
-TrusTrove is a decentralized trade finance protocol on Stellar. SMEs tokenize unpaid invoices and receive immediate USDC funding from a shared liquidity pool. Liquidity providers deposit USDC and earn yield from discount fees when invoices repay. No banks, no brokers — four Soroban smart contracts handle everything.
+TrusTrove is a decentralized trade finance protocol on Stellar. SMEs tokenize unpaid invoices and receive immediate USDC funding from a shared liquidity pool. Liquidity providers deposit USDC and earn yield from discount fees when invoices repay. No banks, no brokers — five deployable Soroban contracts power the protocol.
 
 ---
 
@@ -206,6 +206,173 @@ decimals() → u32                     ← per-instance, set at initialize
 name() → String                      ← set at initialize()
 symbol() → String                    ← set at initialize()
 ```
+
+---
+
+<!-- BEGIN GENERATED CONTRACT API -->
+### Canonical public contract API
+
+Generated from current contractimpl declarations by python3 scripts/generate_contract_api.py --write.
+These are client-facing signatures: the framework-provided env: Env parameter is omitted; all other argument names/types and return types are taken from the Rust declarations. Methods without an explicit return type are shown as returning ().
+
+| Contract | Public function | Client-facing signature |
+|---|---|---|
+| Registry | `__constructor` | `__constructor(admin: Address) -> ()` |
+| Registry | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Registry | `register_issuer` | `register_issuer(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `batch_register_issuers` | `batch_register_issuers(entries: Vec<(Address, Map<String, String>)>) -> Vec<Address>` |
+| Registry | `batch_register_buyers` | `batch_register_buyers(entries: Vec<(Address, Map<String, String>)>) -> Vec<Address>` |
+| Registry | `register_buyer` | `register_buyer(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `update_profile` | `update_profile(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `update_metadata` | `update_metadata(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `get_profile` | `get_profile(address: Address) -> Profile` |
+| Registry | `is_verified` | `is_verified(address: Address) -> bool` |
+| Registry | `get_verification_status` | `get_verification_status(address: Address) -> VerificationStatus` |
+| Registry | `get_role` | `get_role(address: Address) -> Option<Role>` |
+| Registry | `get_profile_count` | `get_profile_count(role: Role) -> u32` |
+| Registry | `list_profiles` | `list_profiles(role: Role, start: u32, limit: u32) -> Vec<Address>` |
+| Registry | `revoke` | `revoke(address: Address) -> bool` |
+| Registry | `reinstate` | `reinstate(address: Address) -> bool` |
+| Registry | `verify_profile` | `verify_profile(caller: Address, address: Address, verify: bool) -> bool` |
+| Registry | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
+| Registry | `transfer_admin` | `transfer_admin(new_admin: Address) -> ()` |
+| Registry | `set_verifier` | `set_verifier(verifier: Address) -> ()` |
+| Registry | `remove_verifier` | `remove_verifier() -> ()` |
+| Registry | `get_verifier` | `get_verifier() -> Option<Address>` |
+| Registry | `pause` | `pause() -> ()` |
+| Registry | `unpause` | `unpause() -> ()` |
+| Registry | `get_admin` | `get_admin() -> Address` |
+| Invoice | `__constructor` | `__constructor(admin: Address, registry_contract: Address) -> ()` |
+| Invoice | `get_admin` | `get_admin() -> Option<Address>` |
+| Invoice | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Invoice | `get_registry_contract` | `get_registry_contract() -> Option<Address>` |
+| Invoice | `set_pool_contract` | `set_pool_contract(pool_contract: Address) -> ()` |
+| Invoice | `get_pool_contract` | `get_pool_contract() -> Option<Address>` |
+| Invoice | `set_agent_registry_contract` | `set_agent_registry_contract(agent_registry_contract: Address) -> ()` |
+| Invoice | `get_agent_registry_contract` | `get_agent_registry_contract() -> Option<Address>` |
+| Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
+| Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
+| Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
+| Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
+| Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
+| Invoice | `get_supported_asset_count` | `get_supported_asset_count() -> u32` |
+| Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
+| Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
+| Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
+| Invoice | `batch_list_for_financing` | `batch_list_for_financing(entries: Vec<(BytesN<32>, u32)>) -> Vec<BytesN<32>>` |
+| Invoice | `cancel` | `cancel(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `submit_attestation` | `submit_attestation(invoice_id: BytesN<32>, payload: Bytes, signature: BytesN<65>) -> ()` |
+| Invoice | `mark_funded` | `mark_funded(invoice_id: BytesN<32>, pool_address: Address, asset_address: Address, funded_amount: u128) -> bool` |
+| Invoice | `mark_shipped` | `mark_shipped(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `confirm_delivery` | `confirm_delivery(invoice_id: BytesN<32>, confirmer: Address) -> bool` |
+| Invoice | `repay_partial` | `repay_partial(invoice_id: BytesN<32>, amount: u128) -> bool` |
+| Invoice | `repay` | `repay(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `repay_early` | `repay_early(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `trigger_default` | `trigger_default(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `set_default_grace_seconds` | `set_default_grace_seconds(seconds: u64) -> ()` |
+| Invoice | `get_default_grace_seconds` | `get_default_grace_seconds() -> u64` |
+| Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
+| Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
+| Invoice | `expire_listing` | `expire_listing(invoice_id: BytesN<32>, caller: Address) -> bool` |
+| Invoice | `get_status` | `get_status(invoice_id: BytesN<32>) -> u32` |
+| Invoice | `has_status_membership` | `has_status_membership(status: InvoiceStatus, invoice_id: BytesN<32>) -> bool` |
+| Invoice | `get_face_value` | `get_face_value(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_remaining_balance` | `get_remaining_balance(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_repaid_amount` | `get_repaid_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
+| Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
+| Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
+| Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
+| Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
+| Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
+| Invoice | `get_invoice_count_by_buyer` | `get_invoice_count_by_buyer(address: Address) -> u32` |
+| Invoice | `get_counts` | `get_counts() -> Map<String, u64>` |
+| Invoice | `get_issuer` | `get_issuer(invoice_id: BytesN<32>) -> Address` |
+| Invoice | `get_buyer` | `get_buyer(invoice_id: BytesN<32>) -> Address` |
+| Invoice | `get_due_date` | `get_due_date(invoice_id: BytesN<32>) -> u64` |
+| Invoice | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
+| Invoice | `pause` | `pause() -> ()` |
+| Invoice | `unpause` | `unpause() -> ()` |
+| Escrow | `__constructor` | `__constructor(admin: Address, pool_contract: Address, usdc_asset: Address) -> ()` |
+| Escrow | `get_usdc_asset` | `get_usdc_asset() -> Address` |
+| Escrow | `get_admin` | `get_admin() -> Address` |
+| Escrow | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Escrow | `get_pool_contract` | `get_pool_contract() -> Address` |
+| Escrow | `get_invoice_contract` | `get_invoice_contract() -> Address` |
+| Escrow | `set_invoice_contract` | `set_invoice_contract(invoice_contract: Address) -> ()` |
+| Escrow | `lock` | `lock(invoice_id: BytesN<32>, amount: u128, issuer: Address) -> bool` |
+| Escrow | `release_to_issuer` | `release_to_issuer(invoice_id: BytesN<32>, issuer: Address) -> bool` |
+| Escrow | `release_to_pool` | `release_to_pool(invoice_id: BytesN<32>, repayment_amount: u128) -> bool` |
+| Escrow | `was_released_to_issuer` | `was_released_to_issuer(invoice_id: BytesN<32>) -> bool` |
+| Escrow | `handle_default` | `handle_default(invoice_id: BytesN<32>, caller: Address) -> bool` |
+| Escrow | `set_timeout_window` | `set_timeout_window(window: u64) -> ()` |
+| Escrow | `get_timeout_window` | `get_timeout_window() -> u64` |
+| Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
+| Escrow | `pause` | `pause() -> ()` |
+| Escrow | `unpause` | `unpause() -> ()` |
+| Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
+| Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
+| Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
+| Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
+| Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
+| Pool | `decimals` | `decimals() -> u32` |
+| Pool | `name` | `name() -> String` |
+| Pool | `symbol` | `symbol() -> String` |
+| Pool | `get_admin` | `get_admin() -> Address` |
+| Pool | `upgrade` | `upgrade(new_wasm_hash: BytesN<32>) -> ()` |
+| Pool | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
+| Pool | `pause` | `pause() -> ()` |
+| Pool | `unpause` | `unpause() -> ()` |
+| Pool | `get_fee_bps` | `get_fee_bps() -> u32` |
+| Pool | `get_treasury_address` | `get_treasury_address() -> Address` |
+| Pool | `get_invoice_contract` | `get_invoice_contract() -> Address` |
+| Pool | `get_escrow_contract` | `get_escrow_contract() -> Address` |
+| Pool | `deposit` | `deposit(lp: Address, usdc_amount: u128) -> u128` |
+| Pool | `preview_deposit` | `preview_deposit(usdc_amount: u128) -> u128` |
+| Pool | `preview_withdraw` | `preview_withdraw(shares: u128) -> u128` |
+| Pool | `withdraw` | `withdraw(lp: Address, shares: u128) -> u128` |
+| Pool | `transfer` | `transfer(from: Address, to: Address, amount: i128) -> ()` |
+| Pool | `transfer_shares` | `transfer_shares(from: Address, to: Address, amount: i128) -> ()` |
+| Pool | `approve` | `approve(from: Address, spender: Address, amount: i128, expiration_ledger: u32) -> ()` |
+| Pool | `allowance` | `allowance(from: Address, spender: Address) -> i128` |
+| Pool | `transfer_from` | `transfer_from(spender: Address, from: Address, to: Address, amount: i128) -> ()` |
+| Pool | `fund_invoice` | `fund_invoice(invoice_id: BytesN<32>) -> bool` |
+| Pool | `batch_fund_invoice` | `batch_fund_invoice(invoice_ids: Vec<BytesN<32>>) -> Vec<BytesN<32>>` |
+| Pool | `receive_repayment` | `receive_repayment(invoice_id: BytesN<32>, amount: u128) -> bool` |
+| Pool | `receive_repayment_with_refund` | `receive_repayment_with_refund(invoice_id: BytesN<32>, amount: u128, refund: u128, buyer: Address) -> bool` |
+| Pool | `backfill_funded_invoice_buyer` | `backfill_funded_invoice_buyer(invoice_id: BytesN<32>) -> bool` |
+| Pool | `handle_default` | `handle_default(invoice_id: BytesN<32>) -> bool` |
+| Pool | `balance` | `balance(id: Address) -> i128` |
+| Pool | `total_supply` | `total_supply() -> i128` |
+| Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
+| Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
+| Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |
+| Pool | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> Option<u128>` |
+| Pool | `set_max_utilization` | `set_max_utilization(admin: Address, new_cap_bps: u32) -> bool` |
+| Pool | `set_protocol_fee` | `set_protocol_fee(fee_bps: u32, treasury: Address) -> bool` |
+| Pool | `get_protocol_fee_bps` | `get_protocol_fee_bps() -> u32` |
+| Pool | `get_treasury` | `get_treasury() -> Address` |
+| Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
+| Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
+| Pool Factory | `__constructor` | `__constructor(admin: Address) -> ()` |
+| Pool Factory | `register_asset` | `register_asset(asset: Address, pool_wasm_hash: BytesN<32>, invoice_contract: Address, escrow_contract: Address) -> Address` |
+| Pool Factory | `register_existing_pool` | `register_existing_pool(asset: Address, pool_address: Address) -> ()` |
+| Pool Factory | `get_pool_for_asset` | `get_pool_for_asset(asset: Address) -> Option<Address>` |
+| Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
+| Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
+
+**Total: 151 public entry points across five deployable contracts.**
+
+The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
+<!-- END GENERATED CONTRACT API -->
 
 ---
 
@@ -658,4 +825,3 @@ MIT — see [CHANGELOG.md](./CHANGELOG.md) for version history.
 ## Contributors
 
 [![Contributors](https://contrib.rocks/image?repo=TrusTrove/TrusTrove-contract)](https://github.com/TrusTrove/TrusTrove-contract/graphs/contributors)
-// fix

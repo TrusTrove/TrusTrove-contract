@@ -528,6 +528,8 @@ impl InvoiceContract {
     ///
     /// # Panics
     /// * `InvoiceError::NotFound` if the admin has not been initialized.
+    /// * `InvoiceError::MathOverflow` if the supported-asset counter is already
+    ///   at `u32::MAX`. The asset is not written in that case.
     ///
     /// # Returns
     /// * `()` - No value is returned.
@@ -569,9 +571,12 @@ impl InvoiceContract {
             .instance()
             .get(&DataKey::SupportedAssetCount)
             .unwrap_or(0);
+        let next_count = count
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
         env.storage()
             .instance()
-            .set(&DataKey::SupportedAssetCount, &(count + 1));
+            .set(&DataKey::SupportedAssetCount, &next_count);
         env.storage().persistent().set(&key, &true);
         // Issue #863: without this the marker was left at the default
         // persistence bump, could lapse while `SupportedAssetCount` (an
@@ -1292,6 +1297,8 @@ impl InvoiceContract {
     /// * `InvoiceError::AttestationExpired` if the ledger timestamp is
     ///   already past the payload's `valid_until` (issue #823); equality
     ///   on the boundary second is accepted.
+    /// * `InvoiceError::InvalidRiskScore` if the payload's `risk_score` is
+    ///   greater than 10,000.
     /// * `InvoiceError::UntrustedSigner` if the recovered signer is not an
     ///   active agent in the agent-registry, or its registered pubkey
     ///   doesn't match the recovered key.
@@ -1324,6 +1331,9 @@ impl InvoiceContract {
 
         let decoded: AttestationPayload = AttestationPayload::from_xdr(&env, &payload)
             .unwrap_or_else(|_| panic_with_error!(&env, InvoiceError::InvalidAmount));
+        if decoded.risk_score > 10_000 {
+            panic_with_error!(&env, InvoiceError::InvalidRiskScore);
+        }
         if decoded.domain_separator != BytesN::from_array(&env, &ATTESTATION_DOMAIN_SEPARATOR) {
             panic_with_error!(&env, InvoiceError::InvalidAmount);
         }
@@ -1355,6 +1365,11 @@ impl InvoiceContract {
         let mut rs = [0u8; 64];
         rs.copy_from_slice(&sig_bytes[0..64]);
         let recovery_id = sig_bytes[64] as u32;
+        // Soroban's secp256k1_recover accepts recovery ids in the range 0..=3.
+        // Reject malformed signatures before invoking host crypto.
+        if recovery_id > 3 {
+            panic_with_error!(&env, InvoiceError::InvalidRecoveryId);
+        }
         let sig_rs = BytesN::from_array(&env, &rs);
 
         let hash = env.crypto().keccak256(&payload);

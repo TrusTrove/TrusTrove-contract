@@ -439,6 +439,50 @@ verify_admin() {
 }
 
 # ---------------------------------------------------------------------------
+# 4c. Post-wiring invoice pin verification (issue #998)
+# ---------------------------------------------------------------------------
+
+# verify_pinned_invoice <LABEL> <ESCROW_ID> <EXPECTED_INVOICE_ID>
+# Asserts that escrow's stored invoice contract reference matches the expected
+# invoice contract address, preventing surviving escrows from retaining a stale
+# invoice pin after invoice-only redeployment.
+verify_pinned_invoice() {
+  local label="$1"
+  local escrow_id="$2"
+  local expected_invoice="$3"
+
+  if [ "$DRY_RUN" = true ]; then
+    echo "  [DRY-RUN] Would assert get_invoice_contract == $expected_invoice for $label"
+    return 0
+  fi
+
+  # Skip contracts that were deployed in dry-run mode (no real address).
+  case "$escrow_id" in
+    ""|"<dry-run>") return 0 ;;
+  esac
+
+  local on_chain_invoice
+  if ! on_chain_invoice=$("$STELLAR" contract invoke \
+      --id "$escrow_id" \
+      --source "$DEPLOYER_ACCOUNT" \
+      --network testnet \
+      -- get_invoice_contract 2>&1); then
+    echo "ERROR: Could not read on-chain invoice contract for $label ($escrow_id):"
+    echo "  $on_chain_invoice"
+    exit 1
+  fi
+  on_chain_invoice="$(printf '%s' "$on_chain_invoice" | tr -d '"' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+
+  if [ "$on_chain_invoice" != "$expected_invoice" ]; then
+    echo "ERROR: $label ($escrow_id) reports invoice contract '$on_chain_invoice',"
+    echo "  but expected '$expected_invoice'."
+    echo "  Surviving escrow is pinned to stale invoice address (issue #998)."
+    exit 1
+  fi
+  echo "  [OK] $label on-chain invoice contract verified: $on_chain_invoice"
+}
+
+# ---------------------------------------------------------------------------
 # 5. Pre-flight checks
 # ---------------------------------------------------------------------------
 
@@ -511,13 +555,14 @@ if [ -n "$ONLY_CONTRACT" ]; then
   _clear_keys=( "$ONLY_CONTRACT" )
   case "$ONLY_CONTRACT" in
     usdc_pair)
-      _clear_keys=( escrow_usdc pool_usdc pool_usdc_salt invoice_set_pool_initialized invoice_set_escrow_initialized )
+      _clear_keys=( escrow_usdc pool_usdc pool_usdc_salt invoice_set_pool_initialized invoice_set_escrow_initialized escrow_set_invoice_initialized )
       ;;
     xlm_pair)
-      _clear_keys=( escrow_xlm pool_xlm pool_xlm_salt invoice_set_pool_initialized invoice_set_escrow_initialized )
+      _clear_keys=( escrow_xlm pool_xlm pool_xlm_salt invoice_set_pool_initialized invoice_set_escrow_initialized escrow_xlm_set_invoice_initialized )
       ;;
     invoice)
       _clear_keys=( invoice invoice_set_pool_initialized invoice_set_escrow_initialized \
+                    escrow_set_invoice_initialized escrow_xlm_set_invoice_initialized \
                     invoice_add_asset_usdc_initialized invoice_add_asset_xlm_initialized \
                     invoice_set_agent_registry_initialized )
       ;;
@@ -745,6 +790,28 @@ echo "=== Wiring USDC escrow_contract into invoice_contract ==="
 invoke_init "invoice_set_escrow" "$INVOICE_ID" \
   -- set_escrow_contract \
   --escrow_contract "$ESCROW_USDC_ID"
+
+if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "usdc_pair" ] || [ "$ONLY_CONTRACT" = "invoice" ]; then
+  if [ -n "${ESCROW_USDC_ID:-}" ]; then
+    echo ""
+    echo "=== Wiring USDC invoice_contract into escrow_contract ==="
+    invoke_init "escrow_set_invoice" "$ESCROW_USDC_ID" \
+      -- set_invoice_contract \
+      --invoice_contract "$INVOICE_ID"
+    verify_pinned_invoice "escrow_usdc" "$ESCROW_USDC_ID" "$INVOICE_ID"
+  fi
+fi
+
+if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "xlm_pair" ] || [ "$ONLY_CONTRACT" = "invoice" ]; then
+  if [ -n "${ESCROW_XLM_ID:-}" ]; then
+    echo ""
+    echo "=== Wiring XLM invoice_contract into escrow_contract ==="
+    invoke_init "escrow_xlm_set_invoice" "$ESCROW_XLM_ID" \
+      -- set_invoice_contract \
+      --invoice_contract "$INVOICE_ID"
+    verify_pinned_invoice "escrow_xlm" "$ESCROW_XLM_ID" "$INVOICE_ID"
+  fi
+fi
 
 # Without allow-listing, create rejects every invoice with UnsupportedAsset.
 # add_supported_asset is itself idempotent on-chain (a no-op for an asset

@@ -144,8 +144,8 @@ pub struct Attestation {
     /// Identifier of the attesting agent, as registered in the
     /// agent-registry contract.
     pub agent_id: Symbol,
-    /// Risk score in basis points (0-10000). Never a float — same
-    /// fixed-point convention as [`Invoice::discount_bps`].
+    /// Risk score in basis points, bounded to `0..=10_000`. Never a float —
+    /// same fixed-point convention as [`Invoice::discount_bps`].
     pub risk_score: u32,
     /// Hash of the off-chain evidence backing this attestation (e.g. the
     /// underwriting report), for later off-chain verification.
@@ -196,6 +196,7 @@ pub struct AttestationPayload {
     /// whose `network_id` doesn't match the executing ledger is rejected
     /// with [`crate::InvoiceError::PayloadBindingMismatch`].
     pub network_id: BytesN<32>,
+    /// Risk score in basis points. Values above 10,000 are rejected on-chain.
     pub risk_score: u32,
     pub evidence_hash: BytesN<32>,
     pub agent_id: Symbol,

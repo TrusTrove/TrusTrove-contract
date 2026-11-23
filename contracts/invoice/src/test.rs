@@ -61,6 +61,24 @@ impl MockRegistry {
 #[contracttype]
 pub struct DataKey(Address);
 
+// --------------- Mock Registry that Fails (Issue #939) ---------------
+//
+// Stands in for a malformed or broken registry contract whose
+// `is_verified` call traps or exposes the wrong entry point. This test
+// ensures the invoice contract handles external call failures gracefully
+// during invoice creation without persisting state.
+
+#[contract]
+pub struct FailingRegistry;
+
+#[contractimpl]
+impl FailingRegistry {
+    pub fn is_verified(_env: Env, _address: Address) -> bool {
+        // Trap on any is_verified call to simulate registry failure
+        soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+    }
+}
+
 // --------------- Mock Token ---------------
 
 #[contract]
@@ -254,7 +272,17 @@ pub struct MockAgentRegistry;
 #[contractimpl]
 impl MockAgentRegistry {
     pub fn get_agent(env: Env, agent_id: Symbol) -> Option<crate::Agent> {
+        let count_key = Symbol::new(&env, "get_agent_calls");
+        let calls: u32 = env.storage().instance().get(&count_key).unwrap_or(0);
+        env.storage().instance().set(&count_key, &(calls + 1));
         env.storage().persistent().get(&AgentKey(agent_id))
+    }
+
+    pub fn get_agent_calls(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&Symbol::new(&env, "get_agent_calls"))
+            .unwrap_or(0)
     }
 
     pub fn register_agent(env: Env, agent_id: Symbol, agent: crate::Agent) {
@@ -264,6 +292,33 @@ impl MockAgentRegistry {
 
 #[contracttype]
 pub struct AgentKey(Symbol);
+
+// --------------- Mock Agent Registry that Fails (Issue #943) ---------------
+//
+// Stands in for a malformed or broken agent-registry contract whose
+// `get_agent` call traps or returns an incompatible result. This test
+// ensures the invoice contract handles external call failures gracefully
+// without persisting state or emitting success events.
+
+// Isolated in its own module to avoid a generated `__get_agent` symbol
+// collision with the top-level MockAgentRegistry (both export `get_agent`
+// and `#[contractimpl]` would produce the same dispatch name if they were
+// at the same module level).
+mod failing_agent_registry_mock {
+    use super::*;
+
+    #[contract]
+    pub struct FailingAgentRegistry;
+
+    #[contractimpl]
+    impl FailingAgentRegistry {
+        pub fn get_agent(_env: Env, _agent_id: Symbol) -> Option<crate::Agent> {
+            // Trap on any get_agent call to simulate registry failure
+            soroban_sdk::panic_with_error!(&_env, soroban_sdk::Error::from_contract_error(99))
+        }
+    }
+}
+use failing_agent_registry_mock::FailingAgentRegistry;
 
 use trusttrove_test_utils::{test_agent_pubkey, test_agent_signing_key};
 
@@ -380,6 +435,153 @@ fn test_get_attestation_persists_signed_payload_and_submission_time() {
 }
 
 // ============== FAILURE-PATH TESTS FOR submit_attestation ==============
+
+fn signed_attestation_for_risk_score(
+    env: &Env,
+    client: &InvoiceContractClient,
+    invoice_id: &BytesN<32>,
+    risk_score: u32,
+) -> (soroban_sdk::Bytes, BytesN<65>) {
+    let agent_id = Symbol::new(env, "risk_score_agent");
+    let registry_id = env.register(MockAgentRegistry, ());
+    MockAgentRegistryClient::new(env, &registry_id).register_agent(
+        &agent_id,
+        &crate::Agent {
+            active: true,
+            pubkey: test_agent_pubkey(env),
+        },
+    );
+    client.set_agent_registry_contract(&registry_id);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score,
+        evidence_hash: BytesN::from_array(env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    (payload_bytes, BytesN::from_array(env, &sig_bytes))
+}
+
+#[test]
+fn test_submit_attestation_accepts_and_stores_zero_risk_score() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) = signed_attestation_for_risk_score(&env, &client, &invoice_id, 0);
+
+    client.submit_attestation(&invoice_id, &payload, &signature);
+
+    assert_eq!(client.get_attestation(&invoice_id).unwrap().risk_score, 0);
+}
+
+#[test]
+fn test_submit_attestation_accepts_and_stores_maximum_risk_score() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) =
+        signed_attestation_for_risk_score(&env, &client, &invoice_id, 10_000);
+
+    client.submit_attestation(&invoice_id, &payload, &signature);
+
+    assert_eq!(
+        client.get_attestation(&invoice_id).unwrap().risk_score,
+        10_000
+    );
+}
+
+#[test]
+fn test_submit_attestation_rejects_risk_score_above_maximum_with_typed_error() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let (payload, signature) =
+        signed_attestation_for_risk_score(&env, &client, &invoice_id, 10_001);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload, &signature);
+    let err = result
+        .expect_err("risk score above 10,000 must be rejected")
+        .expect("rejection should be a typed InvoiceError");
+    assert_eq!(err, InvoiceError::InvalidRiskScore.into());
+    assert!(client.get_attestation(&invoice_id).is_none());
+}
+
+#[test]
+fn test_submit_attestation_rejects_malformed_payload_with_typed_error() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    // This is valid ScVal XDR but the wrong value type for AttestationPayload.
+    let payload = 0u32.to_xdr(&env);
+    let signature = BytesN::from_array(&env, &[0u8; 65]);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload, &signature);
+    let err = result
+        .expect_err("malformed payload must be rejected")
+        .expect("rejection should be a typed InvoiceError");
+
+    assert_eq!(err, InvoiceError::InvalidAmount.into());
+    assert!(client.get_attestation(&invoice_id).is_none());
+    let contract_id = client.address.clone();
+    let emitted_attestation = env.events().all().iter().any(|event| {
+        let (contract, topics, _) = event;
+        if contract != contract_id {
+            return false;
+        }
+        let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+        topic0 == Symbol::new(&env, "attestation_submitted")
+    });
+    assert!(!emitted_attestation);
+}
+#[test]
+fn test_submit_attestation_rejects_invalid_recovery_id_before_registry_lookup() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let agent_id = Symbol::new(&env, "test_agent");
+    let registry_id = env.register(MockAgentRegistry, ());
+    let registry_client = MockAgentRegistryClient::new(&env, &registry_id);
+    client.set_agent_registry_contract(&registry_id);
+
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(&env);
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[64] = 4;
+    let signature = BytesN::from_array(&env, &sig_bytes);
+
+    let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
+    assert_eq!(
+        result,
+        Err(Ok(InvoiceError::InvalidRecoveryId.into())),
+        "invalid recovery id should return the typed error"
+    );
+    assert_eq!(registry_client.get_agent_calls(), 0);
+    assert!(client.get_attestation(&invoice_id).is_none());
+}
 
 #[test]
 #[should_panic(expected = "Error(Contract, #21)")]
@@ -592,6 +794,75 @@ fn test_submit_attestation_replay_rejection() {
     let signature = BytesN::from_array(&env, &sig_bytes);
 
     client.submit_attestation(&invoice_id, &payload_bytes, &signature);
+}
+
+#[test]
+fn test_submit_attestation_agent_registry_external_failure() {
+    // Issue #943: Test that when the agent-registry's get_agent call fails
+    // (traps or returns incompatible result), the transaction fails without
+    // storing an Attestation or emitting a success event.
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Deploy a failing agent registry that traps on get_agent
+    let failing_registry_id = env.register(FailingAgentRegistry, ());
+    client.set_agent_registry_contract(&failing_registry_id);
+
+    let agent_id = Symbol::new(&env, "test_agent");
+    // Populate all v2 payload fields so validation passes checks 2-6 in
+    // submit_attestation and control reaches the env.invoke_contract call at
+    // step 7, where the failing registry traps. Without contract_address,
+    // network_id, and valid_until the payload would fail PayloadBindingMismatch
+    // or AttestationExpired before the registry is ever consulted.
+    let payload = crate::AttestationPayload {
+        domain_separator: BytesN::from_array(&env, &crate::ATTESTATION_DOMAIN_SEPARATOR),
+        invoice_id: invoice_id.clone(),
+        contract_address: client.address.clone(),
+        network_id: env.ledger().network_id(),
+        risk_score: 5000,
+        evidence_hash: BytesN::from_array(&env, &[9u8; 32]),
+        agent_id,
+        nonce: 1,
+        valid_until: u64::MAX,
+    };
+    let payload_bytes = payload.to_xdr(&env);
+    let digest = env.crypto().keccak256(&payload_bytes).to_array();
+    let (sig, recid) = test_agent_signing_key()
+        .sign_prehash_recoverable(&digest)
+        .unwrap();
+    let mut sig_bytes = [0u8; 65];
+    sig_bytes[..64].copy_from_slice(&sig.to_bytes());
+    sig_bytes[64] = recid.to_byte();
+    let signature = BytesN::from_array(&env, &sig_bytes);
+
+    // The call should fail because the registry traps on get_agent.
+    let result = client.try_submit_attestation(&invoice_id, &payload_bytes, &signature);
+
+    // Assert the expected host/contract error boundary: the registry raises
+    // contract error 99 via panic_with_error!, which propagates through
+    // submit_attestation's infallible invoke_contract and is caught here as
+    // Err(Ok(Error::from_contract_error(99))). This is a captured contract
+    // error, not a raw host trap (Err(Err(_))).
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(99))),
+        "registry failure must propagate as contract error 99"
+    );
+
+    // AC2: no attestation was persisted, and no attestation_submitted event
+    // was emitted. The transaction must fail atomically without side effects.
+    assert!(
+        client.get_attestation(&invoice_id).is_none(),
+        "failed attestation must not be stored"
+    );
+    // SDK >=22 resets the event buffer per top-level invocation, so the
+    // failed call's buffer must be empty (no attestation_submitted event).
+    assert_eq!(
+        env.events().all().len(),
+        0,
+        "failed attestation must not emit attestation_submitted"
+    );
 }
 
 // Note: Malformed payload testing is limited by Soroban SDK's XDR decoding -
@@ -1247,6 +1518,121 @@ fn test_create_fails_unverified_buyer() {
     let face_value: u128 = DEFAULT_FACE_VALUE;
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     client.create(&issuer, &buyer, &face_value, &due_date, &usdc_asset);
+}
+
+#[test]
+fn test_create_registry_external_failure() {
+    // Issue #939: Test that when the registry's is_verified call fails
+    // (traps or exposes wrong entry point), the transaction fails without
+    // persisting an invoice or advancing the Counter.
+    let env = Env::default();
+    env.mock_all_auths();
+
+    // Deploy a failing registry that traps on is_verified
+    let failing_registry_id = env.register(FailingRegistry, ());
+
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let admin = Address::generate(&env);
+
+    // Deploy invoice contract with constructor (issue #827 migration)
+    let contract_id = env.register(
+        InvoiceContract,
+        (admin.clone(), failing_registry_id.clone()),
+    );
+    let client = InvoiceContractClient::new(&env, &contract_id);
+
+    let usdc_asset = env.register(MockToken, ());
+    client.add_supported_asset(&usdc_asset);
+
+    let face_value: u128 = DEFAULT_FACE_VALUE;
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // Capture initial Counter state (initialized to 0 by constructor).
+    let initial_counter: u64 = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&crate::DataKey::Counter)
+            .unwrap_or(0)
+    });
+
+    // The call should fail because the registry traps on is_verified.
+    let result = env.try_invoke_contract::<BytesN<32>, soroban_sdk::Error>(
+        &client.address,
+        &Symbol::new(&env, "create"),
+        (
+            issuer.clone(),
+            buyer.clone(),
+            face_value,
+            due_date,
+            usdc_asset.clone(),
+        )
+            .into_val(&env),
+    );
+
+    // The registry raises contract error 99 via panic_with_error!; that trap
+    // propagates through require_verified's infallible invoke_contract and is
+    // caught at the outer try_invoke_contract as Err(Ok(_)) — a captured
+    // contract error, not a raw host trap (Err(Err(_))).
+    // Host/contract error boundary: the failing cross-contract call surfaces as
+    // a Soroban contract error with code 99, not as an InvoiceError variant.
+    assert_eq!(
+        result,
+        Err(Ok(soroban_sdk::Error::from_contract_error(99))),
+        "registry trap must surface as contract error 99"
+    );
+
+    // AC2: Counter did not advance — the increment happens only after both
+    // require_verified calls pass, so a trap at the first one leaves it untouched.
+    let final_counter: u64 = env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .get(&crate::DataKey::Counter)
+            .unwrap_or(0)
+    });
+    assert_eq!(
+        final_counter, initial_counter,
+        "Counter must not advance on registry failure"
+    );
+
+    // AC2: No invoice was persisted. save_invoice (persistent storage write)
+    // only runs after the Counter increment, which itself only runs after both
+    // require_verified calls pass. Because the registry trapped first, the
+    // DataKey::Invoice entry for the would-be invoice id was never written.
+    // The invoice id is deterministic: sha256(issuer_xdr || buyer_xdr ||
+    // face_value_be || due_date_be || counter_be || asset_xdr) with counter=0.
+    // We verify the persistent-storage absence directly.
+    let issuer_xdr = issuer.clone().to_xdr(&env);
+    let buyer_xdr = buyer.clone().to_xdr(&env);
+    let asset_xdr = usdc_asset.clone().to_xdr(&env);
+    let mut hash_input = soroban_sdk::Bytes::new(&env);
+    hash_input.append(&issuer_xdr);
+    hash_input.append(&buyer_xdr);
+    hash_input.extend_from_array(&face_value.to_be_bytes());
+    hash_input.extend_from_array(&due_date.to_be_bytes());
+    hash_input.extend_from_array(&initial_counter.to_be_bytes());
+    hash_input.append(&asset_xdr);
+    let candidate_id: BytesN<32> = env.crypto().sha256(&hash_input).into();
+
+    let invoice_absent = env.as_contract(&client.address, || {
+        !env.storage()
+            .persistent()
+            .has(&crate::DataKey::Invoice(candidate_id.clone()))
+    });
+    assert!(
+        invoice_absent,
+        "no invoice must be persisted when registry traps during create"
+    );
+
+    // AC2: No invoice_created event was emitted (the event fires only after
+    // save_invoice, which was never reached). SDK >=22 resets the event buffer
+    // per top-level invocation, so the failed create must produce no events.
+    let events_after = env.events().all();
+    assert_eq!(
+        events_after.len(),
+        0,
+        "failed create must not emit any invoice contract events"
+    );
 }
 
 #[test]
@@ -3730,6 +4116,28 @@ fn test_add_supported_asset() {
         (Symbol::new(&env, "supported_asset_added"), asset.clone()).into_val(&env)
     );
     <()>::try_from_val(&env, &data).unwrap();
+}
+
+#[test]
+fn test_add_supported_asset_rejects_counter_overflow_without_writing_asset() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+
+    // Simulate corrupt/adversarial storage where the counter is exhausted.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&crate::DataKey::SupportedAssetCount, &u32::MAX);
+    });
+
+    assert_eq!(
+        client.try_add_supported_asset(&asset),
+        Err(Ok(InvoiceError::MathOverflow.into())),
+    );
+
+    // The failed call must not write the asset or move the counter.
+    assert!(!client.is_supported_asset(&asset));
+    assert_eq!(client.get_supported_asset_count(), u32::MAX);
 }
 
 // ============================== REPAY TESTS ==============================
@@ -6765,5 +7173,40 @@ fn test_extend_issuer_and_buyer_index_duplicate_append_is_noop() {
     assert_eq!(
         client.get_by_buyer(&buyer, &0, &20).get(1).unwrap().id,
         second
+    );
+}
+
+#[test]
+fn test_add_supported_asset_twice_increments_count_once() {
+    let (env, client, _, _, _, _) = setup();
+    let asset = Address::generate(&env);
+    let before = client.get_supported_asset_count();
+
+    assert!(!client.is_supported_asset(&asset));
+    client.add_supported_asset(&asset);
+    client.add_supported_asset(&asset);
+
+    assert!(client.is_supported_asset(&asset));
+    assert_eq!(
+        client.get_supported_asset_count(),
+        before + 1,
+        "adding the same asset twice must increment the counter only once"
+    );
+}
+
+#[test]
+fn test_remove_supported_asset_twice_decrements_count_once() {
+    let (_env, client, _, _, _, usdc) = setup();
+    let before = client.get_supported_asset_count();
+
+    assert!(client.is_supported_asset(&usdc));
+    client.remove_supported_asset(&usdc);
+    client.remove_supported_asset(&usdc);
+
+    assert!(!client.is_supported_asset(&usdc));
+    assert_eq!(
+        client.get_supported_asset_count(),
+        before - 1,
+        "removing the same asset twice must decrement the counter only once"
     );
 }
