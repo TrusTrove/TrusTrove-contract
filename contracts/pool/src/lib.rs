@@ -1410,6 +1410,24 @@ impl PoolContract {
         if discount_bps < min_discount_bps {
             panic_with_error!(&env, PoolError::DiscountBelowMinimum);
         }
+        // Admin-set maximum time-to-maturity: only newly funded invoices are
+        // checked (the AlreadyFunded guard ran above); unset/0 skips the
+        // cross-contract read entirely. Exactly `max` remaining seconds passes.
+        let max_maturity: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64);
+        if max_maturity > 0 {
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let due_date: u64 =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_due_date"), args);
+            let remaining = due_date.saturating_sub(env.ledger().timestamp());
+            if remaining > max_maturity {
+                panic_with_error!(&env, PoolError::MaturityTooFar);
+            }
+        }
         let funded_amount = face_value
             .checked_mul(10000 - discount_bps as u128)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))
@@ -2443,6 +2461,41 @@ impl PoolContract {
         events::min_discount_updated(&env, old_bps, bps);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    /// Sets the maximum remaining seconds to maturity (`due_date - now`) an
+    /// invoice may have when newly funded. `0` (the default) means
+    /// unrestricted. An invoice with exactly `max_seconds` remaining is
+    /// accepted; already-funded invoices are unaffected.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    ///
+    /// # Events
+    /// Emits `max_maturity_updated` with `(old, new)`.
+    pub fn set_max_time_to_maturity(env: Env, max_seconds: u64) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        let old = Self::get_max_time_to_maturity(env.clone());
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxTimeToMaturity, &max_seconds);
+        events::max_time_to_maturity_updated(&env, old, max_seconds);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the maximum time-to-maturity in seconds; `0` = unrestricted.
+    pub fn get_max_time_to_maturity(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64)
     }
 
     /// Returns the current minimum discount floor in basis points.

@@ -9253,6 +9253,62 @@ fn test_set_min_discount_emits_event_with_old_and_new_values() {
     assert_eq!(te.pool.get_min_discount_bps(), 1500);
 }
 
+// ---------------------------------------------------------------------------
+//  MAX TIME-TO-MATURITY FUNDING RULE
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_max_time_to_maturity_defaults_unrestricted() {
+    let te = setup();
+    assert_eq!(te.pool.get_max_time_to_maturity(), 0);
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let id = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 10_000_000);
+    assert!(te.pool.fund_invoice(&id));
+}
+
+#[test]
+fn test_max_time_to_maturity_exact_boundary_succeeds() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    assert!(te.pool.set_max_time_to_maturity(&86400));
+    assert_eq!(te.pool.get_max_time_to_maturity(), 86400);
+    let id = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 86400);
+    assert!(te.pool.fund_invoice(&id));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_max_time_to_maturity_above_boundary_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_time_to_maturity(&86400);
+    let id = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 86401);
+    te.pool.fund_invoice(&id);
+}
+
+#[test]
+fn test_max_time_to_maturity_existing_invoice_unaffected_and_reset() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let id = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 86400);
+    assert!(te.pool.fund_invoice(&id));
+    // Tightening the limit afterwards does not touch the funded invoice.
+    te.pool.set_max_time_to_maturity(&1);
+    assert_eq!(te.pool.get_funded_amount(&id), Some(9_800_000_000));
+    // Setting back to 0 restores unrestricted funding.
+    te.pool.set_max_time_to_maturity(&0);
+    let id2 = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 10_000_000);
+    assert!(te.pool.fund_invoice(&id2));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_time_to_maturity_requires_admin() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_max_time_to_maturity(&100);
+}
+
 // --------------- Configurable failing invoice (issue #964) ---------------
 //
 // Stand-in for the pool's invoice contract whose individual view methods

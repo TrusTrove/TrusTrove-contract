@@ -137,4 +137,8 @@ pub enum DataKey {
     /// no-re-entry rule forbids reading `get_buyer` at that point.
     /// Appended after `MinDiscountBps` to keep existing discriminants stable.
     FundedInvoiceBuyer(BytesN<32>),
+    /// Admin-configured maximum remaining seconds (`due_date - now`) an
+    /// invoice may have when newly funded. Absent or `0` means unrestricted.
+    /// Appended last to keep existing discriminants stable.
+    MaxTimeToMaturity,
 }

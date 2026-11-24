@@ -166,6 +166,15 @@ pub fn allowance_approved(
     );
 }
 
+/// Emitted by `set_max_time_to_maturity` with the old and new limit in
+/// seconds (`0` = unrestricted).
+pub fn max_time_to_maturity_updated(env: &Env, old_secs: u64, new_secs: u64) {
+    env.events().publish(
+        (Symbol::new(env, "max_maturity_updated"),),
+        (old_secs, new_secs),
+    );
+}
+
 /// Emitted by `set_min_discount` when the admin changes the pool's minimum
 /// discount floor (issue #829), mirroring `protocol_fee_updated`: the old
 /// value is included so an indexer can report what changed rather than only
