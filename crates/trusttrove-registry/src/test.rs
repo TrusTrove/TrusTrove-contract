@@ -1,8 +1,3 @@
-use std::process::Command;
-use std::fs;
-use std::path::Path;
-
-
     #[test]
 fn test_deployment_manifest_scripts_execution() {
     let manifest_name = "test-deployment-manifest.json";
@@ -44,9 +39,13 @@ fn test_deployment_manifest_scripts_execution() {
 
     let _ = fs::remove_file(manifest_name);
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+use std::process::Command;
+use std::fs;
+use std::path::Path;
 
 #[test]
 fn test_deployment_manifest_scripts_execution() {
