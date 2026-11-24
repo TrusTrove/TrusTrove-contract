@@ -1872,7 +1872,7 @@ fn test_zero_discount_is_rejected_with_invalid_discount() {
     let result = client.try_list_for_financing(&invoice_id, &0);
     assert_eq!(
         result.err().and_then(|e| e.ok()),
-        Some(InvoiceError::InvalidDiscount)
+        Some(soroban_sdk::Error::from(InvoiceError::InvalidDiscount))
     );
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
 }
@@ -3773,7 +3773,10 @@ fn prop_discount_bps_outside_valid_range_is_rejected_without_state_change() {
             } else {
                 InvoiceError::DiscountTooHigh
             };
-            prop_assert_eq!(result.err().and_then(|e| e.ok()), Some(expected));
+            prop_assert_eq!(
+                result.err().and_then(|e| e.ok()),
+                Some(soroban_sdk::Error::from(expected))
+            );
 
             let inv = client.get(&id);
             prop_assert_eq!(inv.status, InvoiceStatus::Created);
@@ -3803,7 +3806,10 @@ fn test_discount_bps_boundaries_1_5000_5001() {
                 assert_eq!(client.get(&id).discount_bps, bps);
             }
             Some(err) => {
-                assert_eq!(result.err().and_then(|e| e.ok()), Some(err));
+                assert_eq!(
+                    result.err().and_then(|e| e.ok()),
+                    Some(soroban_sdk::Error::from(err))
+                );
                 assert_eq!(client.get(&id).status, InvoiceStatus::Created);
             }
         }
