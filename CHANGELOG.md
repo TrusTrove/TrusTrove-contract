@@ -15,6 +15,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `pool`: `share_price_updated` event emitted on successful yield-bearing
+  repayments with the invoice ID and the old/new 18-decimal fixed-point share
+  prices, plus the `get_share_price()` view using the same encoding. Failed and
+  zero-yield repayments emit nothing (#1171)
+- `pool`: `get_lifetime_deposited_volume()` view backed by a cumulative counter
+  incremented by every successful `deposit`. Withdrawals never reduce it, and
+  older instances read `0` until their first deposit (#1172)
+- `pool`: `get_lifetime_withdrawn_volume()` view backed by a cumulative counter
+  incremented only by successful LP `withdraw` amounts. Failed calls and
+  internal funding transfers leave it unchanged (#1173)
+- `pool`: `get_lifetime_repaid_volume()` view backed by a cumulative counter of
+  the full amount received by successful `receive_repayment` /
+  `receive_repayment_with_refund` calls, including early repayments. Replayed
+  settlements are rejected with `InvoiceNotFound` before they can double count
+  (#1174)
 - `pool`: `get_pool_config()` view, returning a `PoolConfig` snapshot of the
   pool's references (admin, funding asset, invoice, escrow and registry
   contracts, treasury) and funding policy (utilization cap, protocol fee,
