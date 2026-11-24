@@ -134,6 +134,7 @@ trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status, page, page_size) → Vec<Invoice>
+get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
 get_by_buyer(address, page, page_size) → Vec<Invoice>
 get_invoice_count_by_issuer(address) → u32
@@ -149,6 +150,33 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
 - Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
+
+#### `get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage`
+- Cursor-driven, ID-only view of one status for indexers (#1152). Each call reads at most `page_size` status-index rows and their membership markers, and never decodes an `Invoice` record.
+- Returns `InvoiceIdPage { ids: Vec<BytesN<32>>, next: Option<u32> }`. Pass `cursor = None` for the first page, then each `next` back as `cursor`. `next` is `None` once the walk is complete, including after an exactly full last page.
+- `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- The walk runs from the end of the status index to its start, newest rows first. A cursor above the current count is clamped (the index shrinks as invoices leave the status), and `Some(0)` returns an empty page with `next: None`.
+- Every returned ID exists and has `status` when its page is read.
+- **While invoices change status between calls:** an invoice that stays in the status for the whole iteration is never skipped. An invoice can be returned twice, so de-duplicate by ID. Invoices that leave before their position is read are not returned, and new entrants may be missed. With no transitions, every ID is returned exactly once. The status index removes entries by swap-and-pop, which is why it walks backwards: forward offsets could silently skip invoices that never changed status.
+- A page can hold fewer than `page_size` IDs (even none) while `next` is still `Some`, when stale rows from the pre-#831 append-only index are filtered out. Keep going until `next` is `None`.
+- No authorization is required.
+
+An indexer walking one status:
+
+```rust
+let mut cursor = None;
+let mut seen = Map::<BytesN<32>, ()>::new(&env);
+loop {
+    let page = client.get_invoice_ids_by_status(&InvoiceStatus::Listed, &cursor, &MAX_PAGE_SIZE);
+    for id in page.ids.iter() {
+        seen.set(id, ()); // de-duplicates
+    }
+    match page.next {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+```
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -292,6 +320,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
@@ -384,7 +413,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 162 public entry points across five deployable contracts.**
+**Total: 163 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -828,7 +857,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |

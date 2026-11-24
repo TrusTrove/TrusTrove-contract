@@ -14,8 +14,9 @@ use soroban_sdk::{
 };
 
 use crate::{
-    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceStatus, DEFAULT_GRACE_SECONDS,
-    MAX_BATCH_SIZE, MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE, TTL_EXTEND_TO, TTL_THRESHOLD,
+    InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceIdPage, InvoiceStatus,
+    DEFAULT_GRACE_SECONDS, MAX_BATCH_SIZE, MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE,
+    TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 // Default invoice parameters used across tests.
@@ -1468,6 +1469,660 @@ fn test_get_counts_tracks_every_lifecycle_transition() {
         assert_eq!(client.get(&invoice_id).status, terminal);
         assert_counts_match_status_indexes(&env, &client, &expected);
     }
+}
+
+// ============== ISSUE #1152: STATUS INVOICE ID PAGES WITH NEXT CURSOR ==============
+//
+// `get_invoice_ids_by_status` walks a status index from its end towards its
+// start, `page_size` rows per call, and returns the cursor to continue from.
+// The status index removes entries with swap-and-pop, so the tests keep a
+// small model of each index (append on entry, swap-and-pop on exit) and
+// assert exact page contents against it, including the documented
+// no-skip / possible-duplicate behaviour when invoices change status
+// between page reads.
+
+/// Fixture with a pool and escrow wired up so every status transition in
+/// the contract can be driven.
+struct StatusFixture {
+    env: Env,
+    client: InvoiceContractClient<'static>,
+    issuer: Address,
+    buyer: Address,
+    usdc: Address,
+    pool: Address,
+    due_date: u64,
+}
+
+fn status_fixture() -> StatusFixture {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    client.set_expiry_window(&1);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    StatusFixture {
+        env,
+        client,
+        issuer,
+        buyer,
+        usdc,
+        pool,
+        due_date,
+    }
+}
+
+impl StatusFixture {
+    /// Creates `n` invoices (all `Created`) and returns their IDs in order.
+    fn create(&self, n: u32) -> Vec<BytesN<32>> {
+        let mut ids = Vec::new(&self.env);
+        for _ in 0..n {
+            ids.push_back(self.client.create(
+                &self.issuer,
+                &self.buyer,
+                &DEFAULT_FACE_VALUE,
+                &self.due_date,
+                &self.usdc,
+            ));
+        }
+        ids
+    }
+
+    /// Drives a `Created` invoice along the happy path up to `target`.
+    fn advance_to(&self, id: &BytesN<32>, target: InvoiceStatus) {
+        let rank = |s: InvoiceStatus| match s {
+            InvoiceStatus::Created => 0,
+            InvoiceStatus::Listed => 1,
+            InvoiceStatus::Funded => 2,
+            InvoiceStatus::Active => 3,
+            InvoiceStatus::Confirmed => 4,
+            other => panic!("{other:?} is not on the happy path"),
+        };
+        let target = rank(target);
+        if target >= 1 {
+            attest(&self.env, &self.client, id);
+            assert!(self.client.list_for_financing(id, &DEFAULT_DISCOUNT_BPS));
+        }
+        if target >= 2 {
+            assert!(self
+                .client
+                .mark_funded(id, &self.pool, &self.usdc, &DEFAULT_FUNDED_AMOUNT));
+        }
+        if target >= 3 {
+            assert!(self.client.mark_shipped(id));
+        }
+        if target >= 4 {
+            self.client.confirm_delivery(id, &self.issuer);
+            self.client.confirm_delivery(id, &self.buyer);
+        }
+    }
+
+    fn page(&self, status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage {
+        self.client
+            .get_invoice_ids_by_status(&status, &cursor, &page_size)
+    }
+
+    /// Follows `next` from `None` until it is `None` again, concatenating
+    /// every page.
+    fn all_ids(&self, status: InvoiceStatus, page_size: u32) -> Vec<BytesN<32>> {
+        let mut all = Vec::new(&self.env);
+        let mut cursor = None;
+        loop {
+            let page = self.page(status, cursor, page_size);
+            all.append(&page.ids);
+            match page.next {
+                Some(next) => cursor = Some(next),
+                None => return all,
+            }
+        }
+    }
+
+    fn assert_all_have_status(&self, ids: &Vec<BytesN<32>>, status: InvoiceStatus) {
+        for id in ids.iter() {
+            assert_eq!(self.client.get(&id).status, status);
+        }
+    }
+}
+
+/// Mirrors `remove_from_status_index`: the last row moves into the hole.
+fn model_remove(model: &mut Vec<BytesN<32>>, id: &BytesN<32>) {
+    let i = model.first_index_of(id).expect("id is in the model");
+    let last = model.len() - 1;
+    if i != last {
+        model.set(i, model.get(last).unwrap());
+    }
+    model.pop_back();
+}
+
+/// The page `get_invoice_ids_by_status` must return for an index whose rows
+/// are `model`, per its documented `[start, end)` descending walk.
+fn model_page(
+    env: &Env,
+    model: &Vec<BytesN<32>>,
+    cursor: Option<u32>,
+    page_size: u32,
+) -> InvoiceIdPage {
+    let end = cursor.map_or(model.len(), |c| c.min(model.len()));
+    let start = end.saturating_sub(page_size);
+    let mut ids = Vec::new(env);
+    for i in (start..end).rev() {
+        ids.push_back(model.get(i).unwrap());
+    }
+    InvoiceIdPage {
+        ids,
+        next: if start == 0 { None } else { Some(start) },
+    }
+}
+
+fn reversed(env: &Env, ids: &Vec<BytesN<32>>) -> Vec<BytesN<32>> {
+    let mut out = Vec::new(env);
+    for id in ids.iter() {
+        out.push_front(id);
+    }
+    out
+}
+
+#[test]
+fn test_invoice_ids_by_status_pages_with_next_cursor() {
+    let f = status_fixture();
+    let ids = f.create(9);
+    let mut created = ids.clone();
+
+    // Move two invoices out of `Created` so other statuses are populated
+    // and the `Created` index has been reshuffled by swap-and-pop.
+    let listed = ids.get(2).unwrap();
+    f.advance_to(&listed, InvoiceStatus::Listed);
+    model_remove(&mut created, &listed);
+    let cancelled = ids.get(5).unwrap();
+    assert!(f.client.cancel(&cancelled));
+    model_remove(&mut created, &cancelled);
+    assert_eq!(created.len(), 7);
+
+    // 7 rows, page_size 3: positions [4,7) -> [1,4) -> [0,1).
+    let p1 = f.page(InvoiceStatus::Created, None, 3);
+    assert_eq!(
+        p1.ids,
+        vec![
+            &f.env,
+            created.get(6).unwrap(),
+            created.get(5).unwrap(),
+            created.get(4).unwrap()
+        ]
+    );
+    assert_eq!(p1.next, Some(4));
+    let p2 = f.page(InvoiceStatus::Created, p1.next, 3);
+    assert_eq!(
+        p2.ids,
+        vec![
+            &f.env,
+            created.get(3).unwrap(),
+            created.get(2).unwrap(),
+            created.get(1).unwrap()
+        ]
+    );
+    assert_eq!(p2.next, Some(1));
+    let p3 = f.page(InvoiceStatus::Created, p2.next, 3);
+    assert_eq!(p3.ids, vec![&f.env, created.get(0).unwrap()]);
+    assert_eq!(p3.next, None, "last (partial) page ends the iteration");
+
+    // The concatenation is the whole status, once each, newest row first.
+    let all = f.all_ids(InvoiceStatus::Created, 3);
+    assert_eq!(all, reversed(&f.env, &created));
+    f.assert_all_have_status(&all, InvoiceStatus::Created);
+    assert!(!all.contains(&listed));
+    assert!(!all.contains(&cancelled));
+
+    // The other statuses list exactly the moved invoices.
+    assert_eq!(
+        f.page(InvoiceStatus::Listed, None, 3),
+        InvoiceIdPage {
+            ids: vec![&f.env, listed],
+            next: None
+        }
+    );
+    assert_eq!(
+        f.page(InvoiceStatus::Cancelled, None, 3),
+        InvoiceIdPage {
+            ids: vec![&f.env, cancelled],
+            next: None
+        }
+    );
+}
+
+#[test]
+fn test_invoice_ids_by_status_rejects_zero_page_size() {
+    let f = status_fixture();
+    f.create(2);
+    for cursor in [None, Some(1u32)] {
+        assert_eq!(
+            f.client
+                .try_get_invoice_ids_by_status(&InvoiceStatus::Created, &cursor, &0),
+            Err(Ok(InvoiceError::InvalidPageSize.into()))
+        );
+    }
+    // Rejected even for a status with no invoices.
+    assert_eq!(
+        f.client
+            .try_get_invoice_ids_by_status(&InvoiceStatus::Funded, &None, &0),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+}
+
+#[test]
+fn test_invoice_ids_by_status_rejects_page_size_above_max() {
+    let f = status_fixture();
+    f.create(2);
+    for page_size in [MAX_PAGE_SIZE + 1, u32::MAX] {
+        assert_eq!(
+            f.client
+                .try_get_invoice_ids_by_status(&InvoiceStatus::Created, &None, &page_size),
+            Err(Ok(InvoiceError::InvalidPageSize.into()))
+        );
+    }
+    // The cap itself is accepted.
+    assert_eq!(
+        f.page(InvoiceStatus::Created, None, MAX_PAGE_SIZE)
+            .ids
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn test_invoice_ids_by_status_boundaries() {
+    let f = status_fixture();
+    let empty = InvoiceIdPage {
+        ids: Vec::new(&f.env),
+        next: None,
+    };
+
+    // A status with no invoices: empty page, no next, for any cursor.
+    for cursor in [None, Some(0), Some(10)] {
+        assert_eq!(f.page(InvoiceStatus::Funded, cursor, 3), empty);
+    }
+
+    let ids = f.create(5);
+    let full = f.page(InvoiceStatus::Created, None, 3);
+    assert_eq!(full.next, Some(2));
+    // A cursor at or above the count is clamped to the count, so it reads the
+    // same page as `None` instead of failing on a shrunken index.
+    assert_eq!(f.page(InvoiceStatus::Created, Some(5), 3), full);
+    assert_eq!(f.page(InvoiceStatus::Created, Some(1_000), 3), full);
+    assert_eq!(f.page(InvoiceStatus::Created, Some(u32::MAX), 3), full);
+    // Cursor 0 is the end of the walk.
+    assert_eq!(f.page(InvoiceStatus::Created, Some(0), 3), empty);
+    // Last partial page.
+    assert_eq!(
+        f.page(InvoiceStatus::Created, Some(2), 3),
+        InvoiceIdPage {
+            ids: vec![&f.env, ids.get(1).unwrap(), ids.get(0).unwrap()],
+            next: None
+        }
+    );
+}
+
+#[test]
+fn test_invoice_ids_by_status_exactly_max_page_size() {
+    let f = status_fixture();
+    let mut ids = f.create(MAX_PAGE_SIZE);
+
+    // Exactly one full page: everything at once, and `next` is already
+    // `None`, so no extra empty request is needed.
+    let page = f.page(InvoiceStatus::Created, None, MAX_PAGE_SIZE);
+    assert_eq!(page.ids.len(), MAX_PAGE_SIZE);
+    assert_eq!(page.ids, reversed(&f.env, &ids));
+    assert_eq!(page.next, None);
+
+    // One more invoice: the first page now stops one short of the start.
+    ids.append(&f.create(1));
+    let p1 = f.page(InvoiceStatus::Created, None, MAX_PAGE_SIZE);
+    assert_eq!(p1.ids, reversed(&f.env, &ids.slice(1..MAX_PAGE_SIZE + 1)));
+    assert_eq!(p1.next, Some(1));
+    let p2 = f.page(InvoiceStatus::Created, p1.next, MAX_PAGE_SIZE);
+    assert_eq!(p2.ids, vec![&f.env, ids.get(0).unwrap()]);
+    assert_eq!(p2.next, None);
+}
+
+#[test]
+fn test_invoice_ids_by_status_last_invoice_transitions_away() {
+    let f = status_fixture();
+    let id = f.create(1).get(0).unwrap();
+    assert_eq!(
+        f.page(InvoiceStatus::Created, None, 5).ids,
+        vec![&f.env, id.clone()]
+    );
+
+    assert!(f.client.cancel(&id));
+    assert_eq!(
+        f.page(InvoiceStatus::Created, None, 5),
+        InvoiceIdPage {
+            ids: Vec::new(&f.env),
+            next: None
+        }
+    );
+    assert_eq!(
+        f.page(InvoiceStatus::Cancelled, None, 5).ids,
+        vec![&f.env, id]
+    );
+}
+
+#[test]
+fn test_invoice_ids_by_status_is_idempotent() {
+    let f = status_fixture();
+    f.create(7);
+    let first = f.page(InvoiceStatus::Created, None, 3);
+    assert_eq!(f.page(InvoiceStatus::Created, None, 3), first);
+    let second = f.page(InvoiceStatus::Created, first.next, 3);
+    assert_eq!(f.page(InvoiceStatus::Created, first.next, 3), second);
+}
+
+#[test]
+fn test_invoice_ids_by_status_transitions_between_pages_never_skip() {
+    let f = status_fixture();
+    let c = f.create(9); // c0..c8 at positions 0..8
+    let id = |i: u32| c.get(i).unwrap();
+    let mut model = c.clone();
+
+    let p1 = f.page(InvoiceStatus::Created, None, 3);
+    assert_eq!(p1, model_page(&f.env, &model, None, 3));
+    assert_eq!(p1.ids, vec![&f.env, id(8), id(7), id(6)]);
+    assert_eq!(p1.next, Some(6));
+
+    // Between page 1 and page 2:
+    // 1. an invoice on the page already read (c7) leaves the status. The
+    //    last row (c8, already returned) fills its slot: no effect on the
+    //    rows still to be read.
+    assert!(f.client.cancel(&id(7)));
+    model_remove(&mut model, &id(7));
+    // 2. an invoice on the next page (c4) leaves. The last row (c8, already
+    //    returned) moves into the unread range, so c8 will be returned again.
+    assert!(f.client.cancel(&id(4)));
+    model_remove(&mut model, &id(4));
+    // 3. an invoice on a later page (c1) leaves. The last row (c6, already
+    //    returned) moves into the unread range, so c6 will be returned again.
+    assert!(f.client.cancel(&id(1)));
+    model_remove(&mut model, &id(1));
+    // 4. a new invoice enters the status. It is appended at position 6, at or
+    //    above the cursor, so this iteration does not return it.
+    let late = f.create(1).get(0).unwrap();
+    model.push_back(late.clone());
+    assert_eq!(
+        model,
+        vec![
+            &f.env,
+            id(0),
+            id(6),
+            id(2),
+            id(3),
+            id(8),
+            id(5),
+            late.clone()
+        ]
+    );
+
+    let p2 = f.page(InvoiceStatus::Created, p1.next, 3);
+    assert_eq!(p2, model_page(&f.env, &model, p1.next, 3));
+    assert_eq!(p2.ids, vec![&f.env, id(5), id(8), id(3)]);
+    assert_eq!(p2.next, Some(3));
+    f.assert_all_have_status(&p2.ids, InvoiceStatus::Created);
+
+    let p3 = f.page(InvoiceStatus::Created, p2.next, 3);
+    assert_eq!(p3, model_page(&f.env, &model, p2.next, 3));
+    assert_eq!(p3.ids, vec![&f.env, id(2), id(6), id(0)]);
+    assert_eq!(p3.next, None);
+    f.assert_all_have_status(&p3.ids, InvoiceStatus::Created);
+
+    let mut seen = p1.ids.clone();
+    seen.append(&p2.ids);
+    seen.append(&p3.ids);
+    // No skips: every invoice that stayed `Created` throughout was returned.
+    for i in [0, 2, 3, 5, 6, 8] {
+        assert!(seen.contains(id(i)), "stable invoice c{i} was skipped");
+    }
+    // Invoices that left before their position was read are not returned.
+    assert!(!seen.contains(id(4)));
+    assert!(!seen.contains(id(1)));
+    // The only duplicates are the already-returned tail rows that
+    // swap-and-pop moved into the unread range.
+    for i in [0u32, 2, 3, 5, 6, 7, 8] {
+        let times = seen.iter().filter(|s| *s == id(i)).count();
+        let expected = if i == 6 || i == 8 { 2 } else { 1 };
+        assert_eq!(times, expected, "c{i} returned {times} times");
+    }
+    // The late entrant was appended behind the cursor.
+    assert!(!seen.contains(&late));
+
+    // A fresh iteration with no further transitions returns each current
+    // member exactly once.
+    let fresh = f.all_ids(InvoiceStatus::Created, 3);
+    assert_eq!(fresh, reversed(&f.env, &model));
+}
+
+/// Every transition path in the contract, as (from, to) plus the call that
+/// performs it.
+#[derive(Clone, Copy, Debug)]
+enum StatusPath {
+    ListForFinancing,
+    BatchListForFinancing,
+    Cancel,
+    ExpireListing,
+    MarkFunded,
+    MarkShipped,
+    ConfirmDelivery,
+    Repay(InvoiceStatus),
+    RepayPartialInTwoSteps,
+    RepayEarly,
+    TriggerDefault(InvoiceStatus),
+    MarkDefaulted(InvoiceStatus),
+}
+
+impl StatusPath {
+    fn endpoints(self) -> (InvoiceStatus, InvoiceStatus) {
+        use InvoiceStatus::*;
+        match self {
+            Self::ListForFinancing | Self::BatchListForFinancing => (Created, Listed),
+            Self::Cancel => (Created, Cancelled),
+            Self::ExpireListing => (Listed, Expired),
+            Self::MarkFunded => (Listed, Funded),
+            Self::MarkShipped => (Funded, Active),
+            Self::ConfirmDelivery => (Active, Confirmed),
+            Self::Repay(from) => (from, Repaid),
+            Self::RepayPartialInTwoSteps => (Funded, Repaid),
+            Self::RepayEarly => (Confirmed, Repaid),
+            Self::TriggerDefault(from) | Self::MarkDefaulted(from) => (from, Defaulted),
+        }
+    }
+
+    fn apply(self, f: &StatusFixture, id: &BytesN<32>) {
+        let (from, _) = self.endpoints();
+        match self {
+            Self::ListForFinancing => {
+                attest(&f.env, &f.client, id);
+                assert!(f.client.list_for_financing(id, &DEFAULT_DISCOUNT_BPS));
+            }
+            Self::BatchListForFinancing => {
+                attest(&f.env, &f.client, id);
+                let failed = f
+                    .client
+                    .batch_list_for_financing(&vec![&f.env, (id.clone(), DEFAULT_DISCOUNT_BPS)]);
+                assert!(failed.is_empty());
+            }
+            Self::Cancel => assert!(f.client.cancel(id)),
+            Self::ExpireListing => {
+                f.env.ledger().set_timestamp(f.env.ledger().timestamp() + 2);
+                assert!(f.client.expire_listing(id, &f.issuer));
+            }
+            Self::MarkFunded => {
+                assert!(f
+                    .client
+                    .mark_funded(id, &f.pool, &f.usdc, &DEFAULT_FUNDED_AMOUNT));
+            }
+            Self::MarkShipped => assert!(f.client.mark_shipped(id)),
+            Self::ConfirmDelivery => {
+                // A single confirmation does not change the status.
+                f.client.confirm_delivery(id, &f.issuer);
+                assert!(f.all_ids(from, 2).contains(id));
+                f.client.confirm_delivery(id, &f.buyer);
+            }
+            Self::Repay(_) => {
+                mint_tokens(&f.env, &f.usdc, &f.buyer, DEFAULT_FACE_VALUE as i128);
+                assert!(f.client.repay(id));
+            }
+            Self::RepayPartialInTwoSteps => {
+                mint_tokens(&f.env, &f.usdc, &f.buyer, DEFAULT_FACE_VALUE as i128);
+                let half = DEFAULT_FACE_VALUE / 2;
+                assert!(f.client.repay_partial(id, &half));
+                // A partial repayment keeps the invoice in its status.
+                assert!(f.all_ids(from, 2).contains(id));
+                assert!(f.client.repay_partial(id, &(DEFAULT_FACE_VALUE - half)));
+            }
+            Self::RepayEarly => {
+                mint_tokens(&f.env, &f.usdc, &f.buyer, DEFAULT_FACE_VALUE as i128);
+                assert!(f.client.repay_early(id));
+            }
+            Self::TriggerDefault(_) => {
+                f.env
+                    .ledger()
+                    .set_timestamp(f.due_date + DEFAULT_GRACE_SECONDS + 1);
+                assert!(f.client.trigger_default(id));
+            }
+            Self::MarkDefaulted(_) => assert!(f.client.mark_defaulted(id)),
+        }
+    }
+}
+
+#[test]
+fn test_invoice_ids_by_status_follows_every_transition_path() {
+    use InvoiceStatus::{Active, Confirmed, Funded};
+    let paths = [
+        StatusPath::ListForFinancing,
+        StatusPath::BatchListForFinancing,
+        StatusPath::Cancel,
+        StatusPath::ExpireListing,
+        StatusPath::MarkFunded,
+        StatusPath::MarkShipped,
+        StatusPath::ConfirmDelivery,
+        StatusPath::Repay(Funded),
+        StatusPath::Repay(Active),
+        StatusPath::Repay(Confirmed),
+        StatusPath::RepayPartialInTwoSteps,
+        StatusPath::RepayEarly,
+        StatusPath::TriggerDefault(Funded),
+        StatusPath::TriggerDefault(Active),
+        StatusPath::TriggerDefault(Confirmed),
+        StatusPath::MarkDefaulted(Funded),
+        StatusPath::MarkDefaulted(Active),
+        StatusPath::MarkDefaulted(Confirmed),
+    ];
+    for path in paths {
+        let f = status_fixture();
+        let (from, to) = path.endpoints();
+        let ids = f.create(3);
+        for id in ids.iter() {
+            f.advance_to(&id, from);
+        }
+        let mut model = ids.clone();
+        assert_eq!(f.all_ids(from, 2), reversed(&f.env, &model), "{path:?}");
+
+        // Move the middle invoice, so swap-and-pop has to relocate a row.
+        let moved = ids.get(1).unwrap();
+        path.apply(&f, &moved);
+        model_remove(&mut model, &moved);
+
+        assert_eq!(f.client.get(&moved).status, to, "{path:?}");
+        let from_ids = f.all_ids(from, 2);
+        assert_eq!(from_ids, reversed(&f.env, &model), "{path:?}");
+        assert!(
+            !from_ids.contains(&moved),
+            "{path:?}: still listed under {from:?}"
+        );
+        f.assert_all_have_status(&from_ids, from);
+        let to_ids = f.all_ids(to, 2);
+        assert_eq!(
+            to_ids,
+            vec![&f.env, moved.clone()],
+            "{path:?}: missing under {to:?}"
+        );
+    }
+}
+
+#[test]
+fn test_invoice_ids_by_status_filters_legacy_rows_without_markers() {
+    let f = status_fixture();
+    let ids = f.create(3);
+    let stale = f.create(1).get(0).unwrap();
+    assert!(f.client.cancel(&stale));
+
+    f.env.as_contract(&f.client.address, || {
+        let store = f.env.storage().persistent();
+        let created = InvoiceStatus::Created;
+        // A live row written before membership markers existed: its invoice
+        // is still `Created` but has no marker.
+        store.remove(&crate::DataKey::StatusMembership(
+            created,
+            crate::project_short_id(&ids.get(0).unwrap()),
+        ));
+        // A stale row from the old append-only index: the invoice left
+        // `Created` long ago but its row was never removed.
+        let count_key = crate::DataKey::StatusIndexCount(created as u32);
+        let count: u32 = store.get(&count_key).unwrap();
+        store.set(
+            &crate::DataKey::StatusIndexEntry(created as u32, count),
+            &stale,
+        );
+        store.set(&count_key, &(count + 1));
+    });
+
+    // The stale row is the last row, so the first page filters it out and
+    // comes back empty while still pointing at the remaining rows.
+    assert_eq!(
+        f.page(InvoiceStatus::Created, None, 1),
+        InvoiceIdPage {
+            ids: Vec::new(&f.env),
+            next: Some(3)
+        }
+    );
+    // A full walk returns the live legacy row via the invoice record and
+    // never the stale one.
+    let all = f.all_ids(InvoiceStatus::Created, MAX_PAGE_SIZE);
+    assert_eq!(all, reversed(&f.env, &ids));
+    assert!(!all.contains(&stale));
+    f.assert_all_have_status(&all, InvoiceStatus::Created);
+}
+
+#[test]
+fn test_invoice_ids_by_status_full_page_within_default_budget() {
+    const N: u32 = 150;
+    let f = status_fixture();
+    let ids = f.create(N);
+
+    // A full page from the middle of a large status index fits in the
+    // default per-call budget (the call would fail otherwise).
+    f.env.cost_estimate().budget().reset_default();
+    let page = f.page(InvoiceStatus::Created, Some(100), MAX_PAGE_SIZE);
+    let cpu_ids = f.env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_ids = f.env.cost_estimate().budget().memory_bytes_cost();
+    assert_eq!(page.ids, reversed(&f.env, &ids.slice(50..100)));
+    assert_eq!(page.next, Some(50));
+
+    // The same rows through `get_by_status` decode every invoice, so the
+    // ID-only view must be strictly cheaper in both CPU and memory.
+    f.env.cost_estimate().budget().reset_default();
+    let invoices = f
+        .client
+        .get_by_status(&InvoiceStatus::Created, &1, &MAX_PAGE_SIZE);
+    let cpu_full = f.env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_full = f.env.cost_estimate().budget().memory_bytes_cost();
+    assert_eq!(invoices.len(), MAX_PAGE_SIZE);
+    assert!(
+        cpu_ids < cpu_full,
+        "ID page must cost less CPU than the hydrated page: ids {cpu_ids}, full {cpu_full}"
+    );
+    assert!(
+        mem_ids < mem_full,
+        "ID page must cost less memory than the hydrated page: ids {mem_ids}, full {mem_full}"
+    );
 }
 
 #[test]
