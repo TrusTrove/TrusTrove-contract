@@ -364,6 +364,12 @@ key rather than as a new field on `EscrowRecord`, so records written by older
 contract versions continue to decode without migration. `get_locked_ledger()`
 returns `0` when the key is absent, which means "unknown" (a legacy lock).
 
+The read-only `get_lock_record(invoice_id)` view returns the active
+`EscrowRecord` in one call, or `None` when the `Locked` entry is absent. It
+reads the existing record directly and does not create storage on a missing
+read; existing `get_locked()` and `get_locked_at()` views remain available for
+backward compatibility.
+
 #### History Entry
 
 | DataKey | Type | Description |
