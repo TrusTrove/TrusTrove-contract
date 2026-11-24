@@ -476,6 +476,13 @@ impl EscrowContract {
     /// still custodies the outstanding principal. Repaying the remainder (or
     /// any amount at least equal to the residual) removes the record.
     ///
+    /// When a release leaves no residual (live lock cleared, or the
+    /// issuer-release marker consumed), a `final_release` event is emitted
+    /// with topics `(final_release, invoice_id)` and data equal to the
+    /// cumulative amount released for the invoice (issuer + pool releases from
+    /// history). Partial repayments that leave a residual emit nothing extra;
+    /// replays fail with `NotFound`, so the event fires at most once.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `invoice_id` - The invoice whose escrow is being released.
@@ -581,6 +588,7 @@ impl EscrowContract {
             repayment_amount,
             None,
         );
+        let mut residual_cleared = true;
         if let Some(mut record) = record.take() {
             if repayment_amount < record.amount {
                 record.amount -= repayment_amount;
@@ -588,6 +596,7 @@ impl EscrowContract {
                 env.storage()
                     .persistent()
                     .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                residual_cleared = false;
             } else {
                 env.storage().persistent().remove(&key);
             }
@@ -595,6 +604,11 @@ impl EscrowContract {
             env.storage().persistent().remove(&released_key);
         }
         Self::extend_instance_ttl(&env);
+        if residual_cleared {
+            // Emitted before `released_to_pool` so that event stays last.
+            let total = Self::cumulative_released(&env, &invoice_id);
+            events::final_release(&env, &invoice_id, total);
+        }
         events::released_to_pool(&env, &invoice_id, &pool, repayment_amount);
         true
     }
@@ -990,6 +1004,25 @@ impl EscrowContract {
             }
             None => Vec::new(&env),
         }
+    }
+
+    /// Sums every `ReleasedToIssuer` / `ReleasedToPool` history amount.
+    fn cumulative_released(env: &Env, invoice_id: &BytesN<32>) -> u128 {
+        let history: Vec<EscrowEvent> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::History(invoice_id.clone()))
+            .unwrap_or(Vec::new(env));
+        let mut total: u128 = 0;
+        for e in history.iter() {
+            if matches!(
+                e.action,
+                EscrowAction::ReleasedToIssuer | EscrowAction::ReleasedToPool
+            ) {
+                total = total.saturating_add(e.amount);
+            }
+        }
+        total
     }
 
     fn append_history(

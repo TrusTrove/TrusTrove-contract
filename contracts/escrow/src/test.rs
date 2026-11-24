@@ -1346,6 +1346,50 @@ fn test_repeated_partial_releases_converge_and_preserve_history_order() {
     assert_eq!(client.get_history(&invoice_id).len(), 4);
 }
 
+// #1204: `final_release` fires only when the residual reaches zero.
+#[test]
+fn test_final_release_event_only_when_residual_zero() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 120);
+    let amount = 1_000u128;
+    client.lock(&invoice_id, &amount, &issuer);
+
+    let has_final = |events: &CapturedEvents| {
+        events.iter().any(|(_, topics, _)| {
+            Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap()
+                == Symbol::new(&env, "final_release")
+        })
+    };
+
+    // Partial: no final event.
+    assert!(client.release_to_pool(&invoice_id, &400));
+    assert!(!has_final(&env.events().all()));
+
+    // Zero-amount (invalid) and over-release behaviour: invalid input rejected.
+    assert!(client.try_release_to_pool(&invoice_id, &0).is_err());
+
+    // Final: event with invoice id and cumulative amount.
+    assert!(client.release_to_pool(&invoice_id, &600));
+    let events = env.events().all();
+    assert!(has_final(&events));
+    let (_, topics, data) = events
+        .iter()
+        .find(|(_, t, _)| {
+            Symbol::try_from_val(&env, &t.get(0).unwrap()).unwrap()
+                == Symbol::new(&env, "final_release")
+        })
+        .unwrap();
+    assert_eq!(
+        BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(u128::try_from_val(&env, &data).unwrap(), amount);
+
+    // Idempotency: a replay is rejected and emits no second final event.
+    assert!(client.try_release_to_pool(&invoice_id, &1).is_err());
+    assert!(!has_final(&env.events().all()));
+}
+
 // #1006: `release_to_pool` transfers before mutating custody state, so a
 // rejected token transfer must leave the lock, timestamp, history and events
 // untouched.
