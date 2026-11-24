@@ -1873,6 +1873,49 @@ fn test_get_locked_returns_zero_for_unknown_id() {
 }
 
 #[test]
+fn test_get_lock_record_returns_active_amount_and_timestamp() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 100);
+    let amount = 1_234_567u128;
+    env.ledger().set_timestamp(1_000_000);
+
+    client.lock(&invoice_id, &amount, &issuer);
+
+    let record = client
+        .get_lock_record(&invoice_id)
+        .expect("active lock should be returned");
+    assert_eq!(record.invoice_id, invoice_id);
+    assert_eq!(record.amount, amount);
+    assert_eq!(record.locked_at, 1_000_000);
+    assert_eq!(record.issuer, issuer);
+}
+
+#[test]
+fn test_get_lock_record_returns_none_without_creating_missing_entry() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 101);
+    let contract_id = client.address.clone();
+    let key = DataKey::Locked(invoice_id.clone());
+
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+    assert!(client.get_lock_record(&invoice_id).is_none());
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+}
+
+#[test]
+fn test_get_lock_record_returns_none_after_lock_is_removed() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 102);
+    let amount = 1_000_000u128;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    assert!(client.get_lock_record(&invoice_id).is_some());
+
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert!(client.get_lock_record(&invoice_id).is_none());
+}
+
+#[test]
 fn test_get_locked_returns_amount_when_locked() {
     let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 10);

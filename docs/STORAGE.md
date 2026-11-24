@@ -364,6 +364,12 @@ key rather than as a new field on `EscrowRecord`, so records written by older
 contract versions continue to decode without migration. `get_locked_ledger()`
 returns `0` when the key is absent, which means "unknown" (a legacy lock).
 
+The read-only `get_lock_record(invoice_id)` view returns the active
+`EscrowRecord` in one call, or `None` when the `Locked` entry is absent. It
+reads the existing record directly and does not create storage on a missing
+read; existing `get_locked()` and `get_locked_at()` views remain available for
+backward compatibility.
+
 #### History Entry
 
 | DataKey | Type | Description |
@@ -445,6 +451,18 @@ The `History` vector entries are never removed — they form an append-only log 
 
 ### Persistent Storage
 
+#### Lifetime Volume Keys
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `LifetimeDepositedVolume` | `u128` | Lifetime gross `FundingAsset` base units deposited by LPs; only `deposit` increments it and withdrawals never reduce it (issue #1172) |
+| `LifetimeWithdrawnVolume` | `u128` | Lifetime gross `FundingAsset` base units returned by LP withdrawals; failed calls and internal funding transfers do not increment it (issue #1173) |
+| `LifetimeRepaidVolume` | `u128` | Lifetime gross `FundingAsset` base units received from successful buyer repayments, including early repayments and before any refund (issue #1174) |
+
+Each counter is created on its first successful operation and reads as `0`
+before that. They are persistent rather than instance keys so adding them does
+not grow the instance entry that every pool call reads.
+
 #### LP Position Keys
 
 | DataKey | Type | Description |
@@ -502,10 +520,11 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
+**Approximately 8 instance + 3 lifetime counters + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
 
 In practice most pools will have:
 - 8 instance keys (constant)
+- up to 3 persistent lifetime counters (created lazily on first use)
 - 5 keys per active LP
 - 2 keys per funded invoice (removed on repayment/default)
 
