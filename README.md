@@ -320,8 +320,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
-| Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
+| Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
