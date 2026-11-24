@@ -172,6 +172,8 @@ release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
+get_lock_record(invoice_id) → Option<EscrowRecord>
+get_lock_expiration(invoice_id) → Option<u64>
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
