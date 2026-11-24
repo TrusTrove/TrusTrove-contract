@@ -64,6 +64,29 @@ pub struct LPPosition {
     pub deposit_count: u32,
 }
 
+/// Principal/yield split of a withdrawal, returned by
+/// `preview_withdraw_breakdown` (issue #1185).
+///
+/// Every field is computed exactly as `withdraw` computes it for the same LP
+/// and `shares`, including integer truncation, so `principal + yield_amount`
+/// equals `usdc_amount` unless `principal` alone exceeds it (a loss after a
+/// default), in which case `yield_amount` is `0`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WithdrawalBreakdown {
+    /// USDC (in stroops) that `withdraw` would transfer:
+    /// `shares * total_deposits / total_shares`, truncated.
+    pub usdc_amount: u128,
+    /// Part of the LP's tracked principal (`LPInitialDeposit`) these shares
+    /// redeem: `shares * lp_initial_deposit / lp_shares`, truncated. This is
+    /// the amount `withdraw` deducts from the LP's tracked principal.
+    pub principal: u128,
+    /// Yield realised by the withdrawal:
+    /// `usdc_amount.saturating_sub(principal)`. This is the amount `withdraw`
+    /// adds to the LP's `yield_earned`.
+    pub yield_amount: u128,
+}
+
 /// SEP-41 share allowance granted by an LP to a spender.
 #[contracttype]
 #[derive(Clone, Debug)]

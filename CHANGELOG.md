@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `pool`: `preview_withdraw_breakdown(lp, shares)` view, returning a
+  `WithdrawalBreakdown { usdc_amount, principal, yield_amount }` so an LP can
+  see how much of a redemption is returned principal and how much is realised
+  yield before withdrawing. It shares its checks and truncating division with
+  `withdraw` through one internal helper, so the preview matches what
+  `withdraw` returns and records for the same state (#1185)
 - `registry`: `get_profile_count(role)` view, returning how many profiles are
   registered for `Role::Issuer` / `Role::Buyer` in O(1) from a single stored
   counter (#841)
