@@ -8763,6 +8763,11 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// re-measurement (cpu = 1,617,956 / mem = 336,743); the #833 batching
 /// guarantee itself is still enforced by the invoice-call-count assertions in
 /// `test_fund_invoice_uses_single_batched_read` (2 invoice calls, not 5).
+///
+/// Re-pinned by #1196: `escrow.lock` now also persists the lock's ledger
+/// sequence (`DataKey::LockedLedger`, one persistent write + TTL bump), which
+/// adds ~18k cpu / ~25k mem to the cross-contract call. The ceilings below pin
+/// the re-measurement at cpu = 1,642,618 / mem = 361,438 with small headroom.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -8776,12 +8781,12 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_625_000,
-        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_665_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 345_000,
-        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot) must stay within its re-pinned memory budget: {mem}"
+        mem < 372_000,
+        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned memory budget: {mem}"
     );
 }
 
