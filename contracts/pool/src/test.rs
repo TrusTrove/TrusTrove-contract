@@ -1746,6 +1746,130 @@ fn test_lp_position_after_deposit() {
 
 //  UTILIZATION RATE TESTS
 #[test]
+fn test_realized_loss_ratio_is_zero_without_funding_and_requires_no_auth() {
+    let te = setup();
+    te.env.set_auths(&[]);
+
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 0);
+}
+
+#[test]
+fn test_realized_loss_ratio_uses_lifetime_funding_after_default_and_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let defaulted = create_and_list(&te, &te.usdc_id);
+    let repaid = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&defaulted);
+    te.pool.fund_invoice(&repaid);
+
+    te.invoice.mark_shipped(&repaid);
+    te.invoice.confirm_delivery(&repaid, &te.issuer);
+    te.invoice.confirm_delivery(&repaid, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_200);
+    assert!(te.invoice.repay_early(&repaid));
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_201);
+    assert!(te.pool.handle_default(&defaulted));
+
+    assert_eq!(te.pool.get_stats().total_funded, 0);
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 5_000);
+}
+
+#[test]
+fn test_rejected_duplicate_funding_does_not_increase_cumulative_denominator() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .get(&DataKey::CumulativeFunded)
+            .unwrap()
+    });
+    assert_eq!(before, DEFAULT_FUNDED_AMOUNT);
+    assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
+
+    let after: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .get(&DataKey::CumulativeFunded)
+            .unwrap()
+    });
+    assert_eq!(after, before);
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_realized_loss_ratio_rejects_scaled_loss_overflow() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &(u128::MAX / 10_000 + 1));
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &u128::MAX);
+    });
+
+    te.pool.get_realized_loss_ratio_bps();
+}
+
+#[test]
+fn test_backfill_cumulative_funded_migrates_legacy_loss_history_once() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .remove(&DataKey::CumulativeFunded);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &100u128);
+    });
+
+    te.pool.backfill_cumulative_funded(&200);
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 5_000);
+    assert!(te.pool
+        .try_backfill_cumulative_funded(&200)
+        .is_err());
+}
+
+#[test]
+fn test_backfill_cumulative_funded_rejects_total_below_realized_loss() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .remove(&DataKey::CumulativeFunded);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &100u128);
+    });
+
+    assert!(te.pool
+        .try_backfill_cumulative_funded(&99)
+        .is_err());
+    let has_counter = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().instance().has(&DataKey::CumulativeFunded)
+    });
+    assert!(!has_counter);
+}
+
+#[test]
 fn test_utilization_rate_zero_when_no_deposits() {
     let te = setup();
     assert_eq!(te.pool.get_utilization_rate(), 0);

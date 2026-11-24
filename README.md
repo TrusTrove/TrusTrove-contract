@@ -180,6 +180,8 @@ Read-only views (`get_locked`) stay callable.
 
 ### pool_contract
 
+When upgrading a pool that predates the lifetime funding counter, the admin must call `backfill_cumulative_funded` once with the sum of successful `invoice_funded` event amounts before relying on the realized-loss ratio. Fresh pools initialize the counter automatically.
+
 USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
 ```
@@ -357,6 +359,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_realized_loss_ratio_bps` | `get_realized_loss_ratio_bps() -> u32` |
+| Pool | `backfill_cumulative_funded` | `backfill_cumulative_funded(total_funded: u128) -> ()` |
 | Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
 | Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
 | Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |

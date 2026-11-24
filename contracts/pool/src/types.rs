@@ -142,6 +142,10 @@ pub enum DataKey {
     /// `0` (the default when never set) means unrestricted. Appended after
     /// `FundedInvoiceBuyer` to keep existing discriminants stable.
     MaxTimeToMaturity,
+    /// Lifetime principal successfully deployed by this pool. Never decremented
+    /// on repayment or default; used as the realized-loss ratio denominator.
+    /// Appended to preserve existing key encoding.
+    CumulativeFunded,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,

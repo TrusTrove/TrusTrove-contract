@@ -81,6 +81,7 @@ struct PoolTotals {
     shares: u128,
     deposits: u128,
     funded: u128,
+    cumulative_funded: u128,
     yield_distributed: u128,
     loss_realised: u128,
     active_invoices: u32,
@@ -235,6 +236,9 @@ impl PoolContract {
             .instance()
             .set(&DataKey::TotalDeposits, &0u128);
         env.storage().instance().set(&DataKey::TotalFunded, &0u128);
+        env.storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &0u128);
         env.storage()
             .instance()
             .set(&DataKey::TotalYieldDistributed, &0u128);
@@ -1448,6 +1452,7 @@ impl PoolContract {
         let totals = Self::totals(&env);
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
+        let cumulative_funded = totals.cumulative_funded;
         let available = total_deposits - total_funded;
         if funded_amount > available {
             if stop_on_capacity {
@@ -1458,6 +1463,9 @@ impl PoolContract {
 
         let max_utilization_bps = totals.max_utilization_bps;
         let new_total_funded = total_funded + funded_amount;
+        let new_cumulative_funded = cumulative_funded
+            .checked_add(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         let utilization_after =
             Self::utilization_bps_or_panic(&env, new_total_funded, total_deposits);
         if utilization_after > max_utilization_bps {
@@ -1474,6 +1482,9 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &(total_funded + funded_amount));
+        env.storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &new_cumulative_funded);
         let active_count = totals.active_invoices;
         env.storage()
             .instance()
@@ -2066,6 +2077,74 @@ impl PoolContract {
             total_shares: totals.shares,
             max_utilization_bps: totals.max_utilization_bps,
         }
+    }
+
+    /// Returns cumulative realized principal loss as a percentage of all principal
+    /// successfully funded by this pool, expressed in basis points.
+    ///
+    /// The denominator is lifetime funding and does not decrease when invoices
+    /// are repaid or default. A pool with no recorded funding returns zero.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Overflow if cumulative loss exceeds lifetime funded principal, scaling
+    /// the cumulative loss by 10,000 overflows, or the result exceeds u32.
+    ///
+    /// # Returns
+    /// u32 - cumulative realized loss in basis points (10,000 = 100%).
+    ///
+    /// # Example
+    /// Call client.get_realized_loss_ratio_bps() for the current ratio.
+    pub fn get_realized_loss_ratio_bps(env: Env) -> u32 {
+        let totals = Self::totals(&env);
+        if totals.cumulative_funded == 0 {
+            return 0;
+        }
+        if totals.loss_realised > totals.cumulative_funded {
+            panic_with_error!(&env, PoolError::Overflow);
+        }
+        let scaled_loss = totals
+            .loss_realised
+            .checked_mul(10_000)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+        u32::try_from(scaled_loss / totals.cumulative_funded)
+            .unwrap_or_else(|_| panic_with_error!(&env, PoolError::Overflow))
+    }
+
+    /// Initializes the lifetime funded-principal counter on a pool upgraded from
+    /// a version that did not record it.
+    ///
+    /// The admin must provide the historical sum of successful funding amounts
+    /// from the pool's invoice_funded events. This is a one-time migration:
+    /// newly constructed pools already have the counter and cannot be changed.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin.
+    ///
+    /// # Panics
+    /// NotInitialized if this pool is not initialized. InvalidConfiguration if
+    /// the counter is already present or the supplied total is less than the
+    /// pool's cumulative realized loss.
+    pub fn backfill_cumulative_funded(env: Env, total_funded: u128) {
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        let key = DataKey::CumulativeFunded;
+        if env.storage().instance().has(&key) {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
+        }
+        let total_loss: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalLossRealised)
+            .unwrap_or(0);
+        if total_funded < total_loss {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
+        }
+        env.storage().instance().set(&key, &total_funded);
+        Self::extend_instance_ttl(&env);
     }
 
     /// Returns the LP's position, including shares, value, yield, and deposits.
@@ -2758,6 +2837,11 @@ impl PoolContract {
                 .storage()
                 .instance()
                 .get(&DataKey::TotalFunded)
+                .unwrap_or(0),
+            cumulative_funded: env
+                .storage()
+                .instance()
+                .get(&DataKey::CumulativeFunded)
                 .unwrap_or(0),
             yield_distributed: env
                 .storage()
