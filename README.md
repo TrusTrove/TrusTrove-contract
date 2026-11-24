@@ -362,10 +362,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `set_protocol_fee` | `set_protocol_fee(fee_bps: u32, treasury: Address) -> bool` |
 | Pool | `get_protocol_fee_bps` | `get_protocol_fee_bps() -> u32` |
 | Pool | `get_treasury` | `get_treasury() -> Address` |
-| Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
-| Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
 | Pool | `set_max_time_to_maturity` | `set_max_time_to_maturity(max_seconds: u64) -> bool` |
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
+| Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
+| Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
 | Pool Factory | `__constructor` | `__constructor(admin: Address) -> ()` |
 | Pool Factory | `register_asset` | `register_asset(asset: Address, pool_wasm_hash: BytesN<32>, invoice_contract: Address, escrow_contract: Address) -> Address` |
 | Pool Factory | `register_existing_pool` | `register_existing_pool(asset: Address, pool_address: Address) -> ()` |

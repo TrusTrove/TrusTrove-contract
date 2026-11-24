@@ -2423,66 +2423,6 @@ impl PoolContract {
             })
     }
 
-    /// Sets the minimum invoice discount (yield floor) enforced by
-    /// `fund_invoice`, in basis points (issue #829).
-    ///
-    /// Authorization mirrors `set_protocol_fee`: the *stored* admin must sign;
-    /// the `bps` argument is the new floor, not an actor, so a caller can
-    /// never self-authorize past the check. A floor of `0` (the default, and
-    /// the state of every instance predating this feature) disables the check
-    /// entirely, leaving funding behavior unchanged until an admin opts in.
-    /// The value a sensible floor takes is an admin/policy decision outside
-    /// the scope of the mechanism added here.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `bps` - The new floor in basis points. `0` disables the floor; the
-    ///   maximum is `MAX_MIN_DISCOUNT_BPS` (5000 bps = 50%), matching the hard
-    ///   cap `invoice::list_for_financing` places on any invoice's discount.
-    ///
-    /// # Auth
-    /// Requires authorization from the stored `admin`.
-    ///
-    /// # Panics
-    /// * `NotInitialized` if the pool is not initialized.
-    /// * `InvalidConfiguration` if `bps` exceeds `MAX_MIN_DISCOUNT_BPS`.
-    ///
-    /// # Returns
-    /// * `bool` - `true` when the floor is updated.
-    ///
-    /// # Example
-    /// ```ignore
-    /// client.set_min_discount(&300);
-    /// ```
-    pub fn set_min_discount(env: Env, bps: u32) -> bool {
-        require_not_paused(&env);
-        let admin =
-            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
-        admin.require_auth();
-        if bps > MAX_MIN_DISCOUNT_BPS {
-            panic_with_error!(&env, PoolError::InvalidConfiguration);
-        }
-        let old_bps = env
-            .storage()
-            .instance()
-            .get(&DataKey::MinDiscountBps)
-            .unwrap_or(0u32);
-        env.storage().instance().set(&DataKey::MinDiscountBps, &bps);
-        events::min_discount_updated(&env, old_bps, bps);
-        Self::extend_instance_ttl(&env);
-        true
-    }
-
-    /// Returns the current minimum discount floor in basis points.
-    /// Defaults to `0` (no floor) when never set, so instances predating
-    /// issue #829 keep their behavior (mirrors `get_protocol_fee_bps`).
-    pub fn get_min_discount_bps(env: Env) -> u32 {
-        env.storage()
-            .instance()
-            .get(&DataKey::MinDiscountBps)
-            .unwrap_or(0u32)
-    }
-
     /// Sets the maximum remaining time to maturity, in seconds, that an
     /// invoice may have when `fund_invoice` or `batch_fund_invoice` funds it
     /// (issue #1184).
@@ -2541,6 +2481,66 @@ impl PoolContract {
             .instance()
             .get(&DataKey::MaxTimeToMaturity)
             .unwrap_or(0u64)
+    }
+
+    /// Sets the minimum invoice discount (yield floor) enforced by
+    /// `fund_invoice`, in basis points (issue #829).
+    ///
+    /// Authorization mirrors `set_protocol_fee`: the *stored* admin must sign;
+    /// the `bps` argument is the new floor, not an actor, so a caller can
+    /// never self-authorize past the check. A floor of `0` (the default, and
+    /// the state of every instance predating this feature) disables the check
+    /// entirely, leaving funding behavior unchanged until an admin opts in.
+    /// The value a sensible floor takes is an admin/policy decision outside
+    /// the scope of the mechanism added here.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `bps` - The new floor in basis points. `0` disables the floor; the
+    ///   maximum is `MAX_MIN_DISCOUNT_BPS` (5000 bps = 50%), matching the hard
+    ///   cap `invoice::list_for_financing` places on any invoice's discount.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidConfiguration` if `bps` exceeds `MAX_MIN_DISCOUNT_BPS`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the floor is updated.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_min_discount(&300);
+    /// ```
+    pub fn set_min_discount(env: Env, bps: u32) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        if bps > MAX_MIN_DISCOUNT_BPS {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
+        }
+        let old_bps = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDiscountBps)
+            .unwrap_or(0u32);
+        env.storage().instance().set(&DataKey::MinDiscountBps, &bps);
+        events::min_discount_updated(&env, old_bps, bps);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the current minimum discount floor in basis points.
+    /// Defaults to `0` (no floor) when never set, so instances predating
+    /// issue #829 keep their behavior (mirrors `get_protocol_fee_bps`).
+    pub fn get_min_discount_bps(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinDiscountBps)
+            .unwrap_or(0u32)
     }
 
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
