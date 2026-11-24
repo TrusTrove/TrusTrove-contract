@@ -772,6 +772,123 @@ impl PoolContract {
         Self::require_initialized(&env);
         Self::preview_withdraw_amount(&env, shares)
     }
+
+    /// Reports the maximum amount of shares one LP could redeem **right now**,
+    /// and the USDC that redemption would pay out, given both their own share
+    /// balance and the pool's currently available liquidity
+    /// (`total_deposits - total_funded`). Issue #1169.
+    ///
+    /// This is a read-only view: it never panics for the normal "nothing to
+    /// redeem" cases — an LP with no shares, an uninitialised pool, zero
+    /// available liquidity, or a share price that would round the entire
+    /// redemption down to zero all return `{ max_shares: 0, max_assets: 0 }`.
+    /// A UI that wants to show a slider from `0` to "withdraw everything"
+    /// without first probing with `preview_withdraw` (which does panic on
+    /// those edge cases) can call this view instead.
+    ///
+    /// # Rounding
+    /// Mirrors `withdraw` exactly:
+    ///
+    /// - `max_assets = floor(max_shares * total_deposits / total_shares)`
+    /// - `max_shares` is chosen as the largest `s <= lp_shares` such that
+    ///   `floor(s * total_deposits / total_shares) <= available`, using the
+    ///   closed form `s_cap = ((available + 1) * total_shares - 1) /
+    ///   total_deposits`.
+    ///
+    /// So feeding `max_shares` back into `withdraw` cannot fail with
+    /// `InsufficientLiquidity`, and the returned `max_assets` is exactly what
+    /// the matching `withdraw(lp, max_shares)` would transfer.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider to query. Not required to authorise:
+    ///   the result is a public function of pool state.
+    ///
+    /// # Returns
+    /// * `LpWithdrawalCapacity { max_shares, max_assets }`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let cap = client.preview_lp_withdrawal_capacity(&lp);
+    /// let paid = client.withdraw(&lp, &cap.max_shares); // == cap.max_assets
+    /// ```
+    pub fn preview_lp_withdrawal_capacity(env: Env, lp: Address) -> LpWithdrawalCapacity {
+        // Deliberately not calling `require_initialized`: before init,
+        // `TotalShares`/`TotalDeposits` are unset and `totals()` reads zero,
+        // which the branches below already treat as "no capacity". A view
+        // that reports `(0, 0)` rather than panicking is strictly more useful
+        // for a wallet that is still deciding whether the pool is live.
+        let lp_shares: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPShares(lp))
+            .unwrap_or(0);
+        if lp_shares == 0 {
+            return LpWithdrawalCapacity {
+                max_shares: 0,
+                max_assets: 0,
+            };
+        }
+
+        let totals = Self::totals(&env);
+        if totals.shares == 0 || totals.deposits == 0 {
+            return LpWithdrawalCapacity {
+                max_shares: 0,
+                max_assets: 0,
+            };
+        }
+
+        // Should never underflow — `TotalFunded` is only ever bumped against
+        // `TotalDeposits`, but belt-and-braces to keep the view total — never
+        // panic on a corrupt instance.
+        let available = totals.deposits.saturating_sub(totals.funded);
+        if available == 0 {
+            return LpWithdrawalCapacity {
+                max_shares: 0,
+                max_assets: 0,
+            };
+        }
+
+        // Exact inverse of `floor(s * D / S) <= A`:
+        //   s * D < (A + 1) * S  <=>  s <= ((A + 1) * S - 1) / D
+        // Both multiplications are checked; a `None` here means the pool's
+        // own accounting would overflow in `withdraw` too, so we clamp to
+        // the LP's balance and let the normal `withdraw` path surface the
+        // overflow when the user acts on it.
+        let numerator = available
+            .checked_add(1)
+            .and_then(|v| v.checked_mul(totals.shares));
+        let s_cap = match numerator {
+            Some(n) => (n - 1) / totals.deposits,
+            None => lp_shares,
+        };
+
+        let mut max_shares = core::cmp::min(s_cap, lp_shares);
+        if max_shares == 0 {
+            return LpWithdrawalCapacity {
+                max_shares: 0,
+                max_assets: 0,
+            };
+        }
+
+        // `withdraw` panics with `MinimumDeposit` if the redemption rounds
+        // down to zero. Match that dust-guard here so callers never see a
+        // "can redeem N shares for 0 assets" result.
+        let mut max_assets = match max_shares.checked_mul(totals.deposits) {
+            Some(v) => v / totals.shares,
+            None => 0,
+        };
+        if max_assets == 0 {
+            max_shares = 0;
+            max_assets = 0;
+        }
+
+        LpWithdrawalCapacity {
+            max_shares,
+            max_assets,
+        }
+    }
+
     /// Withdraws shares from the pool and transfers USDC to the LP.
     ///
     /// # Arguments
