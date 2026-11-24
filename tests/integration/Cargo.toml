@@ -14,6 +14,8 @@ crate-type = ["rlib"]
 soroban-sdk = { workspace = true }
 
 [dev-dependencies]
+serde_json = "1"
+tempfile = "3"
 soroban-sdk = { workspace = true, features = ["testutils"] }
 trusttrove-registry = { workspace = true }
 trusttrove-invoice = { workspace = true }
