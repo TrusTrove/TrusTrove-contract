@@ -248,18 +248,6 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalLossRealised, &0u128);
-        // Lifetime volume counters start at zero. They are independent of the
-        // net `TotalDeposits` / `TotalDeposits - withdrawals` accounting and
-        // are never decremented (#1172, #1173, #1174).
-        env.storage()
-            .instance()
-            .set(&DataKey::LifetimeDepositedVolume, &0u128);
-        env.storage()
-            .instance()
-            .set(&DataKey::LifetimeWithdrawnVolume, &0u128);
-        env.storage()
-            .instance()
-            .set(&DataKey::LifetimeRepaidVolume, &0u128);
         // Explicitly set DataKey::ProtocolFeeBps to 0 and DataKey::TreasuryAddress to treasury
         env.storage()
             .instance()
@@ -682,10 +670,6 @@ impl PoolContract {
         lp.require_auth();
         let shares_to_issue = Self::shares_for_deposit(&env, usdc_amount);
         let total_deposits = Self::totals(&env).deposits;
-        let new_deposited_volume =
-            Self::read_lifetime_volume(&env, &DataKey::LifetimeDepositedVolume)
-                .checked_add(usdc_amount)
-                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
 
         let usdc_id = Self::funding_asset(&env);
         let usdc = token::Client::new(&env, &usdc_id);
@@ -695,9 +679,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + usdc_amount));
-        env.storage()
-            .instance()
-            .set(&DataKey::LifetimeDepositedVolume, &new_deposited_volume);
+        Self::bump_lifetime_volume(&env, &DataKey::LifetimeDepositedVolume, usdc_amount);
 
         let lp_deposit_count_key = DataKey::LPDepositCount(lp.clone());
         let count: u32 = env
@@ -874,10 +856,6 @@ impl PoolContract {
 
         let total_deposits = Self::totals(&env).deposits;
         let usdc_to_return = Self::preview_withdraw_amount(&env, shares);
-        let new_withdrawn_volume =
-            Self::read_lifetime_volume(&env, &DataKey::LifetimeWithdrawnVolume)
-                .checked_add(usdc_to_return)
-                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
 
         let usdc_id = Self::funding_asset(&env);
         let usdc = token::Client::new(&env, &usdc_id);
@@ -891,9 +869,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
-        env.storage()
-            .instance()
-            .set(&DataKey::LifetimeWithdrawnVolume, &new_withdrawn_volume);
+        Self::bump_lifetime_volume(&env, &DataKey::LifetimeWithdrawnVolume, usdc_to_return);
 
         if remaining_shares == 0 {
             // Full withdrawal: reset LP-scoped storage to prevent stale state
@@ -2769,10 +2745,24 @@ impl PoolContract {
             / totals.shares
     }
 
-    /// Reads a lifetime volume counter, defaulting to `0` for pool instances
-    /// deployed before the counter key existed (issue #1172/#1173/#1174).
+    /// Reads a lifetime volume counter, defaulting to `0` until the first
+    /// successful operation writes it (issue #1172/#1173/#1174). The counters
+    /// live in persistent storage so they do not enlarge the instance entry
+    /// read by every unrelated pool call.
     fn read_lifetime_volume(env: &Env, key: &DataKey) -> u128 {
-        env.storage().instance().get(key).unwrap_or(0)
+        env.storage().persistent().get(key).unwrap_or(0)
+    }
+
+    /// Increments a lifetime volume counter and refreshes its TTL.
+    fn bump_lifetime_volume(env: &Env, key: &DataKey, amount: u128) -> u128 {
+        let updated = Self::read_lifetime_volume(env, key)
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+        env.storage().persistent().set(key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        updated
     }
 
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
@@ -3051,9 +3041,6 @@ impl PoolContract {
         let new_active_count = active_count
             .checked_sub(1)
             .unwrap_or_else(|| panic_with_error!(env, PoolError::ActiveCountUnderflow));
-        let new_repaid_volume = Self::read_lifetime_volume(env, &DataKey::LifetimeRepaidVolume)
-            .checked_add(amount)
-            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
 
         // #969: the refund destination is only as trustworthy as the caller.
         // `receive_repayment_with_refund` trusts the invoice contract for the
@@ -3108,9 +3095,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::ActiveInvoiceCount, &new_active_count);
-        env.storage()
-            .instance()
-            .set(&DataKey::LifetimeRepaidVolume, &new_repaid_volume);
+        Self::bump_lifetime_volume(env, &DataKey::LifetimeRepaidVolume, amount);
 
         env.storage().persistent().remove(&funded_key);
         env.storage()
