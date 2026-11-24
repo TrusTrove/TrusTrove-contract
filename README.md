@@ -641,6 +641,21 @@ rustup run 1.85.0 stellar contract build
 cargo test --workspace
 ```
 
+#### Reproducing randomized (proptest) failures
+
+`scripts/proptest_seed.py` runs `cargo test --workspace` with a printed
+`PROPTEST_RNG_SEED` and saves the seed plus each minimal failing case to
+`target/proptest-report/report.json`.
+
+```bash
+python3 scripts/proptest_seed.py            # random seed, printed and persisted
+python3 scripts/proptest_seed.py --seed N   # one-command replay of a CI/local failure
+python3 scripts/proptest_seed.py --replay   # replay the seed saved in the last report
+```
+
+On failure the seed, the minimal failing input and the replay command are
+printed at the end of the output. Script tests: `python3 -m unittest discover -s scripts`.
+
 ### 4. Deploy to testnet
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full deployment
