@@ -25,6 +25,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pool`: `get_lifetime_withdrawn_volume()` view backed by a cumulative counter
   incremented only by successful LP `withdraw` amounts. Failed calls and
   internal funding transfers leave it unchanged (#1173)
+- `invoice`: `exists(invoice_id) -> bool` view, so callers can check an ID
+  without trapping `NotFound` from `get`. It is a pure presence check on the
+  invoice record: checking a missing ID creates no storage, and checking an
+  existing one does not extend its TTL. Invoices in every status, including
+  cancelled and repaid ones, exist (#1153)
 - `pool`: `get_lifetime_repaid_volume()` view backed by a cumulative counter of
   the full amount received by successful `receive_repayment` /
   `receive_repayment_with_refund` calls, including early repayments. Replayed

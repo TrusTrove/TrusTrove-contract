@@ -132,6 +132,7 @@ repay_partial(invoice_id, amount) → bool
 repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
+exists(invoice_id) → bool  ← presence check, never errors or writes
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status, page, page_size) → Vec<Invoice>
 get_by_issuer(address, page, page_size) → Vec<Invoice>
@@ -155,6 +156,21 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - **Atomic**: one invalid entry reverts the entire batch, including invoices already created by earlier entries. Callers fix the bad entry and resubmit the whole batch.
 - `issuer` authorizes **once** for the whole batch, not once per entry.
 - Panics with `BatchSizeExceeded` (`#28`) above 50 entries.
+
+#### `exists(invoice_id) → bool`
+- Returns whether an invoice record exists for `invoice_id`, without calling `get` and trapping `NotFound` (`#2`) (#1153). For any ID, `exists` is `true` exactly when `get` succeeds.
+- An invoice exists once created, in any status: cancelled, expired, repaid and defaulted invoices still exist. Only the invoice record counts, not index or attestation entries that mention the ID.
+- A pure presence check that never writes storage. A missing ID creates nothing, and an existing ID's TTL is not extended (same as `get`).
+- No authorization is required.
+
+```rust
+// Instead of trapping the not-found error:
+// let found = client.try_get(&invoice_id).is_ok();
+if client.exists(&invoice_id) {
+    let invoice = client.get(&invoice_id);
+    // ...
+}
+```
 
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
@@ -291,6 +307,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
+| Invoice | `exists` | `exists(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
@@ -384,7 +401,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 162 public entry points across five deployable contracts.**
+**Total: 163 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->

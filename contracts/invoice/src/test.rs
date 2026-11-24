@@ -2180,6 +2180,205 @@ fn test_get_unknown_panics() {
     client.get(&fake_id);
 }
 
+// ============== ISSUE #1153: exists(invoice_id) ==============
+//
+// `exists` is a pure presence check on `DataKey::Invoice`. The tests pin
+// that it agrees with `get`, needs no auth, survives every terminal status,
+// ignores IDs that only appear under other keys, and, most importantly, never
+// writes storage. That is checked by comparing every ledger entry (values and
+// TTLs) before and after the call.
+
+/// An ID that was never created: the real one with its last byte flipped.
+fn unknown_id_near(env: &Env, id: &BytesN<32>) -> BytesN<32> {
+    let mut bytes = id.to_array();
+    bytes[31] ^= 0xff;
+    BytesN::from_array(env, &bytes)
+}
+
+#[test]
+fn test_exists_true_for_created_invoice() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let first = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let second = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    assert!(client.exists(&first));
+    assert!(client.exists(&second));
+    assert!(!client.exists(&unknown_id_near(&env, &first)));
+}
+
+#[test]
+fn test_exists_false_for_missing_and_boundary_ids() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    // On an empty contract and after an invoice exists, the all-zero and
+    // all-0xff IDs (the bounds of `BytesN<32>`) report `false` without
+    // panicking.
+    for _ in 0..2 {
+        assert!(!client.exists(&BytesN::from_array(&env, &[0u8; 32])));
+        assert!(!client.exists(&BytesN::from_array(&env, &[0xffu8; 32])));
+        let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+        client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    }
+}
+
+#[test]
+fn test_exists_on_missing_id_creates_no_storage() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let real = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let missing = unknown_id_near(&env, &real);
+
+    let before = env.to_ledger_snapshot().ledger_entries;
+    for _ in 0..3 {
+        assert!(!client.exists(&missing));
+    }
+    // Every ledger entry (keys, values and TTLs) is unchanged: no default
+    // record, no counter, no TTL entry was written for the missing ID.
+    assert_eq!(env.to_ledger_snapshot().ledger_entries, before);
+    env.as_contract(&client.address, || {
+        assert!(!env
+            .storage()
+            .persistent()
+            .has(&crate::DataKey::Invoice(missing.clone())));
+    });
+}
+
+#[test]
+fn test_exists_on_existing_id_writes_nothing() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let key = crate::DataKey::Invoice(id.clone());
+
+    // Run the record's TTL down below `TTL_THRESHOLD`, where a read-time
+    // `extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO)` would actually extend it.
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - TTL_THRESHOLD + 1);
+    let ttl_run_down =
+        env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    assert!(ttl_run_down < TTL_THRESHOLD);
+    let ttl_before = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    let before = env.to_ledger_snapshot().ledger_entries;
+
+    // Idempotent, and like `get` it does not extend the record's TTL.
+    for _ in 0..3 {
+        assert!(client.exists(&id));
+    }
+    assert_eq!(env.to_ledger_snapshot().ledger_entries, before);
+    let ttl_after = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    assert_eq!(ttl_after, ttl_before);
+}
+
+#[test]
+fn test_exists_matches_get() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let real = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let candidates = [
+        real.clone(),
+        unknown_id_near(&env, &real),
+        BytesN::from_array(&env, &[0u8; 32]),
+        BytesN::from_array(&env, &[0xffu8; 32]),
+    ];
+    for id in candidates.iter() {
+        let got = client.try_get(id);
+        assert_eq!(client.exists(id), got.is_ok());
+        if !client.exists(id) {
+            assert_eq!(got.err(), Some(Ok(InvoiceError::NotFound.into())));
+        }
+    }
+}
+
+#[test]
+fn test_exists_requires_no_auth() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Drop every mocked authorization: a read-only view must still work and
+    // must not request any.
+    env.set_auths(&[]);
+    assert!(client.exists(&id));
+    assert!(!client.exists(&unknown_id_near(&env, &id)));
+    assert!(env.auths().is_empty());
+}
+
+#[test]
+fn test_exists_ignores_ids_only_present_under_other_keys() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let real = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let phantom = unknown_id_near(&env, &real);
+
+    // Reference `phantom` from an index row and a status-membership marker,
+    // but never store an invoice record for it.
+    env.as_contract(&client.address, || {
+        let store = env.storage().persistent();
+        store.set(
+            &crate::DataKey::IssuerIndexEntry(issuer.clone(), 99),
+            &phantom,
+        );
+        store.set(
+            &crate::DataKey::StatusMembership(
+                InvoiceStatus::Created,
+                crate::project_short_id(&phantom),
+            ),
+            &99u32,
+        );
+    });
+
+    assert!(!client.exists(&phantom));
+    assert!(client.exists(&real));
+}
+
+#[test]
+fn test_exists_stays_true_through_terminal_statuses() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    client.set_expiry_window(&1);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let new_invoice = || client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let fund = |id: &BytesN<32>| {
+        attest(&env, &client, id);
+        assert!(client.list_for_financing(id, &DEFAULT_DISCOUNT_BPS));
+        assert!(client.mark_funded(id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT));
+    };
+
+    let cancelled = new_invoice();
+    assert!(client.cancel(&cancelled));
+
+    let expired = new_invoice();
+    attest(&env, &client, &expired);
+    assert!(client.list_for_financing(&expired, &DEFAULT_DISCOUNT_BPS));
+    env.ledger().set_timestamp(env.ledger().timestamp() + 2);
+    assert!(client.expire_listing(&expired, &issuer));
+
+    let repaid = new_invoice();
+    fund(&repaid);
+    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+    assert!(client.repay(&repaid));
+
+    let defaulted = new_invoice();
+    fund(&defaulted);
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
+    assert!(client.trigger_default(&defaulted));
+
+    for (id, status) in [
+        (cancelled, InvoiceStatus::Cancelled),
+        (expired, InvoiceStatus::Expired),
+        (repaid, InvoiceStatus::Repaid),
+        (defaulted, InvoiceStatus::Defaulted),
+    ] {
+        assert_eq!(client.get(&id).status, status);
+        assert!(client.exists(&id), "{status:?} invoice must still exist");
+    }
+}
+
 #[test]
 fn test_dual_confirmation_both_must_confirm() {
     let (env, client, issuer, buyer, _, usdc) = setup();

@@ -2572,6 +2572,48 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id)
     }
 
+    /// Returns whether an invoice with `invoice_id` exists (issue #1153).
+    ///
+    /// Lets callers check an ID without calling `get` and trapping
+    /// `InvoiceError::NotFound`. For any ID, `exists` returns `true` exactly
+    /// when `get` would succeed.
+    ///
+    /// An invoice exists once `create` has stored its record, in any status.
+    /// Cancelled, expired, repaid and defaulted invoices still exist: no code
+    /// path deletes invoice records. Only the invoice record itself
+    /// (`DataKey::Invoice`) counts, so an ID that appears only in an index or
+    /// an attestation key does not.
+    ///
+    /// This is a pure presence check (`has` on the invoice key). It does not
+    /// decode the invoice and never writes storage: checking a missing ID
+    /// creates nothing, and, like `get`, checking an existing ID does not
+    /// extend its TTL.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to look up.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if the invoice record exists, `false` otherwise.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if client.exists(&invoice_id) {
+    ///     let invoice = client.get(&invoice_id);
+    /// }
+    /// ```
+    pub fn exists(env: Env, invoice_id: BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .has(&DataKey::Invoice(invoice_id))
+    }
+
     /// Lists a page of invoices for a given status.
     ///
     /// The status index is append-only (entries are not reclaimed when an
