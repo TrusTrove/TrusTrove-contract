@@ -772,6 +772,57 @@ impl PoolContract {
         Self::require_initialized(&env);
         Self::preview_withdraw_amount(&env, shares)
     }
+
+    /// Previews how a withdrawal of `shares` by `lp` splits into principal and
+    /// yield, without authorization or state changes.
+    ///
+    /// Uses the same rounding as `withdraw`:
+    /// * `usdc = (shares * total_deposits) / total_shares`
+    /// * `principal = (shares * lp_initial_deposit) / lp_shares`
+    /// * `yield = usdc.saturating_sub(principal)`
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider address.
+    /// * `shares` - The number of shares to redeem.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized`, `InvalidAmount`, `MinimumDeposit`,
+    ///   `InsufficientLiquidity`, `Overflow` as in `preview_withdraw`.
+    /// * `NoShares` if `lp` has no shares.
+    /// * `InsufficientShares` if `lp` owns fewer than `shares`.
+    ///
+    /// # Returns
+    /// * `(u128, u128)` - `(principal_portion, yield_portion)`.
+    pub fn preview_withdraw_split(env: Env, lp: Address, shares: u128) -> (u128, u128) {
+        Self::require_initialized(&env);
+        let usdc_to_return = Self::preview_withdraw_amount(&env, shares);
+        let lp_shares: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPShares(lp.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NoShares));
+        if shares > lp_shares {
+            panic_with_error!(&env, PoolError::InsufficientShares);
+        }
+        let init_dep: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPInitialDeposit(lp))
+            .unwrap_or(0);
+        let principal_scaled = shares
+            .checked_mul(init_dep)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+        let principal_portion = principal_scaled / lp_shares;
+        (
+            principal_portion,
+            usdc_to_return.saturating_sub(principal_portion),
+        )
+    }
+
     /// Withdraws shares from the pool and transfers USDC to the LP.
     ///
     /// # Arguments

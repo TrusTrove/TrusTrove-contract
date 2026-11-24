@@ -1193,6 +1193,51 @@ fn test_preview_withdraw_fails_if_insufficient_liquidity() {
 
     te.pool.preview_withdraw(&300_000_000);
 }
+
+#[test]
+fn test_preview_withdraw_split_matches_withdraw() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    te.env.set_auths(&[]);
+    let (principal, yld) = te.pool.preview_withdraw_split(&te.lp, &5_000_000_000);
+    // Idempotent: repeated calls give the same result.
+    assert_eq!(
+        (principal, yld),
+        te.pool.preview_withdraw_split(&te.lp, &5_000_000_000)
+    );
+    te.env.mock_all_auths_allowing_non_root_auth();
+    let actual = te.pool.withdraw(&te.lp, &5_000_000_000);
+    assert_eq!(principal + yld, actual);
+    assert_eq!(principal, 5_000_000_000);
+}
+
+#[test]
+fn test_preview_withdraw_split_full_withdrawal_boundary() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let (principal, yld) = te.pool.preview_withdraw_split(&te.lp, &10_000_000_000);
+    assert_eq!(principal, 10_000_000_000);
+    assert_eq!(yld, 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_preview_withdraw_split_rejects_zero_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.preview_withdraw_split(&te.lp, &0);
+}
+
+#[test]
+#[should_panic]
+fn test_preview_withdraw_split_rejects_excess_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.preview_withdraw_split(&te.lp, &20_000_000_000);
+}
+
 //  TRANSFER TESTS
 #[test]
 fn test_transfer_succeeds() {
