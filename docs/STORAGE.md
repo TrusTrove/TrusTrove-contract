@@ -347,6 +347,7 @@ Cancelled = 8   // issuer cancelled before listing
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID. Created by `lock()` and removed by `release_to_pool()` (full release), `handle_default()`, or when the residual is fully repaid. |
+| `LockedLedger(BytesN<32>)` | `u64` | Ledger sequence in which the lock was created (#1196). Written by `lock()` and removed when the `Locked` record is removed. Absent for locks created before ledger tracking existed; `get_locked_ledger()` returns `0` for those records. A partial `release_to_pool` preserves it. |
 | `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default`. Written when the `Locked` record is removed during `release_to_issuer`. |
 
 ```
@@ -357,6 +358,17 @@ EscrowRecord {
     issuer:     Address,   // Issuer authorized to receive released funds
 }
 ```
+
+The creation ledger is deliberately stored in the separate `LockedLedger`
+key rather than as a new field on `EscrowRecord`, so records written by older
+contract versions continue to decode without migration. `get_locked_ledger()`
+returns `0` when the key is absent, which means "unknown" (a legacy lock).
+
+The read-only `get_lock_record(invoice_id)` view returns the active
+`EscrowRecord` in one call, or `None` when the `Locked` entry is absent. It
+reads the existing record directly and does not create storage on a missing
+read; existing `get_locked()` and `get_locked_at()` views remain available for
+backward compatibility.
 
 #### History Entry
 
@@ -381,11 +393,11 @@ The escrow supports partial `release_to_pool` calls. The behavior is:
 1. On each `release_to_pool(invoice_id, repayment_amount)` call, if a live `Locked` record exists with `amount > repayment_amount`:
    - The `released_to_pool` event is emitted with the `repayment_amount`.
    - The `Locked` record's `amount` field is reduced by `repayment_amount` (in-place update).
-   - The original `locked_at` timestamp is preserved.
+   - The original `locked_at` timestamp and `LockedLedger` sequence are preserved.
    - `get_locked()` now returns the reduced residual amount.
 2. If `repayment_amount >= record.amount`:
    - The full remaining lock is repaid.
-   - The `Locked` record is removed (consumed).
+   - The `Locked` record and its `LockedLedger` key are removed (consumed).
    - If an `IssuerReleased` marker was present (funding path already paid issuer), it is also removed.
    - A second `release_to_pool` call on the same invoice (with no live lock and no marker) reverts with `NotFound` — the `NotFound` guard (#2) ensures idempotent settlement at most once per funded invoice.
 3. The `History` vector appends a `ReleasedToPool` event on each call, enabling indexers to track cumulative repayment progress and the residual lock state over time.
@@ -399,11 +411,14 @@ The `Locked` record (and optionally the `IssuerReleased` marker) is removed unde
 - **Timeout release**: `release_after_timeout` is called after `now >= locked_at + timeout_window`. The record is removed and funds returned to the pool.
 - **Second call guard**: A second `release_to_pool` call on an invoice that has already had its lock fully consumed and marker consumed reverts with `NotFound`, preventing double-release.
 
-The `History` vector entries are never removed — they form an append-only log of all escrow actions for the invoice. Indexers can reconstruct the residual lock state by summing `ReleasedToPool` amounts and comparing against the original `Locked.amount`.
+In every case where the `Locked` record is removed, the matching `LockedLedger`
+key is removed too.
+
+The `History` vector entries are never removed — they form an append-only log of all escrow actions for the invoice. Indexers can reconstruct the residual lock state by summing `ReleasedToPool` amounts and comparing against the original `Locked.amount`. `get_total_returned_to_pool()` performs that sum on-chain with checked `u128` arithmetic, counting `ReleasedToPool` and `DefaultHandled` only; issuer and timeout releases are excluded because they are not repayments.
 
 ### Storage Key Count
 
-**Approximately 3 keys per funded invoice** — a transient `Locked` record (removed on full release/default/timeout), an
+**Approximately 4 keys per funded invoice** — a transient `Locked` record (removed on full release/default/timeout), its `LockedLedger` sequence key, an
 `IssuerReleased` marker (live between funding and repayment, consumed on repayment), and one
 `History` vector (append-only, grows with each escrow action, shares TTL with the lock).
 
@@ -436,6 +451,18 @@ The `History` vector entries are never removed — they form an append-only log 
 | `TotalDepositCap` | `u128` | Admin-settable cap on `TotalDeposits`, in funding-asset stroops, enforced by `deposit` before the transfer; `0` means uncapped (issue #1179). Appended last so earlier discriminants are unchanged | not set (reads as `0`) |
 
 ### Persistent Storage
+
+#### Lifetime Volume Keys
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `LifetimeDepositedVolume` | `u128` | Lifetime gross `FundingAsset` base units deposited by LPs; only `deposit` increments it and withdrawals never reduce it (issue #1172) |
+| `LifetimeWithdrawnVolume` | `u128` | Lifetime gross `FundingAsset` base units returned by LP withdrawals; failed calls and internal funding transfers do not increment it (issue #1173) |
+| `LifetimeRepaidVolume` | `u128` | Lifetime gross `FundingAsset` base units received from successful buyer repayments, including early repayments and before any refund (issue #1174) |
+
+Each counter is created on its first successful operation and reads as `0`
+before that. They are persistent rather than instance keys so adding them does
+not grow the instance entry that every pool call reads.
 
 #### LP Position Keys
 
@@ -494,10 +521,11 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
+**Approximately 8 instance + 3 lifetime counters + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
 
 In practice most pools will have:
 - 8 instance keys (constant)
+- up to 3 persistent lifetime counters (created lazily on first use)
 - 5 keys per active LP
 - 2 keys per funded invoice (removed on repayment/default)
 

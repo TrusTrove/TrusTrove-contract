@@ -12,12 +12,12 @@ use soroban_sdk::{
     },
     vec,
     xdr::ToXdr,
-    Address, BytesN, Env, IntoVal, InvokeError, String, Symbol, TryFromVal, Vec,
+    Address, BytesN, Env, IntoVal, InvokeError, String, Symbol, TryFromVal, Val, Vec,
 };
 
 use crate::{
     constants::{
-        MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SUGGESTED_DISCOUNT_CEILING_BPS,
+        MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SHARE_PRICE_SCALE, SUGGESTED_DISCOUNT_CEILING_BPS,
         SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
     DataKey, PoolContract, PoolContractClient, PoolError, DEFAULT_MIN_INITIAL_DEPOSIT,
@@ -8763,6 +8763,11 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// re-measurement (cpu = 1,617,956 / mem = 336,743); the #833 batching
 /// guarantee itself is still enforced by the invoice-call-count assertions in
 /// `test_fund_invoice_uses_single_batched_read` (2 invoice calls, not 5).
+///
+/// Re-pinned by #1196: `escrow.lock` now also persists the lock's ledger
+/// sequence (`DataKey::LockedLedger`, one persistent write + TTL bump), which
+/// adds ~18k cpu / ~25k mem to the cross-contract call. The ceilings below pin
+/// the re-measurement at cpu = 1,642,618 / mem = 361,438 with small headroom.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -8776,12 +8781,12 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_625_000,
-        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_665_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 345_000,
-        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot) must stay within its re-pinned memory budget: {mem}"
+        mem < 372_000,
+        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned memory budget: {mem}"
     );
 }
 
@@ -10357,4 +10362,302 @@ fn test_get_pool_config_is_read_only_and_needs_no_auth() {
     let second = te.pool.get_pool_config();
 
     assert_eq!(first, second);
+}
+
+// ---------------------------------------------------------------------------
+// ISSUES #1171-#1174: SHARE-PRICE EVENT AND LIFETIME VOLUME COUNTERS
+// ---------------------------------------------------------------------------
+
+/// Finds a pool event by its first topic in a captured event buffer. Indexed
+/// by name rather than position so adding the share-price event does not make
+/// assertions on the pre-existing `repayment_received` event order-dependent.
+fn find_pool_event(
+    env: &Env,
+    events: &Vec<(Address, Vec<Val>, Val)>,
+    pool_id: &Address,
+    name: Symbol,
+) -> Option<(Vec<Val>, Val)> {
+    for (contract, topics, data) in events.iter() {
+        if contract == *pool_id
+            && !topics.is_empty()
+            && Symbol::try_from_val(env, &topics.get(0).unwrap()).ok() == Some(name.clone())
+        {
+            return Some((topics, data));
+        }
+    }
+    None
+}
+
+#[test]
+fn test_repayment_emits_share_price_updated_with_old_and_new_price() {
+    let te = setup();
+    let deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let old_price = te.pool.get_share_price();
+    assert_eq!(old_price, SHARE_PRICE_SCALE);
+
+    assert!(te.pool.receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE));
+    let events = te.env.events().all();
+
+    let (topics, data) = find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "share_price_updated"),
+    )
+    .expect("share_price_updated must be emitted on a yield-bearing repayment");
+    assert_eq!(topics.len(), 2);
+    assert_eq!(
+        BytesN::<32>::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    let expected_new_price = SHARE_PRICE_SCALE + SHARE_PRICE_SCALE * DEFAULT_YIELD_AMOUNT / deposit;
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (old_price, expected_new_price)
+    );
+    assert_eq!(te.pool.get_share_price(), expected_new_price);
+
+    // The canonical settlement event stays last, so existing indexers that
+    // read the final pool event of the invocation keep working.
+    let (_, last_topics, _) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &last_topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "repayment_received")
+    );
+}
+
+#[test]
+fn test_repayment_with_refund_prices_only_the_lp_yield_slice() {
+    let te = setup();
+    let deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let refund = 120_000_000u128;
+    let lp_yield = DEFAULT_FACE_VALUE - DEFAULT_FUNDED_AMOUNT - refund;
+    let old_price = te.pool.get_share_price();
+
+    assert!(te.pool.receive_repayment_with_refund(
+        &invoice_id,
+        &DEFAULT_FACE_VALUE,
+        &refund,
+        &te.buyer
+    ));
+    let events = te.env.events().all();
+    let (_, data) = find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "share_price_updated"),
+    )
+    .expect("share_price_updated must be emitted on a refund-bearing repayment");
+
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (
+            old_price,
+            old_price + SHARE_PRICE_SCALE * lp_yield / deposit
+        )
+    );
+}
+
+#[test]
+fn test_repayment_with_protocol_fee_prices_only_lp_yield_not_protocol_cut() {
+    let te = setup();
+    let deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    te.pool
+        .set_protocol_fee(&1_000, &Address::generate(&te.env));
+
+    let protocol_cut = DEFAULT_YIELD_AMOUNT / 10;
+    let lp_yield = DEFAULT_YIELD_AMOUNT - protocol_cut;
+    let old_price = te.pool.get_share_price();
+
+    assert!(te.pool.receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE));
+    let events = te.env.events().all();
+    let (_, data) = find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "share_price_updated"),
+    )
+    .expect("share_price_updated must be emitted when LP yield is non-zero");
+
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (
+            old_price,
+            old_price + SHARE_PRICE_SCALE * lp_yield / deposit
+        )
+    );
+}
+
+#[test]
+fn test_zero_yield_repayment_emits_no_share_price_event() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let price_before = te.pool.get_share_price();
+    assert!(te
+        .pool
+        .receive_repayment(&invoice_id, &DEFAULT_FUNDED_AMOUNT));
+    let events = te.env.events().all();
+
+    assert!(find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "share_price_updated"),
+    )
+    .is_none());
+    assert!(find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "repayment_received"),
+    )
+    .is_some());
+    assert_eq!(te.pool.get_share_price(), price_before);
+}
+
+#[test]
+fn test_rejected_and_replayed_repayments_emit_no_share_price_event() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    assert!(te
+        .pool
+        .try_receive_repayment(&invoice_id, &1_000_000_000)
+        .is_err());
+    let events = te.env.events().all();
+    assert!(find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "share_price_updated"),
+    )
+    .is_none());
+    assert_eq!(te.pool.get_lifetime_repaid_volume(), 0);
+
+    assert!(te.pool.receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE));
+    assert_eq!(te.pool.get_lifetime_repaid_volume(), DEFAULT_FACE_VALUE);
+
+    // The funded entry is gone after settlement, so a retry cannot inflate
+    // the lifetime counter or re-emit a price update.
+    assert!(te
+        .pool
+        .try_receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE)
+        .is_err());
+    assert_eq!(te.pool.get_lifetime_repaid_volume(), DEFAULT_FACE_VALUE);
+    let events = te.env.events().all();
+    assert!(find_pool_event(
+        &te.env,
+        &events,
+        &te.pool_id,
+        Symbol::new(&te.env, "share_price_updated"),
+    )
+    .is_none());
+}
+
+#[test]
+fn test_lifetime_deposited_volume_accumulates_and_survives_withdrawals() {
+    let te = setup();
+    let lp2 = Address::generate(&te.env);
+    te.env.as_contract(&te.usdc_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .set(&TKey(lp2.clone()), &100_000_000_000_000i128);
+    });
+    assert_eq!(te.pool.get_lifetime_deposited_volume(), 0);
+
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.deposit(&lp2, &20_000_000_000);
+    assert_eq!(te.pool.get_lifetime_deposited_volume(), 30_000_000_000);
+
+    te.pool.withdraw(&te.lp, &5_000_000_000);
+    assert_eq!(te.pool.get_lifetime_deposited_volume(), 30_000_000_000);
+    assert_eq!(te.pool.get_stats().total_deposits, 25_000_000_000);
+}
+
+#[test]
+fn test_deposit_volume_rejects_invalid_amounts_at_the_minimum_boundary() {
+    let te = setup();
+    assert!(te.pool.try_deposit(&te.lp, &0).is_err());
+    assert!(te
+        .pool
+        .try_deposit(&te.lp, &(DEFAULT_MIN_INITIAL_DEPOSIT - 1))
+        .is_err());
+    assert_eq!(te.pool.get_lifetime_deposited_volume(), 0);
+
+    assert_eq!(
+        te.pool.deposit(&te.lp, &DEFAULT_MIN_INITIAL_DEPOSIT),
+        DEFAULT_MIN_INITIAL_DEPOSIT
+    );
+    assert_eq!(
+        te.pool.get_lifetime_deposited_volume(),
+        DEFAULT_MIN_INITIAL_DEPOSIT
+    );
+}
+
+#[test]
+fn test_lifetime_withdrawn_volume_ignores_funding_and_failed_calls() {
+    let te = setup();
+    let deposit = 100_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    assert!(te.pool.try_withdraw(&te.lp, &0).is_err());
+    assert!(te.pool.try_withdraw(&te.lp, &(deposit + 1)).is_err());
+    assert!(te.pool.try_withdraw(&te.lp, &deposit).is_err());
+    assert_eq!(te.pool.get_lifetime_withdrawn_volume(), 0);
+
+    assert!(te.pool.receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE));
+    let half = deposit / 2;
+    let first = te.pool.withdraw(&te.lp, &half);
+    let second = te.pool.withdraw(&te.lp, &half);
+    assert_eq!(first, 50_100_000_000);
+    assert_eq!(second, 50_100_000_000);
+    assert_eq!(te.pool.get_lifetime_withdrawn_volume(), first + second);
+    assert_eq!(te.pool.get_stats().total_deposits, 0);
+}
+
+#[test]
+fn test_lifetime_repaid_volume_counts_full_amounts_including_early_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let refund_invoice = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&refund_invoice);
+    assert!(te.pool.receive_repayment_with_refund(
+        &refund_invoice,
+        &DEFAULT_FACE_VALUE,
+        &120_000_000,
+        &te.buyer
+    ));
+    assert_eq!(te.pool.get_lifetime_repaid_volume(), DEFAULT_FACE_VALUE);
+
+    let early_invoice = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&early_invoice);
+    te.invoice.mark_shipped(&early_invoice);
+    te.invoice.confirm_delivery(&early_invoice, &te.issuer);
+    te.invoice.confirm_delivery(&early_invoice, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_200);
+    assert!(te.invoice.repay_early(&early_invoice));
+
+    assert_eq!(te.pool.get_lifetime_repaid_volume(), 2 * DEFAULT_FACE_VALUE);
 }

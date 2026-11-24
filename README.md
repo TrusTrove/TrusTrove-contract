@@ -172,6 +172,7 @@ release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
+get_lock_record(invoice_id) → Option<EscrowRecord>
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
@@ -321,9 +322,13 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
+| Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
+| Escrow | `get_history_page` | `get_history_page(invoice_id: BytesN<32>, offset: u32, limit: u32) -> (Vec<EscrowEvent>, u32)` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
 | Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
 | Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
@@ -357,6 +362,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_share_price` | `get_share_price() -> u128` |
+| Pool | `get_lifetime_deposited_volume` | `get_lifetime_deposited_volume() -> u128` |
+| Pool | `get_lifetime_withdrawn_volume` | `get_lifetime_withdrawn_volume() -> u128` |
+| Pool | `get_lifetime_repaid_volume` | `get_lifetime_repaid_volume() -> u128` |
 | Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
 | Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
 | Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |
@@ -379,7 +388,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 154 public entry points across five deployable contracts.**
+**Total: 162 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -646,6 +655,21 @@ rustup run 1.85.0 stellar contract build
 ```bash
 cargo test --workspace
 ```
+
+#### Reproducing randomized (proptest) failures
+
+`scripts/proptest_seed.py` runs `cargo test --workspace` with a printed
+`PROPTEST_RNG_SEED` and saves the seed plus each minimal failing case to
+`target/proptest-report/report.json`.
+
+```bash
+python3 scripts/proptest_seed.py            # random seed, printed and persisted
+python3 scripts/proptest_seed.py --seed N   # one-command replay of a CI/local failure
+python3 scripts/proptest_seed.py --replay   # replay the seed saved in the last report
+```
+
+On failure the seed, the minimal failing input and the replay command are
+printed at the end of the output. Script tests: `python3 -m unittest discover -s scripts`.
 
 ### 4. Deploy to testnet
 

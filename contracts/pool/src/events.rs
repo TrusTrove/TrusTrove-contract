@@ -88,6 +88,21 @@ pub fn repayment_received(
     );
 }
 
+/// Emitted by `settle_repayment` when realised yield changes the LP share
+/// price (issue #1171). Topics index the event name and repaid `invoice_id`;
+/// the data payload is `(old_price, new_price)`, both scaled by
+/// `SHARE_PRICE_SCALE` (1e18) so 1.0 is `1_000_000_000_000_000_000`.
+///
+/// Emitted only on a successful repayment whose LP yield slice is non-zero:
+/// failed settlements revert entirely, and exact-funded/fully-refunded
+/// repayments leave the share price unchanged and emit nothing.
+pub fn share_price_updated(env: &Env, invoice_id: &BytesN<32>, old_price: u128, new_price: u128) {
+    env.events().publish(
+        (Symbol::new(env, "share_price_updated"), invoice_id.clone()),
+        (old_price, new_price),
+    );
+}
+
 /// Emitted by `handle_default` when an invoice defaults. Topics index the event name
 /// and the defaulted `invoice_id`. Data payload is `loss_amount`: the defaulted
 /// funded principal in USDC stroops.
