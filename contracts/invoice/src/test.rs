@@ -2036,6 +2036,312 @@ fn test_get_by_buyer_returns_correct_invoices() {
     assert_eq!(invoices.len(), 2);
 }
 
+// ============== ISSUE #1151: PAGINATED BUYER INVOICE ID VIEW ==============
+//
+// `get_buyer_invoice_ids` returns a bounded page of invoice IDs for one
+// buyer without decoding any `Invoice` record. The tests below pin the
+// paging contract: creation order, contiguous non-overlapping pages, every
+// ID existing with that buyer, out-of-range pages returning empty, and
+// `page_size` outside `1..=MAX_PAGE_SIZE` being rejected.
+
+/// Creates `n` invoices from `issuer` to `buyer` and returns their IDs in
+/// creation order.
+fn create_buyer_invoices(
+    env: &Env,
+    client: &InvoiceContractClient,
+    issuer: &Address,
+    buyer: &Address,
+    usdc: &Address,
+    n: u32,
+) -> Vec<BytesN<32>> {
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut ids = Vec::new(env);
+    for _ in 0..n {
+        ids.push_back(client.create(issuer, buyer, &DEFAULT_FACE_VALUE, &due_date, usdc));
+    }
+    ids
+}
+
+/// Walks every page of `buyer`'s ID index with `page_size` and returns the
+/// concatenation along with the number of non-empty pages read.
+fn collect_buyer_id_pages(
+    env: &Env,
+    client: &InvoiceContractClient,
+    buyer: &Address,
+    page_size: u32,
+) -> (Vec<BytesN<32>>, u32) {
+    let mut all = Vec::new(env);
+    let mut page = 0u32;
+    loop {
+        let ids = client.get_buyer_invoice_ids(buyer, &page, &page_size);
+        all.append(&ids);
+        if ids.len() < page_size {
+            return (all, page + u32::from(!ids.is_empty()));
+        }
+        page += 1;
+    }
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_pages_in_creation_order() {
+    let (env, client, issuer, buyer, registry, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let issuer2 = Address::generate(&env);
+    let other_buyer = Address::generate(&env);
+    registry.register(&issuer2);
+    registry.register(&other_buyer);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    // `buyer` receives invoices from two issuers. Interleaved with them are
+    // invoices for another buyer and invoices where `buyer` is the *issuer*,
+    // none of which may appear in `buyer`'s ID view.
+    let mut expected = Vec::new(&env);
+    let mut excluded = Vec::new(&env);
+    for i in 0..7u32 {
+        let from = if i % 2 == 0 { &issuer } else { &issuer2 };
+        expected.push_back(client.create(from, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc));
+        if i % 3 == 0 {
+            excluded.push_back(client.create(
+                &issuer,
+                &other_buyer,
+                &DEFAULT_FACE_VALUE,
+                &due_date,
+                &usdc,
+            ));
+            excluded.push_back(client.create(
+                &buyer,
+                &issuer2,
+                &DEFAULT_FACE_VALUE,
+                &due_date,
+                &usdc,
+            ));
+        }
+    }
+
+    // page_size 3 over 7 IDs: [0..3], [3..6], last partial page [6..7].
+    assert_eq!(
+        client.get_buyer_invoice_ids(&buyer, &0, &3),
+        expected.slice(0..3)
+    );
+    assert_eq!(
+        client.get_buyer_invoice_ids(&buyer, &1, &3),
+        expected.slice(3..6)
+    );
+    assert_eq!(
+        client.get_buyer_invoice_ids(&buyer, &2, &3),
+        expected.slice(6..7),
+        "last page is partial"
+    );
+    assert_eq!(client.get_buyer_invoice_ids(&buyer, &3, &3).len(), 0);
+
+    // Concatenated pages equal the full creation-ordered list: no gaps and,
+    // since every created ID is unique, no duplicates.
+    let (all, pages) = collect_buyer_id_pages(&env, &client, &buyer, 3);
+    assert_eq!(all, expected);
+    assert_eq!(pages, 3);
+
+    for id in all.iter() {
+        // Every returned ID loads as an existing invoice with this buyer,
+        // and no other buyer's or issuer-only invoice ever appears.
+        assert_eq!(client.get(&id).buyer, buyer);
+        assert!(!excluded.contains(&id));
+    }
+
+    // Same `page`/`page_size` selects exactly the invoices `get_by_buyer`
+    // returns, so callers can switch between the two views freely.
+    for page in 0..3u32 {
+        let ids = client.get_buyer_invoice_ids(&buyer, &page, &3);
+        let invoices = client.get_by_buyer(&buyer, &page, &3);
+        assert_eq!(ids.len(), invoices.len());
+        for (id, invoice) in ids.iter().zip(invoices.iter()) {
+            assert_eq!(id, invoice.id);
+        }
+    }
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_rejects_zero_page_size() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 2);
+
+    assert_eq!(
+        client.try_get_buyer_invoice_ids(&buyer, &0, &0),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+    // Rejected regardless of whether the buyer has invoices.
+    let unknown = Address::generate(&env);
+    assert_eq!(
+        client.try_get_buyer_invoice_ids(&unknown, &0, &0),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_rejects_page_size_above_max() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 2);
+
+    assert_eq!(
+        client.try_get_buyer_invoice_ids(&buyer, &0, &(MAX_PAGE_SIZE + 1)),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+    assert_eq!(
+        client.try_get_buyer_invoice_ids(&buyer, &0, &u32::MAX),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+    // The cap itself is accepted.
+    assert_eq!(
+        client
+            .get_buyer_invoice_ids(&buyer, &0, &MAX_PAGE_SIZE)
+            .len(),
+        2
+    );
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_empty_for_buyer_without_invoices() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 2);
+
+    let unknown = Address::generate(&env);
+    assert_eq!(client.get_buyer_invoice_ids(&unknown, &0, &1).len(), 0);
+    assert_eq!(
+        client
+            .get_buyer_invoice_ids(&unknown, &0, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+    // An address that has only *issued* invoices has no buyer IDs.
+    assert_eq!(
+        client
+            .get_buyer_invoice_ids(&issuer, &0, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_out_of_range_pages_are_empty() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let created = create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 6);
+
+    // 6 IDs with page_size 3: page 2 starts exactly at the end.
+    assert_eq!(
+        client.get_buyer_invoice_ids(&buyer, &1, &3),
+        created.slice(3..6)
+    );
+    assert_eq!(client.get_buyer_invoice_ids(&buyer, &2, &3).len(), 0);
+    // Well past the end.
+    assert_eq!(client.get_buyer_invoice_ids(&buyer, &10, &3).len(), 0);
+    // `page * page_size` overflows u32: still an empty page, not a panic.
+    assert_eq!(
+        client
+            .get_buyer_invoice_ids(&buyer, &u32::MAX, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_exactly_max_page_size() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let mut created = create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, MAX_PAGE_SIZE);
+
+    // Exactly one full page; the next page is empty.
+    let page0 = client.get_buyer_invoice_ids(&buyer, &0, &MAX_PAGE_SIZE);
+    assert_eq!(page0.len(), MAX_PAGE_SIZE);
+    assert_eq!(page0, created);
+    assert_eq!(
+        client
+            .get_buyer_invoice_ids(&buyer, &1, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+
+    // One more invoice spills onto the second page without touching the first.
+    let extra = create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 1);
+    created.append(&extra);
+    assert_eq!(
+        client.get_buyer_invoice_ids(&buyer, &0, &MAX_PAGE_SIZE),
+        page0
+    );
+    assert_eq!(
+        client.get_buyer_invoice_ids(&buyer, &1, &MAX_PAGE_SIZE),
+        extra
+    );
+    let (all, pages) = collect_buyer_id_pages(&env, &client, &buyer, MAX_PAGE_SIZE);
+    assert_eq!(all, created);
+    assert_eq!(pages, 2);
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_is_idempotent_and_stable_across_appends() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let mut created = create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 4);
+
+    // Reading the same page twice yields the same result.
+    let first_read = client.get_buyer_invoice_ids(&buyer, &0, &3);
+    let second_read = client.get_buyer_invoice_ids(&buyer, &0, &3);
+    assert_eq!(first_read, second_read);
+    assert_eq!(first_read, created.slice(0..3));
+
+    // A new invoice created after page 0 was read is appended to the end of
+    // the index: page 0 is unchanged and the new ID lands on the last page.
+    let new_id = create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, 1)
+        .get(0)
+        .unwrap();
+    created.push_back(new_id.clone());
+    assert_eq!(client.get_buyer_invoice_ids(&buyer, &0, &3), first_read);
+    let last_page = client.get_buyer_invoice_ids(&buyer, &1, &3);
+    assert_eq!(last_page, created.slice(3..5));
+    assert_eq!(last_page.last().unwrap(), new_id);
+
+    // Status transitions do not reorder or drop IDs: a cancelled invoice
+    // still exists, keeps its buyer and keeps its position.
+    let cancelled = created.get(1).unwrap();
+    client.cancel(&cancelled);
+    assert_eq!(client.get_buyer_invoice_ids(&buyer, &0, &3), first_read);
+    let invoice = client.get(&cancelled);
+    assert_eq!(invoice.status, InvoiceStatus::Cancelled);
+    assert_eq!(invoice.buyer, buyer);
+}
+
+#[test]
+fn test_get_buyer_invoice_ids_full_page_within_default_budget() {
+    // A buyer with far more invoices than one page.
+    const N: u32 = 150;
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.cost_estimate().budget().reset_unlimited();
+    let created = create_buyer_invoices(&env, &client, &issuer, &buyer, &usdc, N);
+
+    // The deepest full page fits in the default per-call budget (the call
+    // would fail with a budget error otherwise).
+    let last_full_page = N / MAX_PAGE_SIZE - 1;
+    env.cost_estimate().budget().reset_default();
+    let ids = client.get_buyer_invoice_ids(&buyer, &last_full_page, &MAX_PAGE_SIZE);
+    let cpu_ids = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_ids = env.cost_estimate().budget().memory_bytes_cost();
+    let start = last_full_page * MAX_PAGE_SIZE;
+    assert_eq!(ids, created.slice(start..start + MAX_PAGE_SIZE));
+
+    // The same page through `get_by_buyer` hydrates every record, so the
+    // ID-only view must be strictly cheaper in both CPU and memory.
+    env.cost_estimate().budget().reset_default();
+    let invoices = client.get_by_buyer(&buyer, &last_full_page, &MAX_PAGE_SIZE);
+    let cpu_full = env.cost_estimate().budget().cpu_instruction_cost();
+    let mem_full = env.cost_estimate().budget().memory_bytes_cost();
+    assert_eq!(invoices.len(), MAX_PAGE_SIZE);
+    assert!(
+        cpu_ids < cpu_full,
+        "ID page must cost less CPU than the hydrated page: ids {cpu_ids}, full {cpu_full}"
+    );
+    assert!(
+        mem_ids < mem_full,
+        "ID page must cost less memory than the hydrated page: ids {mem_ids}, full {mem_full}"
+    );
+}
+
 #[test]
 fn test_get_invoice_count_by_issuer_matches_get_by_issuer() {
     // Verifies that `get_invoice_count_by_issuer` returns the same value as
