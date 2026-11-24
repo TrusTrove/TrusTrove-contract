@@ -1103,7 +1103,30 @@ impl EscrowContract {
 /// Returns a paginated slice of the escrow event history for the given invoice ID,
     /// along with the total count of events in the history vector.
     /// Reads up to 100 escrow events in append order, starting at `offset`.
-    ///
+    /// Validates that `limit` is between 1 and 100.
+    pub fn get_history_page(
+        env: Env,
+        invoice_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<EscrowEvent>, u32) {
+        if limit == 0 || limit > 100 {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+        let history = Self::get_history(env.clone(), invoice_id);
+        let total = history.len();
+        let mut page = Vec::new(&env);
+        let mut i = offset;
+        let end = core::cmp::min(offset.saturating_add(limit), total);
+        while i < end {
+            if let Some(event) = history.get(i) {
+                page.push_back(event);
+            }
+            i += 1;
+        }
+        (page, total)
+    }
+
     fn append_history(
         env: &Env,
         invoice_id: &BytesN<32>,
