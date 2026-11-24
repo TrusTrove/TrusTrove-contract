@@ -64,6 +64,26 @@ pub struct LPPosition {
     pub deposit_count: u32,
 }
 
+/// Per-LP withdrawal capacity snapshot returned by
+/// `preview_lp_withdrawal_capacity` (issue #1169). Reports the largest amount
+/// of shares the LP could redeem **right now**, given both their own balance
+/// and the pool's currently available liquidity, with the same rounding
+/// `withdraw` applies.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LpWithdrawalCapacity {
+    /// Maximum number of shares the LP can redeem in a single `withdraw`
+    /// call without the pool rejecting it on `InsufficientLiquidity`. Bounded
+    /// above by the LP's own `LPShares` balance, and below that by the share
+    /// equivalent of `total_deposits - total_funded`.
+    pub max_shares: u128,
+    /// USDC (in funding-asset base units) that would be returned for
+    /// `max_shares`, using the same `floor(shares * total_deposits /
+    /// total_shares)` rounding `withdraw` applies. When `max_shares` is zero
+    /// (no balance, no liquidity, or dust-only), this is zero.
+    pub max_assets: u128,
+}
+
 /// SEP-41 share allowance granted by an LP to a spender.
 #[contracttype]
 #[derive(Clone, Debug)]
