@@ -1115,6 +1115,26 @@ impl EscrowContract {
         }
     }
 
+    /// Reads up to 100 escrow events in append order, starting at `offset`.
+    /// Returns the matching events and the total number of stored events.
+    /// A limit outside 1–100 fails with `InvalidConfig`.
+    pub fn get_history_page(
+        env: Env,
+        invoice_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<EscrowEvent>, u32) {
+        if !(1..=100).contains(&limit) {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+
+        let history = Self::get_history(env, invoice_id);
+        let total = history.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        (history.slice(start..end), total)
+    }
+
     fn append_history(
         env: &Env,
         invoice_id: &BytesN<32>,

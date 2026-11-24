@@ -1623,6 +1623,34 @@ fn test_handle_default_rejects_future_locked_at_and_keeps_lock() {
 }
 
 #[test]
+fn test_history_page_preserves_order_and_total() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 10);
+
+    assert_eq!(client.get_history_page(&invoice_id, &0, &1).1, 0);
+    assert_eq!(
+        client.try_get_history_page(&invoice_id, &0, &0),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::InvalidConfig as u32,
+        )))
+    );
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&invoice_id, &pool));
+
+    let full = client.get_history(&invoice_id);
+    assert_eq!(full.len(), 2);
+    for offset in 0..full.len() {
+        let (page, total) = client.get_history_page(&invoice_id, &offset, &1);
+        assert_eq!(total, full.len());
+        assert_eq!(page, full.slice(offset..offset + 1));
+    }
+    let (page, total) = client.get_history_page(&invoice_id, &u32::MAX, &100);
+    assert!(page.is_empty());
+    assert_eq!(total, full.len());
+}
+
+#[test]
 fn test_handle_default_allows_at_grace_period_boundary() {
     let (env, client, _admin, pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 10);
