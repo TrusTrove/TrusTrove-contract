@@ -172,6 +172,7 @@ release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
+get_lock_record(invoice_id) → Option<EscrowRecord>
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
@@ -320,6 +321,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
+| Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |

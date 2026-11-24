@@ -921,6 +921,44 @@ impl EscrowContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Returns the active escrow lock record for an invoice.
+    ///
+    /// This view reads the existing [`DataKey::Locked`] entry and returns the
+    /// stored [`EscrowRecord`] without changing the storage schema. It is a
+    /// convenient single-call alternative to [`Self::get_locked`] and
+    /// [`Self::get_locked_at`] for clients that need both values.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<EscrowRecord>` - The active lock record, or `None` if no lock
+    ///   exists. A missing read does not create a persistent entry.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let lock = client.get_lock_record(&invoice_id);
+    /// ```
+    pub fn get_lock_record(env: Env, invoice_id: BytesN<32>) -> Option<EscrowRecord> {
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(record) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some(record)
+            }
+            None => None,
+        }
+    }
+
     /// Returns the amount of USDC currently locked against an invoice.
     ///
     /// # Arguments
