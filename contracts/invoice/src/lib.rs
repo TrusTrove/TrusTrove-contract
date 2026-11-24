@@ -1092,7 +1092,8 @@ impl InvoiceContract {
     ///
     /// Tolerant behavior is right here because the interesting failures are
     /// per-invoice state an issuer listing a backlog cannot avoid (already
-    /// listed, revoked verification, missing attestation). Reverting the whole
+    /// listed, revoked verification, missing attestation, a discount outside
+    /// `1..=5000`). Reverting the whole
     /// batch would force the caller to bisect by trial and error, and would also
     /// discard the successful listings that already emitted events.
     ///
@@ -1200,7 +1201,8 @@ impl InvoiceContract {
         {
             return false;
         }
-        if discount_bps > 5000 {
+        // Same range as `list_for_financing`: 1..=5000 bps.
+        if discount_bps == 0 || discount_bps > 5000 {
             return false;
         }
         invoice.status = InvoiceStatus::Listed;

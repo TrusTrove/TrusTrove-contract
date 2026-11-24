@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `invoice`: `list_for_financing` and `batch_list_for_financing` now require
+  `discount_bps` in `1..=5000`. A zero discount is rejected with
+  `InvoiceError::InvalidDiscount` (the batch path reports it as a failed
+  entry), and values above 5000 keep failing with `DiscountTooHigh`. Adds a
+  proptest over the rejected range (`0` and `5001..=u32::MAX`) that checks the
+  exact error and that the invoice and `get_counts()` are unchanged, plus
+  pinned boundary cases for 1, 5000 and 5001 (#849)
+
 ### Fixed
 
 - `invoice`: cap repayment yield at the full discount at maturity, including

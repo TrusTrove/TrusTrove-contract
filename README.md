@@ -145,7 +145,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 
 #### `list_for_financing(invoice_id, discount_bps) → bool`
 - Marks a `Created` invoice as available for financing (`Listed` status).
-- `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
+- `discount_bps`: Annualized discount rate in basis points (valid range: `1..=5000`, where 5,000 = 50% max). `0` panics with `InvalidDiscount` and values above 5,000 panic with `DiscountTooHigh`.
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
 - Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
@@ -158,7 +158,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
-- **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
+- **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
 
 ### escrow_contract
@@ -433,7 +433,7 @@ Pool ──[shares]──► LP
 ```
 
 #### Step 2 — Create & List (no funds move)
-The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 1 and 5,000, representing 0.01% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. A zero discount fails with `InvoiceError::InvalidDiscount`, and `discount_bps > 5000` fails with `InvoiceError::DiscountTooHigh`.
 
 
 Before listing, an Underwrite agent must sign an `AttestationPayload` (v2 layout: `domain_separator`, `invoice_id`, `contract_address`, `network_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`) off-chain with a secp256k1 key. `contract_address` and `network_id` bind the signature to one deployed invoice contract on one network, so attestations cannot replay across testnet/mainnet or redeploys (issue #822); `valid_until` (seconds, ledger timestamp) bounds how long the assessment unlocks listing (issue #823). Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice, and with `AttestationExpired` once the stored attestation's `valid_until` has passed. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
@@ -806,7 +806,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
 | 10 | `AlreadyConfirmed` | Caller has already confirmed delivery |
 | 11 | `DueDateNotPassed` | Invoice due date has not passed yet |
-| 12 | `InvalidDiscount` | Discount computation resulted in an invalid state |
+| 12 | `InvalidDiscount` | `discount_bps` is 0 (listing requires at least 1 bp), or a discount computation resulted in an invalid state |
 | 13 | `UnsupportedAsset` | Token asset is not registered as supported |
 | 14 | `ListingNotExpired` | Invoice listing has not reached expiry |
 | 15 | `MathOverflow` | Arithmetic operation overflowed or underflowed |

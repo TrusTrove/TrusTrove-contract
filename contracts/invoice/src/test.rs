@@ -1878,6 +1878,39 @@ fn test_zero_discount_is_rejected_with_invalid_discount() {
 }
 
 #[test]
+fn test_min_discount_full_lifecycle_and_zero_term_repayment() {
+    // The smallest valid discount (1 bp) still runs the full lifecycle, and
+    // funding at maturity exercises repay's zero-term branch.
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let face_value = DEFAULT_FACE_VALUE;
+    let funded_amount = face_value * 9_999 / 10_000;
+    let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    assert!(client.list_for_financing(&invoice_id, &1));
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+
+    env.ledger().set_timestamp(due_date);
+    client.mark_funded(&invoice_id, &pool, &usdc, &funded_amount);
+    let funded = client.get(&invoice_id);
+    assert_eq!(funded.discount_bps, 1);
+    assert_eq!(funded.funded_amount, funded_amount);
+
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    mint_tokens(&env, &usdc, &buyer, face_value as i128);
+
+    assert!(client.repay(&invoice_id));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Repaid);
+    assert_eq!(MockPoolClient::new(&env, &pool).get_last_refund(), 0);
+}
+
+#[test]
 fn test_list_for_financing_discount_bps_min_boundary() {
     // discount_bps == 1 is the smallest valid value and must succeed.
     let (env, client, issuer, buyer, _, usdc) = setup();
@@ -3891,7 +3924,7 @@ fn prop_random_valid_transition_paths_preserve_indexes_and_terminality() {
         .run(
             &(
                 any::<bool>(),
-                0u32..=5000u32,
+                1u32..=5000u32,
                 1u64..=2_592_000u64,
                 any::<bool>(),
             ),
@@ -6487,6 +6520,30 @@ fn test_batch_list_for_financing_returns_failed_entries_without_reverting() {
     assert_eq!(client.get_status(&unattested), 0); // Created
     assert_eq!(client.get_discount_bps(&unattested), 0);
     assert_eq!(client.get_status(&bad_discount), 0); // Created
+}
+
+/// A zero discount fails only its own entry in the batch path, matching the
+/// `InvalidDiscount` rejection in `list_for_financing`.
+#[test]
+fn test_batch_list_for_financing_reports_zero_discount_as_failed_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let zero = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &zero);
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+
+    let entries = vec![&env, (zero.clone(), 0), (good.clone(), 1)];
+    let failed = client.batch_list_for_financing(&entries);
+
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), zero);
+    let inv = client.get(&zero);
+    assert_eq!(inv.status, InvoiceStatus::Created);
+    assert_eq!(inv.discount_bps, 0);
+    assert_eq!(client.get_status(&good), 1);
+    assert_eq!(client.get_discount_bps(&good), 1);
 }
 
 /// A discount above the cap fails only its own entry; a valid entry later in
