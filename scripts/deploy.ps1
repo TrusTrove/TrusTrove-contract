@@ -492,6 +492,10 @@ NEXT_PUBLIC_POOL_USDC_CONTRACT_ID=$poolUsdcId
 NEXT_PUBLIC_POOL_XLM_CONTRACT_ID=$poolXlmId # EXPERIMENTAL
 "@ | Set-Content $envOut
 
+python (Join-Path $PSScriptRoot 'deployment_manifest.py') write deployments.json `
+    $registryId $invoiceId $escrowUsdcId $escrowXlmId $poolUsdcId $poolXlmId
+if ($LASTEXITCODE -ne 0) { throw 'Could not write the deployment manifest' }
+
 Write-Host "`n==========================================="
 Write-Host "Deployment complete."
 Write-Host ""
