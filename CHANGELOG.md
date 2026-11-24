@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `pool`: `get_pool_config()` view, returning a `PoolConfig` snapshot of the
+  pool's references (admin, funding asset, invoice, escrow and registry
+  contracts, treasury) and funding policy (utilization cap, protocol fee,
+  minimum discount, minimum initial deposit, batch size cap) in one read-only
+  call. Unset policy keys report the same defaults the write paths use, and
+  storage is unchanged (#1188)
 - `pool`: admin-settable maximum time to maturity for newly funded invoices.
   `set_max_time_to_maturity(max_seconds)` (stored admin only, emits
   `max_maturity_updated(old, new)`) and `get_max_time_to_maturity()`, stored

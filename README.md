@@ -198,6 +198,7 @@ get_min_discount_bps() → u32
 set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted, enforced in fund_invoice (#1184)
 get_max_time_to_maturity() → u64
 get_stats() → PoolStats
+get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
 transfer_shares(from, to, amount) → ()      ← non-standard legacy alias of transfer
@@ -366,6 +367,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
+| Pool | `get_pool_config` | `get_pool_config() -> PoolConfig` |
 | Pool Factory | `__constructor` | `__constructor(admin: Address) -> ()` |
 | Pool Factory | `register_asset` | `register_asset(asset: Address, pool_wasm_hash: BytesN<32>, invoice_contract: Address, escrow_contract: Address) -> Address` |
 | Pool Factory | `register_existing_pool` | `register_existing_pool(asset: Address, pool_address: Address) -> ()` |
@@ -373,7 +375,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 153 public entry points across five deployable contracts.**
+**Total: 154 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->

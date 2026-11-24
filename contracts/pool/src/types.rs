@@ -143,3 +143,44 @@ pub enum DataKey {
     /// `FundedInvoiceBuyer` to keep existing discriminants stable.
     MaxTimeToMaturity,
 }
+
+/// Read-only snapshot of a pool's contract references and funding policy,
+/// returned by `get_pool_config` (issue #1188).
+///
+/// Every value is read from the existing instance-storage keys; nothing about
+/// the storage layout changes. Policy values that an older instance may not
+/// have stored are reported with the same fallback the write paths apply, so
+/// the snapshot always describes the configuration actually in force.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolConfig {
+    /// Admin address authorised for upgrades, pausing and policy changes.
+    pub admin: Address,
+    /// Token contract this pool accepts as LP deposits and uses to fund
+    /// invoices (same value as `get_funding_asset`).
+    pub funding_asset: Address,
+    /// Invoice contract the pool funds and receives repayments from.
+    pub invoice_contract: Address,
+    /// Escrow contract the pool locks and releases funded principal through.
+    pub escrow_contract: Address,
+    /// Registry contract `fund_invoice` re-verifies issuers and buyers against.
+    pub registry_contract: Address,
+    /// Address that receives the protocol fee cut on repayment, or `None` when
+    /// no treasury is stored, in which case no fee is transferred out.
+    pub treasury: Option<Address>,
+    /// Utilization cap in basis points above which `fund_invoice` rejects new
+    /// funding. Falls back to `DEFAULT_MAX_UTILIZATION_BPS` when unset.
+    pub max_utilization_bps: u32,
+    /// Protocol fee taken from repayment yield, in basis points. Falls back to
+    /// `0` when unset.
+    pub protocol_fee_bps: u32,
+    /// Minimum invoice discount (yield floor) `fund_invoice` enforces, in
+    /// basis points. Falls back to `0` (no floor) when unset.
+    pub min_discount_bps: u32,
+    /// Smallest first deposit accepted into an empty pool, in funding-asset
+    /// base units. Falls back to `DEFAULT_MIN_INITIAL_DEPOSIT` when unset.
+    pub min_initial_deposit: u128,
+    /// Maximum number of invoices accepted by one `batch_fund_invoice` call
+    /// (`MAX_BATCH_SIZE`).
+    pub max_batch_size: u32,
+}

@@ -10031,3 +10031,133 @@ fn test_partial_withdrawal_rounding_preserves_accounting_invariants_pre_yield_lp
     assert!(stats_after.total_deposits >= sum_values);
     assert!(stats_after.total_deposits - sum_values < 2);
 }
+
+// ---------------------------------------------------------------------------
+// get_pool_config (issue #1188)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_get_pool_config_returns_references_and_policy() {
+    let te = setup();
+
+    let config = te.pool.get_pool_config();
+
+    assert_eq!(config.admin, te.admin);
+    assert_eq!(config.funding_asset, te.usdc_id);
+    assert_eq!(config.invoice_contract, te.invoice.address);
+    assert_eq!(config.escrow_contract, te.escrow_id);
+    assert_eq!(config.registry_contract, te.registry.address);
+    // `setup()` passes the admin as the constructor's treasury.
+    assert_eq!(config.treasury, Some(te.admin.clone()));
+    // `setup()` raises the cap to 100%.
+    assert_eq!(config.max_utilization_bps, 10_000);
+    assert_eq!(config.protocol_fee_bps, 0);
+    assert_eq!(config.min_discount_bps, 0);
+    assert_eq!(config.min_initial_deposit, DEFAULT_MIN_INITIAL_DEPOSIT);
+    assert_eq!(config.max_batch_size, MAX_BATCH_SIZE);
+}
+
+/// The snapshot must agree with every single-value getter it replaces.
+#[test]
+fn test_get_pool_config_matches_individual_getters() {
+    let te = setup();
+
+    let config = te.pool.get_pool_config();
+
+    assert_eq!(config.admin, te.pool.get_admin());
+    assert_eq!(config.funding_asset, te.pool.get_funding_asset());
+    assert_eq!(config.invoice_contract, te.pool.get_invoice_contract());
+    assert_eq!(config.escrow_contract, te.pool.get_escrow_contract());
+    assert_eq!(config.treasury, Some(te.pool.get_treasury_address()));
+    assert_eq!(
+        config.max_utilization_bps,
+        te.pool.get_stats().max_utilization_bps
+    );
+    assert_eq!(config.protocol_fee_bps, te.pool.get_protocol_fee_bps());
+    assert_eq!(config.min_discount_bps, te.pool.get_min_discount_bps());
+}
+
+#[test]
+fn test_get_pool_config_reflects_admin_policy_updates() {
+    let te = setup();
+    let treasury = Address::generate(&te.env);
+
+    te.pool.set_max_utilization(&te.admin, &7_500);
+    te.pool.set_protocol_fee(&500, &treasury);
+    te.pool.set_min_discount(&300);
+
+    let config = te.pool.get_pool_config();
+
+    assert_eq!(config.max_utilization_bps, 7_500);
+    assert_eq!(config.protocol_fee_bps, 500);
+    assert_eq!(config.treasury, Some(treasury));
+    assert_eq!(config.min_discount_bps, 300);
+    // References are untouched by policy updates.
+    assert_eq!(config.admin, te.admin);
+    assert_eq!(config.invoice_contract, te.invoice.address);
+}
+
+/// Instances that predate a policy key must report the fallback the write
+/// paths use, not panic, so existing storage keeps decoding as before.
+#[test]
+fn test_get_pool_config_reports_defaults_for_unset_policy_keys() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        for key in [
+            DataKey::MaxUtilizationBps,
+            DataKey::ProtocolFeeBps,
+            DataKey::MinDiscountBps,
+            DataKey::MinInitialDeposit,
+            DataKey::TreasuryAddress,
+        ] {
+            te.env.storage().instance().remove(&key);
+        }
+    });
+
+    let config = te.pool.get_pool_config();
+
+    assert_eq!(
+        config.max_utilization_bps,
+        crate::DEFAULT_MAX_UTILIZATION_BPS
+    );
+    assert_eq!(config.protocol_fee_bps, 0);
+    assert_eq!(config.min_discount_bps, 0);
+    assert_eq!(config.min_initial_deposit, DEFAULT_MIN_INITIAL_DEPOSIT);
+    assert_eq!(config.treasury, None);
+    assert_eq!(config.admin, te.admin);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_pool_config_panics_with_typed_not_initialized() {
+    let (_env, pool) = uninitialized_pool();
+    pool.get_pool_config();
+}
+
+/// A missing contract reference is rejected even when the admin is present.
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_pool_config_panics_when_registry_reference_missing() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .remove(&DataKey::RegistryContract);
+    });
+    te.pool.get_pool_config();
+}
+
+/// The view is a pure read: it needs no authorization, writes nothing, and
+/// repeated calls return the same snapshot.
+#[test]
+fn test_get_pool_config_is_read_only_and_needs_no_auth() {
+    let te = setup();
+    te.env.set_auths(&[]);
+
+    let first = te.pool.get_pool_config();
+    assert!(te.env.auths().is_empty());
+    let second = te.pool.get_pool_config();
+
+    assert_eq!(first, second);
+}
