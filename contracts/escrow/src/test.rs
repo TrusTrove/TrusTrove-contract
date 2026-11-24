@@ -1412,6 +1412,26 @@ fn test_release_to_pool_unknown_invoice_id_panics() {
 }
 
 #[test]
+fn test_get_lock_expiration_returns_locked_at_plus_enforced_period() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 77);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    let locked_at = client.get_locked_at(&invoice_id);
+    let expiration = client.get_lock_expiration(&invoice_id);
+    assert_eq!(expiration, locked_at + DEFAULT_TIMEOUT_WINDOW_SECONDS);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_lock_expiration_unknown_invoice_id_panics() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let unknown_id = generate_invoice_id(&env, 888);
+    client.get_lock_expiration(&unknown_id);
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #2)")]
 fn test_release_to_pool_second_call_panics() {
     let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
@@ -1871,6 +1891,36 @@ fn test_get_locked_returns_zero_after_release_to_pool() {
 
     client.release_to_pool(&invoice_id, &amount);
     assert_eq!(client.get_locked(&invoice_id), 0);
+}
+
+#[test]
+fn test_get_lock_expiration_timestamp_returns_correct_sum() {
+    let (env, client, _admin, _pool, _usdc, issuer) = setup();
+    let invoice_id = generate_invoice_id(&env, 1);
+    env.ledger().set_timestamp(1000);
+    client.lock(&invoice_id, &1000, &issuer);
+
+    let expiry = client.get_lock_expiration_timestamp(&invoice_id);
+    assert_eq!(expiry, 1000 + 60);
+}
+
+#[test]
+fn test_get_lock_expiration_timestamp_returns_zero_when_empty() {
+    let (env, client, _admin, _pool, _usdc, _issuer) = setup();
+    let invoice_id = generate_invoice_id(&env, 99);
+    let expiry = client.get_lock_expiration_timestamp(&invoice_id);
+    assert_eq!(expiry, 0);
+}
+
+#[test]
+#[should_panic]
+fn test_get_lock_expiration_timestamp_panics_on_overflow() {
+    let (env, client, _admin, _pool, _usdc, issuer) = setup();
+    let invoice_id = generate_invoice_id(&env, 2);
+    env.ledger().set_timestamp(u64::MAX);
+    client.lock(&invoice_id, &1000, &issuer);
+
+    client.get_lock_expiration_timestamp(&invoice_id);
 }
 
 #[test]
