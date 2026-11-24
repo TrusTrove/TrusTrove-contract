@@ -9262,7 +9262,8 @@ fn test_max_time_to_maturity_defaults_unrestricted() {
     let te = setup();
     assert_eq!(te.pool.get_max_time_to_maturity(), 0);
     te.pool.deposit(&te.lp, &100_000_000_000);
-    let id = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 10_000_000);
+    let id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 10_000_000);
     assert!(te.pool.fund_invoice(&id));
 }
 
@@ -9297,7 +9298,8 @@ fn test_max_time_to_maturity_existing_invoice_unaffected_and_reset() {
     assert_eq!(te.pool.get_funded_amount(&id), Some(9_800_000_000));
     // Setting back to 0 restores unrestricted funding.
     te.pool.set_max_time_to_maturity(&0);
-    let id2 = create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 10_000_000);
+    let id2 =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 10_000_000);
     assert!(te.pool.fund_invoice(&id2));
 }
 
