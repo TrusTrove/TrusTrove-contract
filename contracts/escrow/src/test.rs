@@ -1630,7 +1630,9 @@ fn test_history_page_preserves_order_and_total() {
     assert_eq!(client.get_history_page(&invoice_id, &0, &1).1, 0);
     assert_eq!(
         client.try_get_history_page(&invoice_id, &0, &0),
-        Err(Ok(EscrowError::InvalidConfig))
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::InvalidConfig as u32,
+        )))
     );
     client.lock(&invoice_id, &1_000_000_000, &issuer);
     env.ledger().set_timestamp(env.ledger().timestamp() + 60);
