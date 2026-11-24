@@ -127,4 +127,15 @@ pub enum DataKey {
     /// **Storage-key layout:** appended at the end of the unnumbered enum
     /// (index 7) — see the note on [`DataKey::IssuerReleased`].
     InvoiceContract,
+    /// Ledger sequence in which the lock for a given invoice was created.
+    /// The inner `BytesN<32>` is the invoice ID. Value type: `u64`.
+    ///
+    /// Written by [`EscrowContract::lock`] and removed when the lock record is
+    /// removed. Records created before this key existed have no entry, so
+    /// [`EscrowContract::get_locked_ledger`] returns `0` to mean "unknown".
+    /// A partial `release_to_pool` preserves both the lock and this key.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 8) — see the note on [`DataKey::IssuerReleased`].
+    LockedLedger(BytesN<32>),
 }

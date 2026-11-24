@@ -348,6 +348,15 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        // #1196: record the ledger sequence alongside the lock. This lives in
+        // a separate key so pre-existing `Locked` records keep decoding.
+        let ledger_key = DataKey::LockedLedger(invoice_id.clone());
+        env.storage()
+            .persistent()
+            .set(&ledger_key, &(env.ledger().sequence() as u64));
+        env.storage()
+            .persistent()
+            .extend_ttl(&ledger_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::append_history(&env, &invoice_id, EscrowAction::Locked, amount, None);
         Self::extend_instance_ttl(&env);
         events::funds_locked(&env, &invoice_id, &issuer, amount);
@@ -438,6 +447,9 @@ impl EscrowContract {
             None,
         );
         env.storage().persistent().remove(&key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LockedLedger(invoice_id.clone()));
         // Issue #819: keep durable evidence that the principal was paid out to
         // the issuer. `release_to_pool` consumes this marker on the repayment
         // path; `PoolContract::handle_default` reads it (via
@@ -590,9 +602,15 @@ impl EscrowContract {
                     .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
             } else {
                 env.storage().persistent().remove(&key);
+                env.storage()
+                    .persistent()
+                    .remove(&DataKey::LockedLedger(invoice_id.clone()));
             }
         } else {
             env.storage().persistent().remove(&released_key);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::LockedLedger(invoice_id.clone()));
         }
         Self::extend_instance_ttl(&env);
         events::released_to_pool(&env, &invoice_id, &pool, repayment_amount);
@@ -721,6 +739,9 @@ impl EscrowContract {
             Some(caller.clone()),
         );
         env.storage().persistent().remove(&key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LockedLedger(invoice_id.clone()));
         Self::extend_instance_ttl(&env);
         events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount);
         true
@@ -832,6 +853,9 @@ impl EscrowContract {
             None,
         );
         env.storage().persistent().remove(&key);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LockedLedger(invoice_id.clone()));
         Self::extend_instance_ttl(&env);
         events::timeout_released(&env, &invoice_id, &pool, record.amount);
         true
@@ -842,7 +866,8 @@ impl EscrowContract {
     /// While paused every state-changing entry point (`lock`,
     /// `release_to_issuer`, `release_to_pool`, `handle_default`) reverts with
     /// `ContractPaused`, so no funds can move in or out of escrow while the
-    /// read-only views (`get_locked`, `get_locked_at`, `get_history`,
+    /// read-only views (`get_locked`, `get_locked_at`, `get_locked_ledger`,
+    /// `get_total_returned_to_pool`, `get_history`,
     /// `get_usdc_asset`, `get_admin`, `get_pool_contract`) stay callable. Only
     /// the stored admin may pause, and [`Self::unpause`] is intentionally never
     /// guarded so paused escrow can always be resumed. Emits `paused`.
@@ -958,6 +983,89 @@ impl EscrowContract {
             }
             None => 0,
         }
+    }
+
+    /// Returns the ledger sequence when the escrow was locked for an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u64` - The lock-creation ledger sequence, or `0` when the record is
+    ///   absent or was created before ledger tracking existed (unknown).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let ledger = client.get_locked_ledger(&invoice_id);
+    /// ```
+    pub fn get_locked_ledger(env: Env, invoice_id: BytesN<32>) -> u64 {
+        let key = DataKey::Locked(invoice_id.clone());
+        if !env.storage().persistent().has(&key) {
+            return 0;
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        let ledger_key = DataKey::LockedLedger(invoice_id);
+        match env.storage().persistent().get::<_, u64>(&ledger_key) {
+            Some(ledger) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&ledger_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                ledger
+            }
+            // Legacy records created before #1196 have no ledger key.
+            None => 0,
+        }
+    }
+
+    /// Returns the cumulative amount returned to the pool for an invoice.
+    ///
+    /// Sums successful [`EscrowAction::ReleasedToPool`] and
+    /// [`EscrowAction::DefaultHandled`] history entries with checked
+    /// arithmetic. Releases to the issuer and timeout releases are excluded:
+    /// they are not repayments reconciled against the invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view.
+    ///
+    /// # Panics
+    /// Panics with [`EscrowError::MathOverflow`] if the total cannot fit in
+    /// `u128`.
+    ///
+    /// # Returns
+    /// * `u128` - The cumulative returned amount, or `0` when no matching
+    ///   history exists.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let total = client.get_total_returned_to_pool(&invoice_id);
+    /// ```
+    pub fn get_total_returned_to_pool(env: Env, invoice_id: BytesN<32>) -> u128 {
+        let history = Self::get_history(env.clone(), invoice_id);
+        let mut total: u128 = 0;
+        for event in history.iter() {
+            match &event.action {
+                EscrowAction::ReleasedToPool | EscrowAction::DefaultHandled => {
+                    total = total
+                        .checked_add(event.amount)
+                        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
+                }
+                _ => {}
+            }
+        }
+        total
     }
 
     /// Returns the history of escrow events for an invoice.

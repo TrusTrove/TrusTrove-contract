@@ -1893,6 +1893,209 @@ fn test_get_locked_at_returns_timestamp_when_locked() {
 }
 
 #[test]
+fn test_get_locked_ledger_returns_zero_when_empty() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 30);
+
+    assert_eq!(client.get_locked_ledger(&invoice_id), 0);
+}
+
+#[test]
+fn test_get_locked_ledger_returns_lock_sequence() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 31);
+    let amount: u128 = 1_000_000_000;
+
+    env.ledger().set_sequence_number(4242);
+    client.lock(&invoice_id, &amount, &issuer);
+
+    assert_eq!(client.get_locked_ledger(&invoice_id), 4242);
+}
+
+#[test]
+fn test_get_locked_ledger_returns_zero_for_legacy_record() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 32);
+    let amount: u128 = 1_000_000_000;
+
+    env.ledger().set_sequence_number(100);
+    client.lock(&invoice_id, &amount, &issuer);
+    // Simulate a lock written before #1196: the record exists but the ledger
+    // key does not.
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .remove(&DataKey::LockedLedger(invoice_id.clone()));
+    });
+
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_locked_ledger(&invoice_id), 0);
+}
+
+#[test]
+fn test_get_locked_ledger_survives_partial_release_and_clears_on_full() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 33);
+    let amount: u128 = 1_000_000_000;
+
+    env.ledger().set_sequence_number(7);
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_pool(&invoice_id, &300_000_000);
+    assert_eq!(client.get_locked_ledger(&invoice_id), 7);
+
+    client.release_to_pool(&invoice_id, &700_000_000);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(client.get_locked_ledger(&invoice_id), 0);
+}
+
+#[test]
+fn test_get_locked_ledger_updates_on_relock() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 34);
+    let amount: u128 = 1_000_000_000;
+
+    env.ledger().set_sequence_number(7);
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_pool(&invoice_id, &amount);
+
+    env.ledger().set_sequence_number(9);
+    client.lock(&invoice_id, &amount, &issuer);
+    assert_eq!(client.get_locked_ledger(&invoice_id), 9);
+}
+
+#[test]
+fn test_failed_duplicate_lock_keeps_original_ledger() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 35);
+    let amount: u128 = 1_000_000_000;
+
+    env.ledger().set_sequence_number(11);
+    client.lock(&invoice_id, &amount, &issuer);
+    env.ledger().set_sequence_number(12);
+    assert!(client.try_lock(&invoice_id, &amount, &issuer).is_err());
+    assert_eq!(client.get_locked_ledger(&invoice_id), 11);
+}
+
+#[test]
+fn test_get_locked_ledger_clears_on_all_terminal_paths() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let amount: u128 = 1_000_000_000;
+
+    let issuer_id = generate_invoice_id(&env, 36);
+    env.ledger().set_sequence_number(21);
+    client.lock(&issuer_id, &amount, &issuer);
+    client.release_to_issuer(&issuer_id, &issuer);
+    assert_eq!(client.get_locked_ledger(&issuer_id), 0);
+
+    let default_id = generate_invoice_id(&env, 37);
+    env.ledger().set_sequence_number(22);
+    client.lock(&default_id, &amount, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&default_id, &pool));
+    assert_eq!(client.get_locked_ledger(&default_id), 0);
+
+    let timeout_id = generate_invoice_id(&env, 38);
+    env.ledger().set_sequence_number(23);
+    client.lock(&timeout_id, &amount, &issuer);
+    client.set_timeout_window(&3600);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3600);
+    assert!(client.release_after_timeout(&timeout_id));
+    assert_eq!(client.get_locked_ledger(&timeout_id), 0);
+}
+
+#[test]
+fn test_total_returned_to_pool_empty_is_zero() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 40);
+
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), 0);
+}
+
+#[test]
+fn test_total_returned_to_pool_ignores_lock_and_issuer_release() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 41);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), 0);
+
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), 0);
+}
+
+#[test]
+fn test_total_returned_to_pool_sums_partial_and_full_repayments() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 42);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    client.release_to_pool(&invoice_id, &300_000_000);
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), 300_000_000);
+
+    client.release_to_pool(&invoice_id, &700_000_000);
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), amount);
+}
+
+#[test]
+fn test_total_returned_to_pool_includes_default() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 43);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&invoice_id, &pool));
+
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), amount);
+}
+
+#[test]
+fn test_total_returned_to_pool_excludes_timeout_release() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 44);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    client.set_timeout_window(&3600);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3600);
+    assert!(client.release_after_timeout(&invoice_id));
+
+    assert_eq!(client.get_total_returned_to_pool(&invoice_id), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_total_returned_to_pool_overflow_panics() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 45);
+
+    let mut history = Vec::new(&env);
+    history.push_back(EscrowEvent {
+        invoice_id: invoice_id.clone(),
+        action: EscrowAction::ReleasedToPool,
+        amount: u128::MAX,
+        timestamp: 1,
+        caller: None,
+    });
+    history.push_back(EscrowEvent {
+        invoice_id: invoice_id.clone(),
+        action: EscrowAction::DefaultHandled,
+        amount: 1,
+        timestamp: 2,
+        caller: Some(issuer),
+    });
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::History(invoice_id.clone()), &history);
+    });
+
+    client.get_total_returned_to_pool(&invoice_id);
+}
+
+#[test]
 fn test_get_locked_at_returns_zero_after_release() {
     let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
     env.ledger().set_timestamp(1_000_000);

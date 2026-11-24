@@ -723,6 +723,14 @@ Emitted when funds are locked in escrow for an invoice.
 
 **Emitted by:** `lock()` in `contracts/escrow/src/lib.rs:118`
 
+#### Lock Creation Ledger
+
+`funds_locked` keeps its existing shape for backwards compatibility. The
+ledger sequence in which the lock was created is stored separately and read
+with `get_locked_ledger(invoice_id)`. It returns `0` for locks created before
+this view existed. A partial `release_to_pool` keeps the original sequence;
+removing the lock clears it.
+
 ---
 
 ### `released_to_issuer`
@@ -765,6 +773,10 @@ When `release_to_pool` is called with an amount less than the total locked amoun
 4. A subsequent `release_to_pool` call can repay the remaining amount, at which point the `Locked` record is fully removed.
 
 This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time.
+
+`get_total_returned_to_pool(invoice_id)` returns that running total on-chain:
+it sums `ReleasedToPool` and `DefaultHandled` amounts with checked `u128`
+arithmetic and excludes issuer and timeout releases.
 
 ---
 
