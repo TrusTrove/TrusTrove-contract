@@ -9253,6 +9253,183 @@ fn test_set_min_discount_emits_event_with_old_and_new_values() {
     assert_eq!(te.pool.get_min_discount_bps(), 1500);
 }
 
+// ---------------------------------------------------------------------------
+//  ISSUE #1184: ADMIN-SETTABLE MAXIMUM TIME TO MATURITY
+// ---------------------------------------------------------------------------
+
+const ONE_DAY: u64 = 86_400;
+
+#[test]
+fn test_max_time_to_maturity_defaults_to_unrestricted() {
+    let te = setup();
+    assert_eq!(te.pool.get_max_time_to_maturity(), 0);
+
+    // With no maximum, a far-dated invoice still funds.
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 365 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+fn test_fund_invoice_at_max_time_to_maturity_boundary_accepted() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_time_to_maturity(&(30 * ONE_DAY));
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_fund_invoice_one_second_past_max_time_to_maturity_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_time_to_maturity(&(30 * ONE_DAY));
+
+    let invoice_id = create_and_list_with_params_and_term(
+        &te,
+        &te.usdc_id,
+        10_000_000_000,
+        200,
+        30 * ONE_DAY + 1,
+    );
+    te.pool.fund_invoice(&invoice_id);
+}
+
+/// The maximum is measured from the current ledger time, so an invoice that
+/// was too far out when listed becomes fundable once it is close enough.
+#[test]
+fn test_max_time_to_maturity_uses_remaining_time() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_time_to_maturity(&ONE_DAY);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 3 * ONE_DAY);
+    assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 2 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+/// An over-maximum invoice is an eligibility failure, not a capacity
+/// shortfall, so batch funding reverts instead of stopping silently.
+#[test]
+#[should_panic(expected = "Error(Contract, #30)")]
+fn test_batch_fund_invoice_past_max_time_to_maturity_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_time_to_maturity(&ONE_DAY);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 2 * ONE_DAY);
+    let ids = vec![&te.env, invoice_id];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+/// Invoices funded before the maximum was set are not re-checked: lowering
+/// the maximum blocks new long-dated funding but the existing invoice still
+/// repays normally.
+#[test]
+fn test_max_time_to_maturity_leaves_existing_invoices_unaffected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let funded =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&funded));
+    let funded_amount = te.pool.get_funded_amount(&funded).unwrap();
+
+    te.pool.set_max_time_to_maturity(&ONE_DAY);
+    assert_eq!(te.pool.get_funded_amount(&funded), Some(funded_amount));
+
+    let new_invoice =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.try_fund_invoice(&new_invoice).is_err());
+
+    te.invoice.mark_shipped(&funded);
+    te.invoice.confirm_delivery(&funded, &te.issuer);
+    te.invoice.confirm_delivery(&funded, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 30 * ONE_DAY + 1);
+    te.invoice.repay(&funded);
+
+    assert_eq!(te.pool.get_funded_amount(&funded), None);
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.active_invoice_count, 0);
+    assert_eq!(stats.total_funded, 0);
+}
+
+#[test]
+fn test_set_max_time_to_maturity_zero_removes_limit() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_time_to_maturity(&ONE_DAY);
+    te.pool.set_max_time_to_maturity(&0);
+    assert_eq!(te.pool.get_max_time_to_maturity(), 0);
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 365 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_time_to_maturity_requires_admin_authorization() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_max_time_to_maturity(&ONE_DAY);
+}
+
+#[test]
+fn test_set_max_time_to_maturity_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_max_time_to_maturity",
+            args: (ONE_DAY,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_max_time_to_maturity(&ONE_DAY).is_err());
+    assert_eq!(te.pool.get_max_time_to_maturity(), 0);
+}
+
+#[test]
+fn test_set_max_time_to_maturity_emits_event_with_old_and_new_values() {
+    let te = setup();
+
+    te.pool.set_max_time_to_maturity(&(30 * ONE_DAY));
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "max_maturity_updated")
+    );
+    assert_eq!(
+        <(u64, u64)>::try_from_val(&te.env, &data).unwrap(),
+        (0u64, 30 * ONE_DAY)
+    );
+
+    te.pool.set_max_time_to_maturity(&ONE_DAY);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u64, u64)>::try_from_val(&te.env, &data).unwrap(),
+        (30 * ONE_DAY, ONE_DAY)
+    );
+    assert_eq!(te.pool.get_max_time_to_maturity(), ONE_DAY);
+}
+
 // --------------- Configurable failing invoice (issue #964) ---------------
 //
 // Stand-in for the pool's invoice contract whose individual view methods

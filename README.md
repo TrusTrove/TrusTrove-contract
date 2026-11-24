@@ -195,6 +195,8 @@ get_protocol_fee_bps() → u32
 get_treasury() → Address
 set_min_discount(bps) → bool               ← admin only, yield floor enforced in fund_invoice (#829)
 get_min_discount_bps() → u32
+set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted, enforced in fund_invoice (#1184)
+get_max_time_to_maturity() → u64
 get_stats() → PoolStats
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
@@ -362,6 +364,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_treasury` | `get_treasury() -> Address` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
+| Pool | `set_max_time_to_maturity` | `set_max_time_to_maturity(max_seconds: u64) -> bool` |
+| Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
 | Pool Factory | `__constructor` | `__constructor(admin: Address) -> ()` |
 | Pool Factory | `register_asset` | `register_asset(asset: Address, pool_wasm_hash: BytesN<32>, invoice_contract: Address, escrow_contract: Address) -> Address` |
 | Pool Factory | `register_existing_pool` | `register_existing_pool(asset: Address, pool_address: Address) -> ()` |
@@ -369,7 +373,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 151 public entry points across five deployable contracts.**
+**Total: 153 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -483,6 +487,8 @@ Invoice status: → Repaid
 **Protocol Fee:** Defaults to 0 bps at deployment, preserving 100% yield distribution to LPs. The contract admin can configure a fee up to 2000 bps (20%) and set the treasury destination address via `pool.set_protocol_fee(fee_bps, treasury)`.
 
 **Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
+
+**Maximum Time to Maturity (max_time_to_maturity):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap how far out a newly funded invoice may be due via `pool.set_max_time_to_maturity(max_seconds)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose remaining time to maturity (`due_date - now`) exceeds the maximum with `PoolError::MaturityTooLong`. An invoice exactly at the maximum is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded are unaffected by a later change. `pool.get_max_time_to_maturity()` reads the current value (#1184).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 

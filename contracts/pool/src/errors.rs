@@ -56,4 +56,10 @@ pub enum PoolError {
     /// books no loss in that case, so an invoice that is still active can
     /// never leave the pool reporting a realised loss (#971).
     InvoiceDefaultNotRecorded = 29,
+    /// The invoice's remaining time to maturity (`due_date - now`) is longer
+    /// than the admin-configured maximum (`DataKey::MaxTimeToMaturity`, set
+    /// via `set_max_time_to_maturity`). Only checked when an invoice is newly
+    /// funded, and never while the maximum is at its default of `0`
+    /// (unrestricted) (issue #1184).
+    MaturityTooLong = 30,
 }
