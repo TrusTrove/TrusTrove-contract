@@ -204,6 +204,30 @@ invoice contract's post-deploy wiring is in place
 (`get_escrow_contract`, `get_agent_registry_contract`,
 `is_supported_asset`).
 
+### Release Checklist, Bindings, and ABI Verification
+
+Before announcing a release or rotating testnet/mainnet addresses, run the
+read-only tooling checks documented in [docs/TOOLING.md](./docs/TOOLING.md):
+
+1. **Verify TypeScript client bindings match compiled WASM specs (`#1205`):**
+   ```bash
+   python3 scripts/generate_ts_bindings.py --check
+   ```
+2. **Run ABI compatibility check against deployed testnet contracts (`#1206`):**
+   ```bash
+   python3 scripts/check_abi_compat.py --network testnet --mode rpc
+   ```
+3. **Validate release manifest, WASM SHA-256 hashes, target network, and contract references (`#1212`):**
+   ```bash
+   python3 scripts/verify_release.py \
+     --manifest release-manifest.json \
+     --network testnet \
+     --env-file .env \
+     --env-deployed .env.deployed \
+     --deployments-json deployments.json \
+     --check-onchain
+   ```
+
 ### Contract Address Lifecycle & Rotation Policy
 
 (...) (rest of the existing section unchanged)
