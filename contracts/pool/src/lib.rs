@@ -2086,6 +2086,19 @@ impl PoolContract {
         }
     }
 
+    /// Returns USDC liquidity currently available for new invoice funding or
+    /// LP withdrawals, using the same validation and arithmetic as
+    /// [`Self::get_stats`].
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool contract has not been initialized.
+    /// * `Overflow` if the pool accounting invariant is violated or utilization
+    ///   cannot be represented safely.
+    ///
+    /// # Returns
+    /// * `u128` - Available liquidity in USDC stroops.
+    pub fn get_available_liquidity(env: Env) -> u128 {
+        Self::get_stats(env).available_liquidity
     /// Returns the current LP share price as an 18-decimal fixed-point number.
     ///
     /// The price is `TotalDeposits / TotalShares` scaled by

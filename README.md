@@ -127,6 +127,8 @@ batch_list_for_financing(entries) → Vec<invoice_id>  ← tolerant, max 50 entr
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
 confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
+raise_dispute(invoice_id, disputer) → bool  ← issuer or buyer; informational
+is_disputed(invoice_id) → bool
 repay(invoice_id) → bool
 repay_partial(invoice_id, amount) → bool
 repay_early(invoice_id) → bool
@@ -160,6 +162,11 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
 - **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
+
+#### `raise_dispute(invoice_id, disputer) → bool` / `is_disputed(invoice_id) → bool`
+- Either the issuer or buyer may authorize a dispute for a `Funded`, `Active`, or `Confirmed` invoice.
+- The flag is idempotent and emits one `invoice_disputed` event on its first successful raise.
+- Disputes are informational: they do not automatically move or freeze funds and do not block repayment or default processing.
 
 ### escrow_contract
 
@@ -199,6 +206,7 @@ get_min_discount_bps() → u32
 set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted, enforced in fund_invoice (#1184)
 get_max_time_to_maturity() → u64
 get_stats() → PoolStats
+get_available_liquidity() → u128
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
@@ -270,6 +278,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `mark_funded` | `mark_funded(invoice_id: BytesN<32>, pool_address: Address, asset_address: Address, funded_amount: u128) -> bool` |
 | Invoice | `mark_shipped` | `mark_shipped(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `confirm_delivery` | `confirm_delivery(invoice_id: BytesN<32>, confirmer: Address) -> bool` |
+| Invoice | `raise_dispute` | `raise_dispute(invoice_id: BytesN<32>, disputer: Address) -> bool` |
 | Invoice | `repay_partial` | `repay_partial(invoice_id: BytesN<32>, amount: u128) -> bool` |
 | Invoice | `repay` | `repay(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `repay_early` | `repay_early(invoice_id: BytesN<32>) -> bool` |
@@ -291,6 +300,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
+| Invoice | `is_disputed` | `is_disputed(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
@@ -360,6 +370,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_available_liquidity` | `get_available_liquidity() -> u128` |
 | Pool | `get_share_price` | `get_share_price() -> u128` |
 | Pool | `get_lifetime_deposited_volume` | `get_lifetime_deposited_volume() -> u128` |
 | Pool | `get_lifetime_withdrawn_volume` | `get_lifetime_withdrawn_volume() -> u128` |
@@ -384,6 +395,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
+**Total: 161 public entry points across five deployable contracts.**
 **Total: 162 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.

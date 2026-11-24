@@ -1626,6 +1626,64 @@ impl InvoiceContract {
         true
     }
 
+    /// Raises an on-chain dispute flag for an invoice with funds in flight.
+    ///
+    /// Either the invoice's issuer or buyer may raise the flag. It is
+    /// idempotent: subsequent calls leave the flag set and emit no duplicate
+    /// event. A dispute is informational and does not freeze funds or prevent
+    /// repayment or default processing.
+    ///
+    /// # Auth
+    /// Requires authorization from `disputer`, who must be the invoice issuer
+    /// or buyer.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist.
+    /// * `InvoiceError::NotAuthorized` if `disputer` is neither invoice party.
+    /// * `InvoiceError::InvalidStatusTransition` unless the invoice is
+    ///   `Funded`, `Active`, or `Confirmed`.
+    pub fn raise_dispute(env: Env, invoice_id: BytesN<32>, disputer: Address) -> bool {
+        require_not_paused(&env);
+        let invoice_key = DataKey::Invoice(invoice_id.clone());
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&invoice_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        disputer.require_auth();
+
+        if disputer != invoice.issuer && disputer != invoice.buyer {
+            panic_with_error!(&env, InvoiceError::NotAuthorized);
+        }
+        if invoice.status != InvoiceStatus::Funded
+            && invoice.status != InvoiceStatus::Active
+            && invoice.status != InvoiceStatus::Confirmed
+        {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+        let dispute_key = DataKey::DisputeFlag(invoice_id.clone());
+        let already_disputed = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .unwrap_or(false);
+        if !already_disputed {
+            env.storage().persistent().set(&dispute_key, &true);
+        }
+
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.storage()
+            .persistent()
+            .extend_ttl(&invoice_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_instance_ttl(&env);
+        if !already_disputed {
+            events::invoice_disputed(&env, &invoice_id, &disputer);
+        }
+        true
+    }
+
     /// Repays an invoice in partial installments or in full.
     ///
     /// Transfers `amount` from the buyer into escrow. If the cumulative
@@ -1634,7 +1692,8 @@ impl InvoiceContract {
     /// `partial_repayment_received` is emitted. Once the cumulative repayment
     /// reaches `face_value`, escrow releases the funds to the pool, the pool's
     /// repayment accounting is updated, the invoice transitions to `Repaid`,
-    /// and `invoice_repaid` is emitted.
+    /// and `invoice_repaid` is emitted. A dispute flag does not block or alter
+    /// this settlement path.
     ///
     /// Yield accrues linearly from `funded_at` to `due_date`, capped at the
     /// full discount (`face_value - funded_amount`). At or after maturity
@@ -1801,6 +1860,7 @@ impl InvoiceContract {
     /// delegating to [`Self::repay_partial`] with the invoice's full
     /// `remaining_balance`. An invoice that already received partial
     /// repayments therefore only pulls the remainder from the buyer.
+    /// A dispute flag does not block or alter this settlement path.
     /// Yield is capped at the full discount at `due_date`, as documented in
     /// [`Self::repay_partial`]; later settlement does not increase it.
     ///
@@ -1841,7 +1901,8 @@ impl InvoiceContract {
     /// discount for the portion of the term that has already elapsed; the
     /// remaining discount is refunded back to the buyer. This function must
     /// be called before `due_date` — once the invoice is due, use
-    /// [`Self::repay`] instead.
+    /// [`Self::repay`] instead. A dispute flag does not block or alter this
+    /// settlement path.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1998,6 +2059,8 @@ impl InvoiceContract {
     /// * `InvoiceError::MathOverflow` if adding the grace period to the due date overflows.
     /// * `InvoiceError::CrossContractCallFailed` if the pool returns `false` from
     ///   `handle_default`.
+    ///
+    /// A dispute flag does not block default processing or move funds by itself.
     ///
     /// # Returns
     /// * `bool` - `true` when default processing succeeds.
@@ -2570,6 +2633,22 @@ impl InvoiceContract {
     /// ```
     pub fn get(env: Env, invoice_id: BytesN<32>) -> Invoice {
         Self::get_invoice(&env, invoice_id)
+    }
+
+    /// Returns whether either invoice party has raised a dispute.
+    ///
+    /// Invoices created before the dispute flag was introduced return `false`
+    /// until a party raises one; the invoice record itself is unchanged.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotInitialized` if the contract has not been initialized.
+    /// * `InvoiceError::NotFound` if the invoice does not exist.
+    pub fn is_disputed(env: Env, invoice_id: BytesN<32>) -> bool {
+        Self::get_invoice(&env, invoice_id.clone());
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeFlag(invoice_id))
+            .unwrap_or(false)
     }
 
     /// Lists a page of invoices for a given status.

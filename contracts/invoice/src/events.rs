@@ -70,6 +70,17 @@ pub fn delivery_confirmed(env: &Env, invoice_id: &BytesN<32>, confirmer: &Addres
     );
 }
 
+pub fn invoice_disputed(env: &Env, invoice_id: &BytesN<32>, disputer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "invoice_disputed"),
+            invoice_id.clone(),
+            disputer.clone(),
+        ),
+        (),
+    );
+}
+
 pub fn both_confirmed(env: &Env, invoice_id: &BytesN<32>) {
     env.events()
         .publish((Symbol::new(env, "both_confirmed"), invoice_id.clone()), ());

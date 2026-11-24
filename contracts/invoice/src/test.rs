@@ -4008,6 +4008,93 @@ fn setup_confirmed_invoice() -> (
     (env, client, buyer, invoice_id, pool, escrow)
 }
 
+#[test]
+fn test_raise_dispute_emits_event_and_is_idempotent() {
+    let (env, client, buyer, invoice_id, _, _) = setup_confirmed_invoice();
+    let invoice_before = client.get(&invoice_id);
+    assert!(!client.is_disputed(&invoice_id));
+
+    client.raise_dispute(&invoice_id, &invoice_before.issuer);
+    let events = env.events().all();
+    assert_eq!(events.len(), 1);
+    let (contract, topics, _) = events.last().expect("expected dispute event");
+    assert_eq!(contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_disputed")
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap(),
+        invoice_id
+    );
+    assert_eq!(
+        Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap(),
+        invoice_before.issuer
+    );
+    assert!(client.is_disputed(&invoice_id));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+
+    // The other party may also call, but the flag and its event remain idempotent.
+    client.raise_dispute(&invoice_id, &buyer);
+    assert!(client.is_disputed(&invoice_id));
+    assert!(env.events().all().is_empty());
+    assert_eq!(
+        client.get(&invoice_id).repaid_amount,
+        invoice_before.repaid_amount
+    );
+}
+
+#[test]
+fn test_raise_dispute_rejects_non_party_and_unfunded_invoice() {
+    let (env, client, _, invoice_id, _, _) = setup_confirmed_invoice();
+    let non_party = Address::generate(&env);
+    let result = env.try_invoke_contract::<bool, InvoiceError>(
+        &client.address,
+        &Symbol::new(&env, "raise_dispute"),
+        (invoice_id.clone(), non_party).into_val(&env),
+    );
+    assert_eq!(
+        result.err().and_then(|error| error.ok()),
+        Some(InvoiceError::NotAuthorized)
+    );
+    assert!(!client.is_disputed(&invoice_id));
+
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let unfunded_id = client.create(
+        &client.get(&invoice_id).issuer,
+        &client.get(&invoice_id).buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &client.get(&invoice_id).funding_asset,
+    );
+    let issuer = client.get(&unfunded_id).issuer;
+    let result = env.try_invoke_contract::<bool, InvoiceError>(
+        &client.address,
+        &Symbol::new(&env, "raise_dispute"),
+        (unfunded_id.clone(), issuer).into_val(&env),
+    );
+    assert_eq!(
+        result.err().and_then(|error| error.ok()),
+        Some(InvoiceError::InvalidStatusTransition)
+    );
+    assert!(!client.is_disputed(&unfunded_id));
+}
+
+#[test]
+fn test_raise_dispute_requires_disputer_authorization() {
+    let (env, client, _, invoice_id, _, _) = setup_confirmed_invoice();
+    let issuer = client.get(&invoice_id).issuer;
+    env.mock_auths(&[]);
+
+    let result = env.try_invoke_contract::<bool, InvoiceError>(
+        &client.address,
+        &Symbol::new(&env, "raise_dispute"),
+        (invoice_id.clone(), issuer).into_val(&env),
+    );
+    assert!(result.is_err());
+    assert!(!client.is_disputed(&invoice_id));
+}
+
 // ============== SUPPORTED ASSET TESTS ==============
 
 #[test]

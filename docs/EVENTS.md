@@ -92,6 +92,25 @@ Emitted when either the issuer or buyer confirms delivery.
 
 ---
 
+### `invoice_disputed`
+
+Emitted when the invoice's issuer or buyer raises the dispute flag for an
+invoice with funds in flight. The flag is informational and does not freeze
+funds or block repayment or default processing. Repeated calls do not emit
+duplicate events.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"invoice_disputed"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Issuer or buyer that raised the dispute |
+| **Data** | `()` | None |
+
+**Emitted by:** `raise_dispute()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `both_confirmed`
 
 Emitted when both issuer and buyer have confirmed delivery (invoice advances to Confirmed).
@@ -1147,6 +1166,8 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 1. **Filter by contract address** — each contract has a unique address on Stellar
 2. **Use topics for filtering** — `topic[0]` is always the event name (Symbol)
 3. **Data decoding** — payloads use Soroban SDK xdr encoding; decode based on the schemas above
+4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`; `invoice_disputed` marks a party-raised dispute without pausing settlement
+5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `invoice_defaulted` tracks defaulted funded principal
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
 5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `share_price_updated` tracks the 1e18 fixed-point LP share price before and after a yield-bearing repayment; `invoice_defaulted` tracks defaulted funded principal
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`

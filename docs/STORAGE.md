@@ -237,6 +237,12 @@ let status = if !profile_exists {
 |---------|------|-------------|
 | `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
 
+#### Dispute Flag
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `DisputeFlag(BytesN<32>)` | `bool` | Presence/true marker that the issuer or buyer raised a dispute. Missing markers (including on invoices created before this feature) mean `false`; stored separately so existing `Invoice` records remain decodable. |
+
 #### Supported Asset Allow-List
 
 | DataKey | Type | Description | TTL extended |

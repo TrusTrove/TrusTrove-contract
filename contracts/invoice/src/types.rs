@@ -130,6 +130,9 @@ pub enum DataKey {
     // variants so already-deployed key discriminants stay stable.
     BuyerMembership(Address, u64),
     DefaultGraceSeconds,
+    /// Persistent marker for an invoice with an issuer- or buyer-raised
+    /// dispute. Appended to preserve existing storage-key discriminants.
+    DisputeFlag(BytesN<32>),
 }
 
 /// A risk attestation recorded against an invoice by a registered
