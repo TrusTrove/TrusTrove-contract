@@ -1513,6 +1513,64 @@ fn test_get_stats_after_funding() {
 }
 
 #[test]
+fn test_get_available_liquidity_zero_and_utilized_pool() {
+    let te = setup();
+    assert_eq!(te.pool.get_available_liquidity(), 0);
+
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    assert_eq!(te.pool.get_available_liquidity(), 100_000_000_000);
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    let stats = te.pool.get_stats();
+    assert_eq!(te.pool.get_available_liquidity(), stats.available_liquidity);
+    assert!(stats.available_liquidity < 100_000_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #2)")]
+fn test_get_available_liquidity_panics_on_uninitialized_pool() {
+    let (_env, _pool_id, pool) = deploy_pool_with_evicted_config();
+    let _ = pool.get_available_liquidity();
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_get_available_liquidity_rejects_accounting_invariant_violation() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &1u128);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &2u128);
+    });
+
+    let _ = te.pool.get_available_liquidity();
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_get_available_liquidity_rejects_utilization_overflow() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &u128::MAX);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalFunded, &(u128::MAX / 10_000 + 1));
+    });
+
+    let _ = te.pool.get_available_liquidity();
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #13)")]
 fn test_get_stats_rejects_utilization_overflow() {
     let te = setup();
