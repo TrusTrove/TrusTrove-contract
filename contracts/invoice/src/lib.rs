@@ -1000,6 +1000,7 @@ impl InvoiceContract {
     ///   has since been revoked.
     /// * `InvoiceError::BuyerNotVerified` if the buyer's registry verification
     ///   has since been revoked.
+    /// * `InvoiceError::InvalidDiscount` if `discount_bps` is 0.
     /// * `InvoiceError::DiscountTooHigh` if `discount_bps` is greater than 5000.
     ///
     /// # Returns
@@ -1050,6 +1051,9 @@ impl InvoiceContract {
             &invoice.buyer,
             InvoiceError::BuyerNotVerified,
         );
+        if discount_bps == 0 {
+            panic_with_error!(&env, InvoiceError::InvalidDiscount);
+        }
         if discount_bps > 5000 {
             panic_with_error!(&env, InvoiceError::DiscountTooHigh);
         }
