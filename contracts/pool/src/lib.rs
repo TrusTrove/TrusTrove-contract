@@ -1300,6 +1300,12 @@ impl PoolContract {
     ///   admin-configured floor (`DataKey::MinDiscountBps`, set via
     ///   `set_min_discount`). The floor defaults to 0, where this check is
     ///   unreachable (issue #829).
+    /// * `MaturityTooLong` if the invoice's remaining time to maturity
+    ///   (`due_date - now`) exceeds the admin-configured maximum
+    ///   (`DataKey::MaxTimeToMaturity`, set via `set_max_time_to_maturity`).
+    ///   An invoice exactly at the maximum is accepted. The maximum defaults
+    ///   to 0 (unrestricted), where the check and its extra invoice read are
+    ///   skipped (issue #1184).
     ///
     /// # Returns
     /// * `bool` - `true` when the invoice is funded.
@@ -1409,6 +1415,27 @@ impl PoolContract {
             .unwrap_or(0u32);
         if discount_bps < min_discount_bps {
             panic_with_error!(&env, PoolError::DiscountBelowMinimum);
+        }
+        // Admin-set maximum time to maturity (issue #1184). Like the yield
+        // floor it is an eligibility rule, so it panics in single and batch
+        // mode alike. It runs only here, when an invoice is newly funded, so
+        // invoices funded before the maximum was set or lowered are never
+        // re-checked. At the default of 0 (unrestricted) the extra invoice
+        // read is skipped, so default funding costs exactly what it did.
+        let max_time_to_maturity: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64);
+        if max_time_to_maturity > 0 {
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let due_date: u64 =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_due_date"), args);
+            let remaining = due_date.saturating_sub(env.ledger().timestamp());
+            if remaining > max_time_to_maturity {
+                panic_with_error!(&env, PoolError::MaturityTooLong);
+            }
         }
         let funded_amount = face_value
             .checked_mul(10000 - discount_bps as u128)
@@ -1529,7 +1556,8 @@ impl PoolContract {
     /// it is funded either.
     ///
     /// Entries that fail an *eligibility* check (not listed, already funded by
-    /// this pool, unverified issuer/buyer, asset mismatch) instead revert the
+    /// this pool, unverified issuer/buyer, asset mismatch, a discount below
+    /// the floor, a maturity beyond the maximum) instead revert the
     /// whole call with the same typed error `fund_invoice` would raise. The
     /// distinction matters: a capacity stop is a normal, expected outcome for
     /// an LP filling the pool, whereas an ineligible entry is a caller mistake
@@ -2393,6 +2421,66 @@ impl PoolContract {
                 Self::admin(&env)
                     .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized))
             })
+    }
+
+    /// Sets the maximum remaining time to maturity, in seconds, that an
+    /// invoice may have when `fund_invoice` or `batch_fund_invoice` funds it
+    /// (issue #1184).
+    ///
+    /// Authorization mirrors `set_min_discount`: the *stored* admin must sign.
+    /// `0` (the default, and the state of every instance predating this
+    /// feature) means unrestricted. The rule applies only when an invoice is
+    /// newly funded: invoices the pool already funded are never re-checked,
+    /// so lowering the maximum cannot block their repayment or default
+    /// handling. An invoice whose remaining time equals the maximum is
+    /// accepted.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `max_seconds` - The new maximum `due_date - now`, in seconds. `0`
+    ///   removes the limit.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the maximum is updated. Emits
+    ///   `max_maturity_updated` with `(old_max_seconds, new_max_seconds)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Only fund invoices due within 90 days.
+    /// client.set_max_time_to_maturity(&(90 * 24 * 60 * 60));
+    /// ```
+    pub fn set_max_time_to_maturity(env: Env, max_seconds: u64) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        let old_max_seconds = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxTimeToMaturity, &max_seconds);
+        events::max_maturity_updated(&env, old_max_seconds, max_seconds);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the maximum remaining time to maturity, in seconds, accepted
+    /// for newly funded invoices. Defaults to `0` (unrestricted) when never
+    /// set, so instances predating issue #1184 keep their behavior.
+    pub fn get_max_time_to_maturity(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64)
     }
 
     /// Sets the minimum invoice discount (yield floor) enforced by

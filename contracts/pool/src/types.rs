@@ -137,6 +137,11 @@ pub enum DataKey {
     /// no-re-entry rule forbids reading `get_buyer` at that point.
     /// Appended after `MinDiscountBps` to keep existing discriminants stable.
     FundedInvoiceBuyer(BytesN<32>),
+    /// Admin-configured maximum remaining time to maturity, in seconds, that
+    /// an invoice may have when `fund_invoice` funds it (issue #1184).
+    /// `0` (the default when never set) means unrestricted. Appended after
+    /// `FundedInvoiceBuyer` to keep existing discriminants stable.
+    MaxTimeToMaturity,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,

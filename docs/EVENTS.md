@@ -603,6 +603,25 @@ it changed to. A rejected call (non-admin, or floor above
 
 ---
 
+### `max_maturity_updated`
+
+Emitted when the admin changes the maximum remaining time to maturity that
+`fund_invoice` accepts for newly funded invoices, via
+`set_max_time_to_maturity` (issue #1184). Like `min_discount_updated`, the old
+value is included. `0` means unrestricted. A rejected call (non-admin) emits
+nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"max_maturity_updated"` |
+| **Data** | `(u64, u64)` | `(old_max_seconds, new_max_seconds)` |
+
+**Emitted by:** `set_max_time_to_maturity()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:184`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.

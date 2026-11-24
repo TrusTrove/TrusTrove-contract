@@ -176,3 +176,14 @@ pub fn min_discount_updated(env: &Env, old_min_bps: u32, new_min_bps: u32) {
         (old_min_bps, new_min_bps),
     );
 }
+
+/// Emitted by `set_max_time_to_maturity` when the admin changes the maximum
+/// remaining time to maturity accepted for newly funded invoices (issue
+/// #1184). Like `min_discount_updated`, it carries the old value as well as
+/// the new one; `0` means unrestricted. A rejected change emits nothing.
+pub fn max_maturity_updated(env: &Env, old_max_seconds: u64, new_max_seconds: u64) {
+    env.events().publish(
+        (Symbol::new(env, "max_maturity_updated"),),
+        (old_max_seconds, new_max_seconds),
+    );
+}
