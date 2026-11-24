@@ -3199,3 +3199,151 @@ fn test_invoice_only_redeployment_updates_pinned_recipient_validation() {
     client.lock(&invoice_id, &1_000_000_000, &new_invoice);
     client.release_to_issuer(&invoice_id, &new_invoice);
 }
+
+// =========================================================================
+// Tests for issue #1199: Escrow custody balance view
+// =========================================================================
+
+#[test]
+fn test_get_custody_balance_reflects_token_holdings_and_makes_no_transfers() {
+    let (env, client, _admin, _pool, issuer, usdc) = setup();
+    let invoice_id = generate_invoice_id(&env, 110);
+    let amount = 1_000_000_000u128; // 100 USDC
+
+    // 1. Initial custody balance is zero before any locks
+    assert_eq!(client.get_custody_balance(), 0);
+
+    // 2. Lock transfers tokens into escrow custody
+    assert!(client.lock(&invoice_id, &amount, &issuer));
+    assert_eq!(client.get_custody_balance(), amount as i128);
+    assert_eq!(get_balance(&env, &usdc, &client.address), amount as i128);
+
+    // 3. Repeated view calls do not transfer or mutate custody or lock state
+    assert_eq!(client.get_custody_balance(), amount as i128);
+    assert_eq!(client.get_locked(&invoice_id), amount);
+}
+
+#[test]
+fn test_get_custody_balance_diverges_from_locked_on_unsolicited_transfer() {
+    let (env, client, _admin, pool, _issuer, usdc) = setup();
+    let invoice_id = generate_invoice_id(&env, 111);
+    let amount = 500_000_000u128;
+
+    // Direct out-of-band transfer to escrow contract address (e.g. unsolicited donor or errant transfer)
+    let unsolicited_amount = 250_000_000i128;
+    MockTokenClient::new(&env, &usdc).transfer(&pool, &client.address, &unsolicited_amount);
+
+    // Custody reflects token balance even without any active lock
+    assert_eq!(client.get_custody_balance(), unsolicited_amount);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+
+    // Normal lock increases custody on top of existing balance
+    assert!(client.lock(&invoice_id, &amount, &_issuer));
+    assert_eq!(
+        client.get_custody_balance(),
+        unsolicited_amount + (amount as i128)
+    );
+    // Summed active locks is only the locked amount, documenting the divergence
+    assert_eq!(client.get_locked(&invoice_id), amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_get_custody_balance_panics_when_not_initialized() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register(
+        EscrowContract,
+        (
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ),
+    );
+    env.as_contract(&contract_id, || {
+        env.storage().instance().remove(&DataKey::UsdcAsset);
+    });
+    let client = EscrowContractClient::new(&env, &contract_id);
+    client.get_custody_balance();
+}
+
+// =========================================================================
+// Tests for issue #1200: Lock checksum view
+// =========================================================================
+
+#[test]
+fn test_get_lock_checksum_returns_digest_for_active_lock() {
+    let (env, client, _admin, _pool, issuer, _usdc) = setup();
+    let invoice_id = generate_invoice_id(&env, 112);
+    let amount = 750_000_000u128;
+
+    // Before locking, checksum is None
+    assert_eq!(client.get_lock_checksum(&invoice_id), None);
+
+    // Lock funds
+    assert!(client.lock(&invoice_id, &amount, &issuer));
+
+    // Active lock produces deterministic Some(checksum)
+    let checksum1 = client.get_lock_checksum(&invoice_id);
+    assert!(checksum1.is_some());
+    let checksum2 = client.get_lock_checksum(&invoice_id);
+    assert_eq!(checksum1, checksum2);
+}
+
+#[test]
+fn test_get_lock_checksum_returns_none_after_release_to_issuer() {
+    let (env, client, _admin, _pool, issuer, _usdc) = setup();
+    let invoice_id = generate_invoice_id(&env, 113);
+    let amount = 800_000_000u128;
+
+    assert!(client.lock(&invoice_id, &amount, &issuer));
+    assert!(client.get_lock_checksum(&invoice_id).is_some());
+
+    // Release to issuer removes the lock
+    assert!(client.release_to_issuer(&invoice_id, &issuer));
+    assert_eq!(client.get_lock_checksum(&invoice_id), None);
+}
+
+#[test]
+fn test_get_lock_checksum_changes_on_partial_release() {
+    let (env, client, _admin, _pool, issuer, _usdc) = setup();
+    let invoice_id = generate_invoice_id(&env, 114);
+    let total_amount = 1_000_000_000u128;
+    let partial_repay = 400_000_000u128;
+
+    assert!(client.lock(&invoice_id, &total_amount, &issuer));
+    let initial_checksum = client.get_lock_checksum(&invoice_id).unwrap();
+
+    // Partial repayment reduces residual amount in place
+    assert!(client.release_to_pool(&invoice_id, &partial_repay));
+    let updated_checksum = client.get_lock_checksum(&invoice_id).unwrap();
+
+    // Checksum must change deterministically due to updated amount
+    assert_ne!(initial_checksum, updated_checksum);
+    assert_eq!(
+        client.get_locked(&invoice_id),
+        total_amount - partial_repay
+    );
+
+    // Full repayment removes lock completely
+    assert!(client.release_to_pool(&invoice_id, &(total_amount - partial_repay)));
+    assert_eq!(client.get_lock_checksum(&invoice_id), None);
+}
+
+#[test]
+fn test_get_lock_checksum_differentiates_recipients() {
+    let (env, client, _admin, _pool, issuer1, _usdc) = setup();
+    let issuer2 = env.register(MockCaller, ());
+
+    let invoice_id1 = generate_invoice_id(&env, 115);
+    let invoice_id2 = generate_invoice_id(&env, 116);
+    let amount = 500_000_000u128;
+
+    assert!(client.lock(&invoice_id1, &amount, &issuer1));
+    assert!(client.lock(&invoice_id2, &amount, &issuer2));
+
+    let checksum1 = client.get_lock_checksum(&invoice_id1).unwrap();
+    let checksum2 = client.get_lock_checksum(&invoice_id2).unwrap();
+
+    assert_ne!(checksum1, checksum2);
+}

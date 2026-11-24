@@ -1,8 +1,9 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
+use soroban_sdk::xdr::ToXdr;
 use trusttrove_pause::{require_not_paused, set_paused};
 
 mod constants;
@@ -1104,6 +1105,53 @@ impl EscrowContract {
             }
         }
         total
+    }
+
+    /// Returns the configured asset's custody token balance held by the escrow contract.
+    ///
+    /// # Invariants and Reconciliation
+    /// This view inspects the balance of `usdc_asset` at `env.current_contract_address()`.
+    /// The returned custody balance may differ from the sum of active [`Self::get_locked`]
+    /// records because:
+    /// - Direct or unsolicited token transfers to the escrow contract address increase
+    ///   the token custody balance without creating or updating an escrow lock record.
+    /// - Residual balances or dust following partial repayments or fee reconciliations
+    ///   may remain held in escrow.
+    /// - Inter-transaction states between funding lock and release may temporarily exhibit
+    ///   non-matching totals.
+    ///
+    /// # Safety
+    /// This method is purely a read-only query. It performs no transfers, burns, or
+    /// balance modifications, and does not alter contract storage.
+    pub fn get_custody_balance(env: Env) -> i128 {
+        let usdc = Self::usdc_client(&env);
+        usdc.balance(&env.current_contract_address())
+    }
+
+    /// Returns a deterministic digest (SHA-256) committing to the active lock's
+    /// invoice ID, amount, timestamp, and recipient.
+    ///
+    /// Returns `None` if no active lock exists for the specified invoice.
+    /// When a partial repayment or release occurs via [`Self::release_to_pool`],
+    /// the recorded amount decreases in place, deterministically producing a
+    /// different checksum.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - 32-byte invoice identifier to query.
+    pub fn get_lock_checksum(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        let key = DataKey::Locked(invoice_id);
+        let record = env.storage().persistent().get::<_, EscrowRecord>(&key)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let mut payload = Bytes::new(&env);
+        payload.append(&record.invoice_id.into());
+        payload.append(&Bytes::from_slice(&env, &record.amount.to_be_bytes()));
+        payload.append(&Bytes::from_slice(&env, &record.locked_at.to_be_bytes()));
+        payload.append(&record.issuer.to_xdr(&env));
+        Some(env.crypto().sha256(&payload).into())
     }
 
     /// Returns the history of escrow events for an invoice.
