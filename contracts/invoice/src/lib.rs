@@ -2640,6 +2640,135 @@ impl InvoiceContract {
         result
     }
 
+    /// Lists one page of invoice **IDs** for a given status, plus a cursor to
+    /// the next page (issue #1152).
+    ///
+    /// ID-only, cursor-driven counterpart of `get_by_status` for indexers.
+    /// It reads `StatusIndexCount` plus at most `page_size` `StatusIndexEntry`
+    /// rows and their `StatusMembership` markers. It never decodes an
+    /// [`Invoice`] record for rows written by the current contract, so the
+    /// cost of a call is bounded by `page_size`.
+    ///
+    /// # Iteration and ordering
+    /// Start with `cursor = None` and pass each returned `next` back as
+    /// `cursor` until `next` is `None`. The walk runs from the end of the
+    /// status index towards its start: each page returns the rows at index
+    /// positions `[start, end)` in descending position order, where
+    /// `end = min(cursor, count)` (`count` for `None`) and
+    /// `start = end.saturating_sub(page_size)`. `next` is `Some(start)`, or
+    /// `None` once `start` reaches `0`. An exactly full last page therefore
+    /// also returns `None`.
+    ///
+    /// Index position roughly follows the order in which invoices entered
+    /// the status, newest at the end. It is not strictly that order, because
+    /// removing an invoice moves the last row into its slot (swap-and-pop).
+    ///
+    /// # Out-of-range cursors
+    /// A cursor above the current count is clamped to the count. The index
+    /// can shrink between pages as invoices leave the status, so a cursor
+    /// issued earlier is never treated as an error. `Some(0)` returns an
+    /// empty page with `next: None`, as does any cursor on a status with no
+    /// invoices.
+    ///
+    /// # Consistency while invoices change status
+    /// The status index has no stable order, so no cursor over it can be
+    /// exact while transitions happen between calls. Walking backwards gives
+    /// these guarantees for one iteration (first call to `next == None`):
+    /// * Each page is a consistent snapshot. Every returned ID exists and has
+    ///   `status` at the time of that call, and a page never repeats an ID.
+    /// * **No skips:** every invoice that has `status` for the whole
+    ///   iteration is returned at least once. A removal only ever moves the
+    ///   last row of the index, and walking backwards means rows not yet read
+    ///   can never move into the range already read.
+    /// * **Possible duplicates:** an invoice can be returned twice when,
+    ///   between two calls, an invoice at a position not yet read leaves the
+    ///   status while the last row was already returned. Swap-and-pop moves
+    ///   that already-returned row into the range still to be read. Callers
+    ///   should de-duplicate by ID.
+    /// * An invoice that leaves the status before its position is read is
+    ///   not returned. An invoice that enters the status during the
+    ///   iteration is appended to the end of the index and may or may not be
+    ///   returned.
+    /// * With no transitions on this status during the iteration, every ID
+    ///   is returned exactly once.
+    ///
+    /// Forward offsets were rejected: there, a removal behind the cursor
+    /// swaps a not-yet-read row behind the cursor, silently skipping an
+    /// invoice that never left the status.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `status` - The invoice status to list.
+    /// * `cursor` - `None` for the first page, then the previous page's
+    ///   `next`.
+    /// * `page_size` - Maximum rows to read for this page. Must be in
+    ///   `1..=MAX_PAGE_SIZE` (50).
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::InvalidPageSize` if `page_size == 0` or
+    ///   `page_size > MAX_PAGE_SIZE`.
+    /// * `InvoiceError::NotFound` if an index entry inside the status count
+    ///   is missing (a broken storage invariant, as in `get_by_status`).
+    ///
+    /// # Returns
+    /// * `InvoiceIdPage` - The IDs on this page and the cursor to the next.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut cursor = None;
+    /// loop {
+    ///     let page = client.get_invoice_ids_by_status(&InvoiceStatus::Listed, &cursor, &50);
+    ///     // ... index page.ids, de-duplicating by ID ...
+    ///     match page.next {
+    ///         Some(next) => cursor = Some(next),
+    ///         None => break,
+    ///     }
+    /// }
+    /// ```
+    pub fn get_invoice_ids_by_status(
+        env: Env,
+        status: InvoiceStatus,
+        cursor: Option<u32>,
+        page_size: u32,
+    ) -> InvoiceIdPage {
+        if page_size == 0 || page_size > MAX_PAGE_SIZE {
+            panic_with_error!(&env, InvoiceError::InvalidPageSize);
+        }
+        let status_u32 = status as u32;
+        let count_key = DataKey::StatusIndexCount(status_u32);
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        // Issue #832: read-time TTL bump, see `get_by_status`.
+        bump_persistent(&env, &count_key);
+        // Clamp: the index may have shrunk since `cursor` was issued.
+        let end = match cursor {
+            Some(cursor) => core::cmp::min(cursor, count),
+            None => count,
+        };
+        let start = end.saturating_sub(page_size);
+        let mut ids: Vec<BytesN<32>> = Vec::new(&env);
+        let mut i = end;
+        while i > start {
+            i -= 1;
+            let entry_key = DataKey::StatusIndexEntry(status_u32, i);
+            let id: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&entry_key)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            bump_persistent(&env, &entry_key);
+            if is_current_status_row(&env, status, &id, i) {
+                ids.push_back(id);
+            }
+        }
+        InvoiceIdPage {
+            ids,
+            next: if start == 0 { None } else { Some(start) },
+        }
+    }
+
     /// Lists a page of invoices created by a given issuer.
     ///
     /// Pagination bounds the number of invoices hydrated per call, keeping the
@@ -3320,6 +3449,35 @@ fn read_status_membership(env: &Env, status: InvoiceStatus, invoice_id: &BytesN<
         .persistent()
         .get::<_, u32>(&status_membership_key(status, invoice_id))
         .is_some()
+}
+
+/// Returns whether the `StatusIndexEntry` row at `position`, holding
+/// `invoice_id`, is a live member of `status` (issue #1152).
+///
+/// Fast path: rows written since issue #831 carry a `StatusMembership`
+/// marker that stores the row's position, so `marker == position` proves
+/// membership with one small read and no `Invoice` decode. Any other case
+/// falls back to the invoice record's current `status`: rows written before
+/// markers existed (which may be stale, since the index used to be
+/// append-only) and the 8-byte projection aliasing documented on
+/// `status_membership_key`.
+fn is_current_status_row(
+    env: &Env,
+    status: InvoiceStatus,
+    invoice_id: &BytesN<32>,
+    position: u32,
+) -> bool {
+    let marker_key = status_membership_key(status, invoice_id);
+    if env.storage().persistent().get::<_, u32>(&marker_key) == Some(position) {
+        env.storage()
+            .persistent()
+            .extend_ttl(&marker_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        return true;
+    }
+    env.storage()
+        .persistent()
+        .get::<_, Invoice>(&DataKey::Invoice(invoice_id.clone()))
+        .is_some_and(|invoice| invoice.status == status)
 }
 
 /// Marks `invoice_id` as a member of `status` at row `position` of the status

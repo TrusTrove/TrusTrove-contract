@@ -22,6 +22,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pool`: `get_lifetime_deposited_volume()` view backed by a cumulative counter
   incremented by every successful `deposit`. Withdrawals never reduce it, and
   older instances read `0` until their first deposit (#1172)
+- `invoice`: `get_invoice_ids_by_status(status, cursor, page_size)` view and
+  `InvoiceIdPage { ids, next }` type for indexers. It returns up to
+  `page_size` (`1..=MAX_PAGE_SIZE`, else `InvalidPageSize`) invoice IDs for
+  one status without decoding invoices, plus a `next` cursor that is `None`
+  when the walk is complete. It walks the status index backwards, so
+  invoices that stay in the status are never skipped while others change
+  status, though one may be returned twice. `get_by_status` and the storage
+  layout are unchanged (#1152)
 - `pool`: `get_lifetime_withdrawn_volume()` view backed by a cumulative counter
   incremented only by successful LP `withdraw` amounts. Failed calls and
   internal funding transfers leave it unchanged (#1173)

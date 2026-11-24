@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Symbol};
+use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -242,4 +242,22 @@ impl InvoiceStatus {
             InvoiceStatus::Cancelled => "Cancelled",
         }
     }
+}
+
+/// One page of invoice IDs for a single status, returned by
+/// [`InvoiceContract::get_invoice_ids_by_status`](crate::InvoiceContract::get_invoice_ids_by_status)
+/// (issue #1152).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvoiceIdPage {
+    /// Invoice IDs on this page. Each one existed and had the requested
+    /// status when the page was read. Can be shorter than the requested
+    /// `page_size` (even empty) while `next` is still `Some`, when stale
+    /// legacy index rows were filtered out.
+    pub ids: Vec<BytesN<32>>,
+    /// Cursor to pass as `cursor` to fetch the following page, or `None`
+    /// when this page reached the start of the index and iteration is
+    /// complete. An exactly full last page also returns `None`, so no extra
+    /// empty request is needed.
+    pub next: Option<u32>,
 }
