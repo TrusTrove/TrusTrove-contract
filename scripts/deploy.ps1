@@ -44,7 +44,7 @@ foreach ($arg in $args) {
 
 # Resolve stellar CLI location dynamically
 $stellar = Get-Command stellar -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-if (-not $stellar) {
+if (-not $stellar -and -not $dryRun) {
     $stellarBin = [Environment]::GetEnvironmentVariable('STELLAR_BIN')
     if ($stellarBin -and (Test-Path $stellarBin)) {
         $stellar = $stellarBin
@@ -78,19 +78,20 @@ Get-Content $envFile | ForEach-Object {
 
 $addressesFile = ".deployed-addresses"
 
-if ($fresh) {
+if ($fresh -and -not $dryRun) {
     Write-Host "=== -Fresh flag set: removing saved addresses and starting clean ==="
     Remove-Item -Path $addressesFile -ErrorAction SilentlyContinue
 }
 
 # Ensure file exists
-if (-not (Test-Path $addressesFile)) {
+if (-not $dryRun -and -not (Test-Path $addressesFile)) {
     New-Item -Path $addressesFile -ItemType File -Force | Out-Null
 }
 
 # Read all saved addresses into a hashtable
 function Get-SavedAddresses {
     $map = @{}
+    if ($dryRun -and $fresh) { return $map }
     if (Test-Path $addressesFile) {
         Get-Content $addressesFile | ForEach-Object {
             if ($_ -match '^([^=]+)=(.*)$') {
@@ -224,7 +225,7 @@ function Get-OrCreateSalt {
     $salt = Load-Address "${key}_salt"
     if (-not $salt) {
         $salt = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
-        Save-Address "${key}_salt" $salt
+        if (-not $dryRun) { Save-Address "${key}_salt" $salt }
     }
     return $salt
 }
@@ -308,8 +309,12 @@ if (-not $xlmAsset) {
     exit 1
 }
 
-$deployerAddress = & $stellar keys address $deployerAccount 2>&1
-if ($LASTEXITCODE -ne 0) {
+$deployerAddress = if ($dryRun) {
+    if ($env:DEPLOYER_ADDRESS) { $env:DEPLOYER_ADDRESS } else { "<address-for-$deployerAccount>" }
+} else {
+    & $stellar keys address $deployerAccount 2>&1
+}
+if (-not $dryRun -and $LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Could not resolve address for key '$deployerAccount'."
     Write-Host "       Run scripts/setup-testnet.ps1 first."
     exit 1
