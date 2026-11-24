@@ -959,6 +959,73 @@ impl EscrowContract {
         }
     }
 
+    /// Previews releasing an escrow lock to a proposed issuer.
+    ///
+    /// The returned amount is read directly from the active lock. The boolean
+    /// is `true` only when the proposed recipient is the recorded issuer and
+    /// is not one of the escrow, pool, USDC asset, or configured invoice
+    /// contract addresses rejected by [`Self::release_to_issuer`]. A missing
+    /// lock returns `(0, false)`.
+    ///
+    /// This is a read-only preview. It requires no authorization, performs no
+    /// token transfer, emits no event, removes no storage, and does not extend
+    /// any storage TTL. The result never authorizes or replaces the checks in
+    /// [`Self::release_to_issuer`].
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice whose lock is being previewed.
+    /// * `issuer` - The proposed recipient to validate.
+    ///
+    /// # Returns
+    /// * `(u128, bool)` - The locked amount and whether `issuer` is structurally
+    ///   valid for release.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let (amount, valid) = client.preview_release_to_issuer(&invoice_id, &issuer);
+    /// ```
+    pub fn preview_release_to_issuer(
+        env: Env,
+        invoice_id: BytesN<32>,
+        issuer: Address,
+    ) -> (u128, bool) {
+        let key = DataKey::Locked(invoice_id);
+        let Some(record) = env.storage().persistent().get::<_, EscrowRecord>(&key) else {
+            return (0, false);
+        };
+
+        let pool = match env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::PoolContract)
+        {
+            Some(pool) => pool,
+            None => return (record.amount, false),
+        };
+        let usdc = match env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::UsdcAsset)
+        {
+            Some(usdc) => usdc,
+            None => return (record.amount, false),
+        };
+
+        let invoice_is_recipient = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+            .is_some_and(|invoice_contract| issuer == invoice_contract);
+        let recipient_is_structurally_valid = issuer == record.issuer
+            && issuer != env.current_contract_address()
+            && issuer != pool
+            && issuer != usdc
+            && !invoice_is_recipient;
+
+        (record.amount, recipient_is_structurally_valid)
+    }
+
     /// Returns the amount of USDC currently locked against an invoice.
     ///
     /// # Arguments

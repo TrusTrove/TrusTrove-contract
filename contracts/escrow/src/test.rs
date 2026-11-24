@@ -730,6 +730,97 @@ fn test_release_to_issuer_rejects_redirect_and_pays_recorded_issuer() {
     assert_eq!(client.get_locked(&invoice_id), 0);
 }
 
+// ============================================================================
+// Release-to-issuer preview tests (issue #1192)
+// ============================================================================
+
+#[test]
+fn test_preview_release_to_issuer_returns_amount_and_valid_recipient() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1192);
+    let amount: u128 = 1_234_567;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    env.set_auths(&[]);
+
+    assert_eq!(
+        client.preview_release_to_issuer(&invoice_id, &issuer),
+        (amount, true)
+    );
+    assert_eq!(client.get_locked(&invoice_id), amount);
+}
+
+#[test]
+fn test_preview_release_to_issuer_never_authorizes_or_transfers() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1193);
+    let amount: u128 = 1_000_000_000;
+    let token = MockTokenClient::new(&env, &usdc_id);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    let issuer_before = token.balance(&issuer);
+    env.set_auths(&[]);
+
+    assert_eq!(
+        client.preview_release_to_issuer(&invoice_id, &issuer),
+        (amount, true)
+    );
+    assert!(env.auths().is_empty());
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(token.balance(&issuer), issuer_before);
+}
+
+#[test]
+fn test_preview_release_to_issuer_rejects_invalid_recipient_without_mutation() {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1194);
+    let amount: u128 = 2_000_000;
+    let wrong_recipient = Address::generate(&env);
+    let token = MockTokenClient::new(&env, &usdc_id);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    let history_before = client.get_history(&invoice_id);
+    let issuer_before = token.balance(&issuer);
+    env.set_auths(&[]);
+
+    assert_eq!(
+        client.preview_release_to_issuer(&invoice_id, &wrong_recipient),
+        (amount, false)
+    );
+    assert_eq!(
+        client.preview_release_to_issuer(&invoice_id, &client.address),
+        (amount, false)
+    );
+    assert_eq!(
+        client.preview_release_to_issuer(&invoice_id, &pool),
+        (amount, false)
+    );
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_history(&invoice_id), history_before);
+    assert_eq!(token.balance(&issuer), issuer_before);
+}
+
+#[test]
+fn test_preview_release_to_issuer_is_idempotent_and_returns_zero_for_missing_lock() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1195);
+
+    assert_eq!(
+        client.preview_release_to_issuer(&invoice_id, &issuer),
+        (0, false)
+    );
+
+    let amount: u128 = 9_999;
+    client.lock(&invoice_id, &amount, &issuer);
+    env.set_auths(&[]);
+    let first = client.preview_release_to_issuer(&invoice_id, &issuer);
+    let second = client.preview_release_to_issuer(&invoice_id, &issuer);
+
+    assert_eq!(first, (amount, true));
+    assert_eq!(second, first);
+    assert_eq!(client.get_locked(&invoice_id), amount);
+}
+
 /// #1007: `release_to_issuer` transfers to the issuer before removing the
 /// lock record, so a rejected token transfer must leave the custody state
 /// untouched — lock record and history present, no release event, issuer
