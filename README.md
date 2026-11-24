@@ -172,6 +172,7 @@ release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
+get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
@@ -319,6 +320,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
+| Escrow | `get_release_authorization` | `get_release_authorization(caller: Address) -> ReleaseAuthorization` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
 | Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
 | Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
@@ -369,7 +371,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 151 public entry points across five deployable contracts.**
+**Total: 152 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
