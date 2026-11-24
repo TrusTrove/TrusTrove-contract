@@ -985,6 +985,21 @@ impl EscrowContract {
         }
     }
 
+    /// Returns the first timestamp at which the minimum lock no longer blocks
+    /// default handling. Returns `None` when there is no active escrow.
+    /// Fails with `MathOverflow` if the expiration cannot fit in a `u64`.
+    pub fn get_lock_expiration(env: Env, invoice_id: BytesN<32>) -> Option<u64> {
+        let key = DataKey::Locked(invoice_id);
+        let storage = env.storage().persistent();
+        let record: EscrowRecord = storage.get(&key)?;
+        let expiration = record
+            .locked_at
+            .checked_add(DEFAULT_MIN_LOCK_SECONDS)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
+        storage.extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Some(expiration)
+    }
+
     /// Returns the ledger sequence when the escrow was locked for an invoice.
     ///
     /// # Arguments

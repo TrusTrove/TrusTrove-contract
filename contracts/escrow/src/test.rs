@@ -1628,12 +1628,19 @@ fn test_handle_default_allows_at_grace_period_boundary() {
     let invoice_id = generate_invoice_id(&env, 10);
     let amount: u128 = 1_000_000_000;
 
+    assert_eq!(client.get_lock_expiration(&invoice_id), None);
+    let expected_expiration = env.ledger().timestamp() + 60;
     client.lock(&invoice_id, &amount, &issuer);
-    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert_eq!(
+        client.get_lock_expiration(&invoice_id),
+        Some(expected_expiration)
+    );
+    env.ledger().set_timestamp(expected_expiration);
 
     let result = client.handle_default(&invoice_id, &pool);
     assert!(result);
     assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(client.get_lock_expiration(&invoice_id), None);
 }
 
 #[test]
