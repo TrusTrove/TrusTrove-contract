@@ -921,6 +921,40 @@ impl EscrowContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Returns whether an escrow lock record exists for an invoice.
+    ///
+    /// This checks the persistent record itself, not its amount. It therefore
+    /// distinguishes a missing lock from a malformed record whose amount is zero.
+    /// Missing keys are not created by this read-only view.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if a lock record exists, even if its stored amount is zero.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let exists = client.has_lock(&invoice_id);
+    /// ```
+    pub fn has_lock(env: Env, invoice_id: BytesN<32>) -> bool {
+        let key = DataKey::Locked(invoice_id);
+        if !env.storage().persistent().has(&key) {
+            return false;
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        true
+    }
+
     /// Returns the amount of USDC currently locked against an invoice.
     ///
     /// # Arguments

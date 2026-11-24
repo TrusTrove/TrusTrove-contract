@@ -172,11 +172,12 @@ release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
+has_lock(invoice_id) → bool
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
-Read-only views (`get_locked`) stay callable.
+Read-only views (`get_locked`, `has_lock`) stay callable.
 
 ### pool_contract
 
@@ -320,6 +321,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
+| Escrow | `has_lock` | `has_lock(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
