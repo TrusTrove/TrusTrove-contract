@@ -142,6 +142,17 @@ pub enum DataKey {
     /// `0` (the default when never set) means unrestricted. Appended after
     /// `FundedInvoiceBuyer` to keep existing discriminants stable.
     MaxTimeToMaturity,
+    /// Lifetime gross USDC (funding-asset base units) deposited by LPs across
+    /// all successful `deposit` calls. Never reduced by withdrawals (#1172).
+    LifetimeDepositedVolume,
+    /// Lifetime gross USDC (funding-asset base units) withdrawn by LPs across
+    /// all successful `withdraw` calls. Internal funding transfers do not
+    /// touch it (#1173).
+    LifetimeWithdrawnVolume,
+    /// Lifetime gross USDC (funding-asset base units) repaid by buyers across
+    /// all successful `receive_repayment` / `receive_repayment_with_refund`
+    /// calls, before any buyer refund is netted out (#1174).
+    LifetimeRepaidVolume,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,

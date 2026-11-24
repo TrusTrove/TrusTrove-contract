@@ -442,6 +442,9 @@ The `History` vector entries are never removed — they form an append-only log 
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
 | `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 | `MaxTimeToMaturity` | `u64` | Admin-settable maximum remaining time to maturity (`due_date - now`, seconds) accepted by `fund_invoice` for newly funded invoices; `0` means unrestricted (issue #1184) | not set (reads as `0`) |
+| `LifetimeDepositedVolume` | `u128` | Lifetime gross `FundingAsset` base units deposited by LPs; only `deposit` increments it and withdrawals never reduce it (issue #1172) | `initialize() = 0` |
+| `LifetimeWithdrawnVolume` | `u128` | Lifetime gross `FundingAsset` base units returned by LP withdrawals; failed calls and internal funding transfers do not increment it (issue #1173) | `initialize() = 0` |
+| `LifetimeRepaidVolume` | `u128` | Lifetime gross `FundingAsset` base units received from successful buyer repayments, including early repayments and before any refund (issue #1174) | `initialize() = 0` |
 
 ### Persistent Storage
 
@@ -502,10 +505,10 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
+**Approximately 24 instance + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
 
 In practice most pools will have:
-- 8 instance keys (constant)
+- 24 instance keys (constant)
 - 5 keys per active LP
 - 2 keys per funded invoice (removed on repayment/default)
 
