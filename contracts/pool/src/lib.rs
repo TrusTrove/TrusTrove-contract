@@ -2455,6 +2455,75 @@ impl PoolContract {
             .unwrap_or(0u32)
     }
 
+    /// Returns the pool's contract references and funding policy in one
+    /// read-only snapshot (issue #1188).
+    ///
+    /// Covers what a client otherwise reads through `get_admin`,
+    /// `get_funding_asset`, `get_invoice_contract`, `get_escrow_contract`,
+    /// `get_treasury_address`, `get_protocol_fee_bps`, `get_min_discount_bps`
+    /// and `get_stats().max_utilization_bps`, plus the registry reference, the
+    /// minimum initial deposit and the batch size cap, which have no getter of
+    /// their own.
+    ///
+    /// Policy values an older instance may not have stored are reported with
+    /// the same fallback the write paths apply, so the snapshot is the
+    /// configuration actually in force:
+    /// * `max_utilization_bps` falls back to `DEFAULT_MAX_UTILIZATION_BPS`.
+    /// * `min_initial_deposit` falls back to `DEFAULT_MIN_INITIAL_DEPOSIT`.
+    /// * `protocol_fee_bps` and `min_discount_bps` fall back to `0`.
+    /// * `treasury` is `None` when no treasury is stored; repayment then keeps
+    ///   the protocol cut in the pool instead of transferring it out.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Storage
+    /// Pure read: nothing is written and no TTL is extended. Every value comes
+    /// from the existing instance-storage `DataKey` variants, so the storage
+    /// layout and its decoding are unchanged.
+    ///
+    /// # Panics
+    /// * `PoolError::NotInitialized` if a contract reference (admin, funding
+    ///   asset, invoice, escrow or registry contract) is missing.
+    ///
+    /// # Returns
+    /// * `PoolConfig` - The configuration snapshot.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let config = client.get_pool_config();
+    /// ```
+    pub fn get_pool_config(env: Env) -> PoolConfig {
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let invoice_contract = Self::invoice_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let escrow_contract = Self::escrow_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let max_utilization_bps = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxUtilizationBps)
+            .unwrap_or(DEFAULT_MAX_UTILIZATION_BPS);
+
+        PoolConfig {
+            admin,
+            funding_asset: Self::funding_asset(&env),
+            invoice_contract,
+            escrow_contract,
+            registry_contract: Self::registry_contract(&env),
+            treasury: Self::treasury_address(&env),
+            max_utilization_bps,
+            protocol_fee_bps: Self::get_protocol_fee_bps(env.clone()),
+            min_discount_bps: Self::get_min_discount_bps(env.clone()),
+            min_initial_deposit: Self::min_initial_deposit(&env),
+            max_batch_size: MAX_BATCH_SIZE,
+        }
+    }
+
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
         if total_deposits == 0 {
             return 0;

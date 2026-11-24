@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `pool`: `get_pool_config()` view, returning a `PoolConfig` snapshot of the
+  pool's references (admin, funding asset, invoice, escrow and registry
+  contracts, treasury) and funding policy (utilization cap, protocol fee,
+  minimum discount, minimum initial deposit, batch size cap) in one read-only
+  call. Unset policy keys report the same defaults the write paths use, and
+  storage is unchanged (#1188)
 - `registry`: `get_profile_count(role)` view, returning how many profiles are
   registered for `Role::Issuer` / `Role::Buyer` in O(1) from a single stored
   counter (#841)
