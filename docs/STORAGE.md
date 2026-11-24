@@ -295,8 +295,8 @@ Cancelled = 8   // issuer cancelled before listing
 
 | DataKey | Type | Description | TTL extended |
 |---------|------|-------------|--------------|
-| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
-| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
+| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer | On write (`extend_issuer_index`) and on read (`get_by_issuer`, `get_issuer_invoice_ids`) |
+| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`, `get_issuer_invoice_ids`) |
 | `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
 | `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
 | `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
@@ -312,6 +312,10 @@ Cancelled = 8   // issuer cancelled before listing
 - `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
   (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
   `page_size` index entries, so cost is bounded regardless of index size.
+- `get_issuer_invoice_ids()` uses the same `page`/`page_size` paging over
+  the issuer index (`page_size` in `1..=MAX_PAGE_SIZE`) but returns only the
+  `IssuerIndexEntry` IDs. It never reads `Invoice` records, so its cost does
+  not depend on invoice size either (#1150).
 - `get_by_status()` still filters each page to entries whose current
   `invoice.status` matches (to handle stale index entries), so a page may
   contain fewer than `page_size` results.

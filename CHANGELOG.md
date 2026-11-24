@@ -15,6 +15,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `invoice`: `get_issuer_invoice_ids(address, page, page_size)` view returning
+  a bounded page of one issuer's invoice IDs in creation order without loading
+  any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
+  otherwise it panics with `InvalidPageSize`. Out-of-range pages return empty.
+  `get_by_issuer` and the storage layout are unchanged (#1150)
 - `pool`: `share_price_updated` event emitted on successful yield-bearing
   repayments with the invoice ID and the old/new 18-decimal fixed-point share
   prices, plus the `get_share_price()` view using the same encoding. Failed and
