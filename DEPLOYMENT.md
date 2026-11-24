@@ -289,6 +289,26 @@ Mainnet deployment is not yet supported. Before mainnet:
 When mainnet support is added, the same `deploy.sh` script
 will work with `--network public` by updating `.env`.
 
+## Event Schema Fixture (Issue #1211)
+
+Indexers decode events positionally, so topic or data changes must be
+reviewed. `scripts/fixtures/event_schemas.json` captures, for every emitter in
+each contract's `events.rs`, its typed parameters and the normalized
+`publish(topics, data)` call.
+
+```bash
+python3 scripts/check_event_schema.py --check   # fail on unreviewed differences
+python3 scripts/check_event_schema.py --write   # regenerate after an intended change
+python3 scripts/test_check_event_schema.py      # tooling unit tests
+```
+
+Release procedure: if `--check` fails, confirm the change is intended, update
+`docs/EVENTS.md`, notify indexer owners, run `--write` and commit the fixture
+diff in the same pull request. Run `--check` in CI next to
+`generate_contract_api.py --check`. The registry tests
+`test_event_schema_fixture_*` additionally pin the emitted topics/data on a
+successful path, a rejected call and an idempotent repeat.
+
 ## Contract Verification
 
 After deployment, verify all contracts are live:

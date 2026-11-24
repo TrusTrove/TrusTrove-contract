@@ -3722,6 +3722,73 @@ fn test_pause_and_unpause_emit_events() {
     );
 }
 
+/// Event schema fixture (#1211): pins the exact topic layout and data shape of
+/// the registry events indexers decode. Mirrors the reviewed static fixture in
+/// `scripts/fixtures/event_schemas.json`; a change here is a schema change.
+#[test]
+fn test_event_schema_fixture_success_path() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+
+    client.register_issuer(&issuer, &map![&env]);
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
+                ().into_val(&env),
+            ),
+        ]
+    );
+
+    client.verify_profile(&admin, &issuer, &true);
+    let events = env.events().all();
+    assert_eq!(
+        events,
+        vec![
+            &env,
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_verified"), issuer.clone()).into_val(&env),
+                true.into_val(&env),
+            ),
+        ]
+    );
+}
+
+/// Rejection: a failed call must not emit any event, so indexers never see a
+/// schema-bearing event for a reverted action.
+#[test]
+fn test_event_schema_fixture_rejection_emits_nothing() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert_eq!(
+        client.try_register_buyer(&issuer, &map![&env]),
+        Err(Ok(RegistryError::AlreadyRegistered.into()))
+    );
+    let events = env.events().all();
+    assert_eq!(count_named_in(&env, &events, "buyer_registered"), 0);
+}
+
+/// Idempotency: a repeated revoke is accepted but re-emits the same
+/// `address_revoked` schema only on the first transition.
+#[test]
+fn test_event_schema_fixture_revoke_idempotent() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.revoke(&issuer);
+    let first = env.events().all();
+    client.revoke(&issuer);
+    let second = env.events().all();
+    assert_eq!(count_named_in(&env, &first, "address_revoked"), 1);
+    assert_eq!(count_named_in(&env, &second, "address_revoked"), 0);
+}
+
 /// Admin ownership transfer is a state change, so the breaker gates it too:
 /// while paused it reverts and the admin is unchanged.
 #[test]
