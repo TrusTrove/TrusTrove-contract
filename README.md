@@ -197,6 +197,8 @@ set_min_discount(bps) → bool               ← admin only, yield floor enforce
 get_min_discount_bps() → u32
 set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted, enforced in fund_invoice (#1184)
 get_max_time_to_maturity() → u64
+set_deposit_cap(cap) → bool                 ← admin only, 0 = uncapped, enforced in deposit (#1179)
+get_deposit_cap() → u128
 get_stats() → PoolStats
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
 get_lp_position(address) → LPPosition
@@ -365,6 +367,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_treasury` | `get_treasury() -> Address` |
 | Pool | `set_max_time_to_maturity` | `set_max_time_to_maturity(max_seconds: u64) -> bool` |
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
+| Pool | `set_deposit_cap` | `set_deposit_cap(cap: u128) -> bool` |
+| Pool | `get_deposit_cap` | `get_deposit_cap() -> u128` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
 | Pool | `get_pool_config` | `get_pool_config() -> PoolConfig` |
@@ -491,6 +495,8 @@ Invoice status: → Repaid
 **Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
 
 **Maximum Time to Maturity (max_time_to_maturity):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap how far out a newly funded invoice may be due via `pool.set_max_time_to_maturity(max_seconds)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose remaining time to maturity (`due_date - now`) exceeds the maximum with `PoolError::MaturityTooLong`. An invoice exactly at the maximum is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded are unaffected by a later change. `pool.get_max_time_to_maturity()` reads the current value (#1184).
+
+**Total Deposit Cap (deposit_cap):** Defaults to 0 (uncapped), so behavior is unchanged until an admin opts in. A pool operator may need to bound total managed assets during a pilot; the stored admin sets that bound with `pool.set_deposit_cap(cap)` (in funding-asset stroops) and reads it back with `pool.get_deposit_cap()`. While a nonzero cap is set, `deposit` and its `preview_deposit` mirror reject any deposit that would take `TotalDeposits` above the cap with `PoolError::DepositCapExceeded`, checking **before** the funding-asset transfer so a rejected deposit moves no tokens and mints no shares. A deposit landing exactly on the cap is accepted. Withdrawals, repayments, defaults and invoice funding are never blocked by the cap — so repayment yield can push `TotalDeposits` above it, after which new deposits are rejected until withdrawals free room or the admin raises/removes the cap (`set_deposit_cap(0)`). Changes emit `deposit_cap_updated(old_cap, new_cap)` (#1179).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 

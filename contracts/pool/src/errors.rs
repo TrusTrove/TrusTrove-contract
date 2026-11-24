@@ -62,4 +62,10 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
+    /// A deposit would take `TotalDeposits` above the admin-configured total
+    /// deposit cap (`DataKey::TotalDepositCap`, set via `set_deposit_cap`).
+    /// Checked before the funding-asset transfer, so a rejected deposit moves
+    /// no tokens; withdrawals and repayments are never blocked by the cap
+    /// (issue #1179).
+    DepositCapExceeded = 31,
 }

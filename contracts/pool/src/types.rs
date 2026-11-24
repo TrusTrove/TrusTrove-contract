@@ -142,6 +142,11 @@ pub enum DataKey {
     /// `0` (the default when never set) means unrestricted. Appended after
     /// `FundedInvoiceBuyer` to keep existing discriminants stable.
     MaxTimeToMaturity,
+    /// Admin-configured cap on `TotalDeposits`, in funding-asset stroops,
+    /// enforced by `deposit` before the transfer (issue #1179). `0` (the
+    /// default when never set) means uncapped. Appended after
+    /// `MaxTimeToMaturity` to keep existing discriminants stable.
+    TotalDepositCap,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,
