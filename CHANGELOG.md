@@ -15,6 +15,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `pool`: `get_pool_config()` view, returning a `PoolConfig` snapshot of the
+  pool's references (admin, funding asset, invoice, escrow and registry
+  contracts, treasury) and funding policy (utilization cap, protocol fee,
+  minimum discount, minimum initial deposit, batch size cap) in one read-only
+  call. Unset policy keys report the same defaults the write paths use, and
+  storage is unchanged (#1188)
 - `pool`: `preview_withdraw_breakdown(lp, shares)` view, returning a
   `WithdrawalBreakdown { usdc_amount, principal, yield_amount }` so an LP can
   see how much of a redemption is returned principal and how much is realised
