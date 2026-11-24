@@ -66,6 +66,15 @@ pub fn released_to_pool(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amou
     );
 }
 
+/// Emitted once when an invoice's residual locked amount reaches zero after a
+/// release. Topics: name + invoice ID; data: cumulative released amount.
+pub fn final_release(env: &Env, invoice_id: &BytesN<32>, total_released: u128) {
+    env.events().publish(
+        (Symbol::new(env, "final_release"), invoice_id.clone()),
+        total_released,
+    );
+}
+
 pub fn default_resolved(
     env: &Env,
     invoice_id: &BytesN<32>,
