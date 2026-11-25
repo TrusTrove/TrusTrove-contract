@@ -170,6 +170,7 @@ get_by_status(status, page, page_size) → Vec<Invoice>
 get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
 get_by_buyer(address, page, page_size) → Vec<Invoice>
+get_buyer_invoice_ids(address, page, page_size) → Vec<invoice_id>  ← IDs only, 1..=50 per page
 get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
@@ -179,6 +180,30 @@ get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
 get_seconds_to_maturity(invoice_id) → i128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
+
+#### `get_buyer_invoice_ids(address, page, page_size) → Vec<invoice_id>`
+- ID-only view of a buyer's invoices for buyers with too many invoices to fetch through `get_by_buyer` (#1151). It reads only the buyer index and never loads an `Invoice` record, so each call costs at most `page_size` index reads.
+- `page` is zero-based, and `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- IDs come back in creation order. The buyer index is append-only, so a page always returns the same IDs and new invoices only show up on later pages. For the same `page`/`page_size` the IDs are exactly those of `get_by_buyer`.
+- A page that starts at or past the end returns an empty `Vec`, as does a buyer with no invoices.
+- Every returned ID is an existing invoice whose `buyer` is `address` (the buyer is fixed at creation). Invoices where `address` is only the issuer are never included. Terminal invoices (repaid, cancelled, defaulted, expired) are included.
+- No authorization is required.
+
+Paging through all of a buyer's invoice IDs:
+
+```rust
+let mut page = 0;
+loop {
+    let ids = client.get_buyer_invoice_ids(&buyer, &page, &MAX_PAGE_SIZE);
+    // ... process ids ...
+    if ids.len() < MAX_PAGE_SIZE {
+        break; // last page
+    }
+    page += 1;
+}
+```
+
+`get_invoice_count_by_buyer(address)` gives the total up front if you need to size the last page.
 
 #### `list_for_financing(invoice_id, discount_bps) → bool`
 - Marks a `Created` invoice as available for financing (`Listed` status).
@@ -455,6 +480,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_buyer_invoice_ids` | `get_buyer_invoice_ids(address: Address, page: u32, page_size: u32) -> Vec<BytesN<32>>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
 | Invoice | `get_invoice_count_by_buyer` | `get_invoice_count_by_buyer(address: Address) -> u32` |
 | Invoice | `get_counts` | `get_counts() -> Map<String, u64>` |
@@ -554,7 +580,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 208 public entry points across five deployable contracts.**
+**Total: 209 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -998,7 +1024,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` or `get_buyer_invoice_ids` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |
