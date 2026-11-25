@@ -16,6 +16,7 @@ pub use errors::*;
 pub use types::*;
 
 const DEFAULT_MIN_LOCK_SECONDS: u64 = 60;
+const MAX_HISTORY_PAGE_SIZE: u32 = 100;
 /// Default `release_after_timeout` window (30 days) used until the admin sets one.
 pub const DEFAULT_TIMEOUT_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Upper bound accepted by `set_timeout_window` (365 days), matching invoice's expiry cap.
@@ -962,6 +963,39 @@ impl EscrowContract {
         }
     }
 
+    /// Returns whether an escrow lock record exists for an invoice.
+    ///
+    /// This checks the persistent record itself, not its amount. It therefore
+    /// distinguishes a missing lock from a malformed record whose amount is zero.
+    /// Missing keys are not created by this read-only view.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if a lock record exists, even if its stored amount is zero.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let exists = client.has_lock(&invoice_id);
+    /// ```
+    pub fn has_lock(env: Env, invoice_id: BytesN<32>) -> bool {
+        let key = DataKey::Locked(invoice_id);
+        if !env.storage().persistent().has(&key) {
+            return false;
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        true
+    }
     /// Returns the amount of USDC currently locked against an invoice.
     ///
     /// # Arguments
@@ -1165,6 +1199,7 @@ impl EscrowContract {
 
     /// Reads up to 100 escrow events in append order, starting at `offset`.
     /// Returns the matching events and the total number of stored events.
+    /// An offset at or beyond the end returns an empty page with the same total.
     /// A limit outside 1–100 fails with `InvalidConfig`.
     pub fn get_history_page(
         env: Env,
@@ -1172,15 +1207,15 @@ impl EscrowContract {
         offset: u32,
         limit: u32,
     ) -> (Vec<EscrowEvent>, u32) {
-        if !(1..=100).contains(&limit) {
+        if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) {
             panic_with_error!(&env, EscrowError::InvalidConfig);
         }
 
         let history = Self::get_history(env, invoice_id);
         let total = history.len();
         let start = offset.min(total);
-        let end = start.saturating_add(limit).min(total);
-        (history.slice(start..end), total)
+        let page_len = limit.min(total - start);
+        (history.slice(start..start + page_len), total)
     }
 
     fn append_history(
