@@ -5,7 +5,7 @@ extern crate std;
 use crate::{
     DataKey, Profile, RegistryContract, RegistryContractClient, RegistryError, Role,
     VerificationStatus, MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    MAX_ROLE_LOOKUPS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -4459,4 +4459,113 @@ fn test_get_metadata_key_count_not_found_panics() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());
+}
+
+// ============== ISSUE #1123: BATCH PROFILE ROLE VIEW ==============
+
+#[test]
+fn test_batch_get_roles_returns_pairs_and_explicit_missing_entries() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let unknown = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.register_buyer(&buyer, &map![&env]);
+
+    // No authorization is needed for a read-only view.
+    env.set_auths(&[]);
+    let addresses = vec![
+        &env,
+        issuer.clone(),
+        unknown.clone(),
+        buyer.clone(),
+        issuer.clone(),
+    ];
+    let roles = client.batch_get_roles(&addresses);
+
+    assert_eq!(
+        roles,
+        vec![
+            &env,
+            (issuer.clone(), Some(Role::Issuer)),
+            (unknown, None),
+            (buyer, Some(Role::Buyer)),
+            (issuer, Some(Role::Issuer)),
+        ]
+    );
+}
+
+#[test]
+fn test_batch_get_roles_empty_batch_is_a_no_op() {
+    let (env, _admin, client) = setup();
+    let empty: Vec<Address> = vec![&env];
+    assert_eq!(client.batch_get_roles(&empty), vec![&env]);
+}
+
+#[test]
+fn test_batch_get_roles_accepts_exactly_50_addresses() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    let mut addresses: Vec<Address> = Vec::new(&env);
+    for _ in 0..MAX_ROLE_LOOKUPS {
+        addresses.push_back(Address::generate(&env));
+    }
+    addresses.set(0, issuer.clone());
+
+    let roles = client.batch_get_roles(&addresses);
+    assert_eq!(roles.len(), MAX_ROLE_LOOKUPS);
+    assert_eq!(roles.get(0), Some((issuer, Some(Role::Issuer))));
+    assert_eq!(roles.get(1), Some((addresses.get(1).unwrap(), None)));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_batch_get_roles_rejects_more_than_50_addresses() {
+    let (env, _admin, client) = setup();
+    let mut addresses: Vec<Address> = Vec::new(&env);
+    for _ in 0..MAX_ROLE_LOOKUPS + 1 {
+        addresses.push_back(Address::generate(&env));
+    }
+    client.batch_get_roles(&addresses);
+}
+
+#[test]
+fn test_batch_get_roles_extends_ttl_for_existing_profiles_only() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let unknown = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    let contract_id = client.address.clone();
+    let key = DataKey::Profile(issuer.clone());
+    let ttl_before_drain: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+    let ttl_before_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(ttl_before_read < TTL_THRESHOLD);
+
+    let roles = client.batch_get_roles(&vec![&env, issuer.clone(), unknown.clone()]);
+    assert_eq!(
+        roles,
+        vec![
+            &env,
+            (issuer.clone(), Some(Role::Issuer)),
+            (unknown.clone(), None),
+        ]
+    );
+
+    let ttl_after_read: u32 =
+        env.as_contract(&contract_id, || env.storage().persistent().get_ttl(&key));
+    assert!(ttl_after_read > ttl_before_read);
+    assert!(ttl_after_read >= TTL_EXTEND_TO - 1000);
+
+    // Missing addresses must not create a profile entry.
+    assert!(!env.as_contract(&contract_id, || env
+        .storage()
+        .persistent()
+        .has(&DataKey::Profile(unknown))));
 }

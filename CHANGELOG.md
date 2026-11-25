@@ -32,6 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `registry`: `batch_get_roles(addresses)` read-only view for compliance
+  screens. It returns one `(Address, Option<Role>)` pair per input address in
+  order, with `None` as the explicit missing-profile result, decodes the role
+  on-chain from the existing `Profile` entry, extends the TTL of found
+  profiles, and rejects more than 50 addresses with `BatchSizeExceeded` (#5).
+  No metadata is read and no storage key is added (#1123)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
