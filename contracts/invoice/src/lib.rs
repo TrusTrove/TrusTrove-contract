@@ -590,6 +590,31 @@ impl InvoiceContract {
         attestation
     }
 
+    /// Returns the issuer-supplied memo hash for an invoice, if one was
+    /// provided at creation. The hash is stored separately so existing
+    /// `Invoice` records remain decodable.
+    pub fn get_memo_hash(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        let key = DataKey::InvoiceMemoHash(invoice_id);
+        let memo_hash = env.storage().persistent().get(&key);
+        if memo_hash.is_some() {
+            bump_persistent(&env, &key);
+        }
+        memo_hash
+    }
+
+    /// Returns the ledger timestamp when the buyer first confirmed delivery.
+    ///
+    /// Returns `None` for older invoices and invoices not yet confirmed by
+    /// their buyer.
+    pub fn get_buyer_confirmed_at(env: Env, invoice_id: BytesN<32>) -> Option<u64> {
+        let key = DataKey::BuyerConfirmedAt(invoice_id);
+        let timestamp = env.storage().persistent().get(&key);
+        if timestamp.is_some() {
+            bump_persistent(&env, &key);
+        }
+        timestamp
+    }
+
     /// Returns the age of an invoice's attestation (issue #1158).
     ///
     /// Reports when the attestation was submitted and how much ledger time
@@ -1018,7 +1043,43 @@ impl InvoiceContract {
     ) -> BytesN<32> {
         require_not_paused(&env);
         issuer.require_auth();
-        Self::create_inner(&env, issuer, buyer, face_value, due_date, funding_asset)
+        Self::create_inner(
+            &env,
+            issuer,
+            buyer,
+            face_value,
+            due_date,
+            funding_asset,
+            None,
+        )
+    }
+
+    /// Creates an invoice with an optional 32-byte issuer memo hash.
+    ///
+    /// The hash links the invoice to off-chain records without storing their
+    /// contents. `None` omits the hash; a supplied byte string must be exactly
+    /// 32 bytes or the call fails with `InvoiceError::InvalidMemoHash`.
+    /// Requires authorization from `issuer`.
+    pub fn create_with_memo_hash(
+        env: Env,
+        issuer: Address,
+        buyer: Address,
+        face_value: u128,
+        due_date: u64,
+        funding_asset: Address,
+        memo_hash: Option<Bytes>,
+    ) -> BytesN<32> {
+        require_not_paused(&env);
+        issuer.require_auth();
+        Self::create_inner(
+            &env,
+            issuer,
+            buyer,
+            face_value,
+            due_date,
+            funding_asset,
+            memo_hash,
+        )
     }
 
     /// Auth-free body of [`Self::create`], shared with [`Self::batch_create`].
@@ -1035,7 +1096,20 @@ impl InvoiceContract {
         face_value: u128,
         due_date: u64,
         funding_asset: Address,
+        memo_hash: Option<Bytes>,
     ) -> BytesN<32> {
+        let memo_hash = match memo_hash {
+            Some(bytes) => {
+                if bytes.len() != 32 {
+                    panic_with_error!(env, InvoiceError::InvalidMemoHash);
+                }
+                Some(
+                    BytesN::<32>::try_from(bytes)
+                        .unwrap_or_else(|_| panic_with_error!(env, InvoiceError::InvalidMemoHash)),
+                )
+            }
+            None => None,
+        };
         if issuer == buyer {
             panic_with_error!(env, InvoiceError::InvalidParticipants);
         }
@@ -1132,6 +1206,11 @@ impl InvoiceContract {
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
         Self::save_invoice(env, inv_key, &invoice);
+        if let Some(memo_hash) = memo_hash {
+            let memo_key = DataKey::InvoiceMemoHash(invoice_id.clone());
+            env.storage().persistent().set(&memo_key, &memo_hash);
+            bump_persistent(env, &memo_key);
+        }
 
         let entry_key = DataKey::CreatedAtIndexEntry(counter as u32);
         env.storage()
@@ -1234,6 +1313,7 @@ impl InvoiceContract {
                 face_value,
                 due_date,
                 funding_asset.clone(),
+                None,
             );
             created.push_back(invoice_id);
         }
@@ -1849,8 +1929,9 @@ impl InvoiceContract {
     /// TTL extended, so any event observer that reacts to an event is
     /// guaranteed to see the fully-updated invoice if it reads storage in
     /// response. When both parties have confirmed, `both_confirmed` is
-    /// published first, followed by `delivery_confirmed`; otherwise only
-    /// `delivery_confirmed` is published.
+    /// published first, followed by `delivery_confirmed` and then
+    /// `delivery_confirmation_summary`; otherwise only `delivery_confirmed`
+    /// is published.
     ///
     /// # Example
     /// ```ignore
@@ -1906,6 +1987,11 @@ impl InvoiceContract {
         }
 
         let both_confirmed = invoice.issuer_confirmed && invoice.buyer_confirmed;
+        let completed_at = if both_confirmed {
+            Some(env.ledger().timestamp())
+        } else {
+            None
+        };
         if both_confirmed {
             invoice.status = InvoiceStatus::Confirmed;
             move_status_index(
@@ -1926,6 +2012,15 @@ impl InvoiceContract {
             events::both_confirmed(&env, &invoice_id);
         }
         events::delivery_confirmed(&env, &invoice_id, &confirmer);
+        if let Some(completed_at) = completed_at {
+            events::delivery_confirmation_summary(
+                &env,
+                &invoice_id,
+                invoice.issuer_confirmed,
+                invoice.buyer_confirmed,
+                completed_at,
+            );
+        }
         true
     }
 

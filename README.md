@@ -80,6 +80,7 @@ is_verified(address) → bool
 get_profile(address) → Profile
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
+get_metadata_key_batch(addresses, metadata_key) → Vec<Option<String>> ← input order, max 50
 revoke(address) → bool
 ```
 
@@ -93,6 +94,12 @@ then page through `list_profiles(role, start, limit)` with `limit ≤ 50`
 are never indexed twice, pages are contiguous and non-overlapping, and revoked
 profiles remain enumerated (revocation flips verification, it does not
 deregister the profile).
+
+`get_metadata_key_batch` reads one metadata key across up to 50 addresses and
+returns one `Option<String>` per input address in the same order. `None`
+represents either an unregistered address or a profile without that key; the
+empty input returns an empty vector, and larger batches fail with
+`BatchSizeExceeded`. It is read-only and requires no authorization.
 
 **Revocation is prospective, not retroactive.** `is_verified()` is re-checked
 at every point where new business gets committed — `invoice.create()`,
@@ -120,6 +127,7 @@ Created → Listed → Funded → Active → Confirmed → Repaid
 
 ```
 create(issuer, buyer, face_value, due_date, funding_asset) → invoice_id
+create_with_memo_hash(issuer, buyer, face_value, due_date, funding_asset, memo_hash) → invoice_id
 batch_create(issuer, entries) → Vec<invoice_id>   ← atomic, max 50 entries
 submit_attestation(invoice_id, payload, signature) → bool
 list_for_financing(invoice_id, discount_bps) → bool
@@ -127,6 +135,8 @@ batch_list_for_financing(entries) → Vec<invoice_id>  ← tolerant, max 50 entr
 mark_funded(invoice_id, funded_amount) → bool   ← pool_contract only
 mark_shipped(invoice_id) → bool
 confirm_delivery(invoice_id, confirmer) → bool  ← dual confirmation required
+get_memo_hash(invoice_id) → Option<BytesN<32>>
+get_buyer_confirmed_at(invoice_id) → Option<u64>
 repay(invoice_id) → bool
 repay_partial(invoice_id, amount) → bool
 repay_early(invoice_id) → bool
@@ -222,6 +232,17 @@ with `NotFound` (`#2`) for an unknown invoice.
 - `issuer` authorizes **once** for the whole batch, not once per entry.
 - Panics with `BatchSizeExceeded` (`#28`) above 50 entries.
 
+#### `create_with_memo_hash(issuer, buyer, face_value, due_date, funding_asset, memo_hash) → invoice_id`
+- `memo_hash` is `Option<Bytes>`: use `None` to omit the off-chain reference, or supply exactly 32 bytes. Other lengths fail with `InvalidMemoHash` (`#33`).
+- `None` is the absent representation; a 32-byte all-zero value is treated as a supplied hash.
+- The bytes are stored as an optional SHA-256-style memo hash and are available through `get_memo_hash(invoice_id)`. No document content is stored on-chain. The existing `create` entry point remains available and creates invoices without a memo hash.
+
+#### `get_buyer_confirmed_at(invoice_id) → Option<u64>`
+- Returns the ledger timestamp (Unix seconds) of the buyer's first valid delivery confirmation. Returns `None` for older invoices and invoices without a buyer confirmation. A later valid confirmation by the other participant does not change it.
+
+#### Delivery confirmation completion
+- When the second participant validly confirms an active invoice, the contract emits `delivery_confirmation_summary` once, after persisting the confirmed status. Its topics are `(Symbol("delivery_confirmation_summary"), invoice_id)` and its data is `(issuer_confirmed, buyer_confirmed, completed_at)` where both flags are `true` and `completed_at` is the ledger timestamp of the completion transition. The summary is not emitted for the first confirmation, invalid/unauthorized calls, or completed invoices.
+
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
 - **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
@@ -308,6 +329,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `update_metadata` | `update_metadata(address: Address, metadata: Map<String, String>) -> bool` |
 | Registry | `remove_metadata_key` | `remove_metadata_key(address: Address, metadata_key: String) -> bool` |
 | Registry | `get_metadata_key_count` | `get_metadata_key_count(address: Address) -> u32` |
+| Registry | `get_metadata_key_batch` | `get_metadata_key_batch(addresses: Vec<Address>, metadata_key: String) -> Vec<Option<String>>` |
 | Registry | `get_profile` | `get_profile(address: Address) -> Profile` |
 | Registry | `is_verified` | `is_verified(address: Address) -> bool` |
 | Registry | `get_verified_since` | `get_verified_since(address: Address) -> Option<u64>` |
@@ -337,6 +359,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
 | Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
 | Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `get_memo_hash` | `get_memo_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
+| Invoice | `get_buyer_confirmed_at` | `get_buyer_confirmed_at(invoice_id: BytesN<32>) -> Option<u64>` |
 | Invoice | `get_attestation_age` | `get_attestation_age(invoice_id: BytesN<32>) -> Option<AttestationAge>` |
 | Invoice | `get_attestation_evidence_hash` | `get_attestation_evidence_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
@@ -349,6 +373,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_asset_metadata` | `set_asset_metadata(asset: Address, code: Option<String>, decimals: Option<u32>) -> ()` |
 | Invoice | `get_asset_metadata` | `get_asset_metadata(asset: Address) -> Option<AssetMetadata>` |
 | Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
+| Invoice | `create_with_memo_hash` | `create_with_memo_hash(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address, memo_hash: Option<Bytes>) -> BytesN<32>` |
 | Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
 | Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
 | Invoice | `batch_list_for_financing` | `batch_list_for_financing(entries: Vec<(BytesN<32>, u32)>) -> Vec<BytesN<32>>` |
@@ -492,7 +517,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 193 public entry points across five deployable contracts.**
+**Total: 197 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->

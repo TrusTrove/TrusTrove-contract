@@ -28,6 +28,8 @@ const MAX_METADATA_VALUE_LEN: u32 = 512;
 /// matter how many profiles a role accumulates. Callers page through the index
 /// with `start` / `limit` instead of asking for everything at once.
 const MAX_LIST_LIMIT: u32 = 50;
+/// Maximum number of profiles inspected by a single metadata lookup.
+pub const MAX_METADATA_LOOKUP_BATCH_SIZE: u32 = 50;
 
 #[contract]
 pub struct RegistryContract;
@@ -507,6 +509,47 @@ impl RegistryContract {
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
         profile.metadata.len()
+    }
+
+    /// Returns one metadata value for each address, preserving input order.
+    ///
+    /// Missing profiles and profiles without `metadata_key` each produce
+    /// `None`. The batch is bounded to `MAX_METADATA_LOOKUP_BATCH_SIZE`
+    /// addresses; an empty batch returns an empty vector.
+    ///
+    /// This read-only view does not require authorization. It reads each
+    /// stored profile once and only selects the requested map entry; it does
+    /// not return or iterate the profile's complete metadata map.
+    ///
+    /// # Panics
+    /// * `RegistryError::BatchSizeExceeded` if `addresses.len()` exceeds
+    ///   `MAX_METADATA_LOOKUP_BATCH_SIZE`.
+    pub fn get_metadata_key_batch(
+        env: Env,
+        addresses: Vec<Address>,
+        metadata_key: String,
+    ) -> Vec<Option<String>> {
+        if addresses.len() > MAX_METADATA_LOOKUP_BATCH_SIZE {
+            panic_with_error!(&env, RegistryError::BatchSizeExceeded);
+        }
+
+        let mut values = Vec::new(&env);
+        for address in addresses.iter() {
+            let profile_key = DataKey::Profile(address);
+            let value = match env.storage().persistent().get::<_, Profile>(&profile_key) {
+                Some(profile) => {
+                    env.storage().persistent().extend_ttl(
+                        &profile_key,
+                        TTL_THRESHOLD,
+                        TTL_EXTEND_TO,
+                    );
+                    profile.metadata.get(metadata_key.clone())
+                }
+                None => None,
+            };
+            values.push_back(value);
+        }
+        values
     }
 
     /// Retrieves a registered profile by address.

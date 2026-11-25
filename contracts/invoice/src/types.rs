@@ -145,6 +145,9 @@ pub enum DataKey {
     // Ledger timestamp at which the buyer's delivery confirmation was
     // recorded (issue #1160). Mirrors `IssuerConfirmedAt`.
     BuyerConfirmedAt(BytesN<32>),
+    /// Optional SHA-256 memo hash for an invoice. Appended for storage-key
+    /// discriminant compatibility; absent for invoices created previously.
+    InvoiceMemoHash(BytesN<32>),
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).

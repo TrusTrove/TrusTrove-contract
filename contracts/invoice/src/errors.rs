@@ -56,4 +56,6 @@ pub enum InvoiceError {
     InvalidRiskScore = 31,
     /// The signature recovery byte is outside Soroban's supported range.
     InvalidRecoveryId = 32,
+    /// An invoice memo hash must contain exactly 32 bytes.
+    InvalidMemoHash = 33,
 }
