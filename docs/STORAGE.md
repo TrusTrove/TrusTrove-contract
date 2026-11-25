@@ -419,6 +419,8 @@ EscrowEvent {
 }
 ```
 
+The read-only `get_history_count(invoice_id)` view returns the number of history events recorded for an invoice (or `0` when absent), enabling callers to plan paginated reads via `get_history_page` without loading the full event vector into memory. History events and their count remain accessible even after the invoice's active lock is removed.
+
 #### Partial Release and Residual Lock
 
 The escrow supports partial `release_to_pool` calls. The behavior is:

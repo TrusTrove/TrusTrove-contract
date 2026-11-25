@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `escrow`: `default_resolved` audit event data payload updated to `(u128, u64)`
+  representing `(amount, lock_age)` to record elapsed lock seconds alongside
+  the invoice ID, pool, caller, and resolved amount. Failed default attempts
+  produce no event (#1193)
 - `pool`: `get_share_price` now documents its rounding. The 1e18 fixed-point
   price is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` truncated toward
   zero, so it is deterministic and never overstates a share. Tests pin the
@@ -32,6 +36,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `escrow`: `get_history_count(invoice_id)` view, returning the number of
+  history events recorded for an invoice (`u32`) or `0` when absent. Preserves
+  access after active lock removal and enables planning paginated reads
+  without loading full history vectors into memory (#1195)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
