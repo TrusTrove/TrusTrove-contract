@@ -5,7 +5,7 @@ use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Vec,
 };
-use trusttrove_pause::{require_not_paused, set_paused};
+use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -161,6 +161,22 @@ fn settlement_summary_from_invoice(env: &Env, invoice: &Invoice) -> SettlementSu
         refund_to_buyer,
         repaid_amount: invoice.repaid_amount,
         remaining_balance: invoice.remaining_balance,
+    }
+}
+
+fn listing_expiry_preview(env: &Env, invoice: &Invoice) -> ListingExpiryPreview {
+    let expiry_window = env
+        .storage()
+        .instance()
+        .get(&DataKey::ExpiryWindow)
+        .unwrap_or(7 * 24 * 60 * 60);
+    let listed_at = invoice.listed_at.unwrap_or(0);
+    let expiry_timestamp = listed_at
+        .checked_add(expiry_window)
+        .unwrap_or_else(|| panic_with_error!(env, InvoiceError::MathOverflow));
+    ListingExpiryPreview {
+        expiry_timestamp,
+        is_expired: env.ledger().timestamp() >= expiry_timestamp,
     }
 }
 
@@ -572,6 +588,15 @@ impl InvoiceContract {
             bump_persistent(&env, &key);
         }
         attestation
+    }
+
+    /// Returns the evidence hash for an invoice's attestation, if present.
+    ///
+    /// Uses the same attestation TTL bump policy as `get_attestation`.
+    /// The hash is returned without changing its bytes or interpreting its
+    /// off-chain content.
+    pub fn get_attestation_evidence_hash(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        Self::get_attestation(env, invoice_id).map(|attestation| attestation.evidence_hash)
     }
 
     /// Adds an asset to the allow-list of funding assets that `create`
@@ -2411,6 +2436,24 @@ impl InvoiceContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Previews when a listed invoice can be expired.
+    ///
+    /// The boundary matches `expire_listing`: the invoice is expired
+    /// when `now >= listed_at + expiry_window`. This view reads the invoice
+    /// and current window without changing invoice storage.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist.
+    /// * `InvoiceError::InvalidStatusTransition` if the invoice is not listed.
+    /// * `InvoiceError::MathOverflow` if the expiry timestamp overflows.
+    pub fn get_listing_expiry_preview(env: Env, invoice_id: BytesN<32>) -> ListingExpiryPreview {
+        let invoice = Self::get_invoice(&env, invoice_id);
+        if invoice.status != InvoiceStatus::Listed {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+        listing_expiry_preview(&env, &invoice)
+    }
+
     /// Returns the current listing expiry window in seconds.
     ///
     /// # Arguments
@@ -2537,18 +2580,7 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::NotAuthorized);
         }
 
-        let listed_at = invoice.listed_at.unwrap_or(0);
-        let expiry_window = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExpiryWindow)
-            .unwrap_or(7 * 24 * 60 * 60);
-        let current_time = env.ledger().timestamp();
-        let deadline = listed_at
-            .checked_add(expiry_window)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
-
-        if current_time < deadline {
+        if !listing_expiry_preview(&env, &invoice).is_expired {
             panic_with_error!(&env, InvoiceError::ListingNotExpired);
         }
 
@@ -2766,6 +2798,139 @@ impl InvoiceContract {
     pub fn get_settlement_summary(env: Env, invoice_id: BytesN<32>) -> SettlementSummary {
         let invoice = Self::get_invoice(&env, invoice_id);
         settlement_summary_from_invoice(&env, &invoice)
+    }
+
+    /// Reports whether a listed invoice passes its invoice-level funding checks.
+    ///
+    /// Checks listing status and expiry, attestation presence and validity,
+    /// current registry verification for both parties, supported-asset
+    /// membership, and the allowed discount range. It performs no token calls
+    /// and does not change invoice or allow-list storage.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist or the
+    ///   configured registry reference is missing.
+    /// * `InvoiceError::MathOverflow` if the listing expiry timestamp overflows.
+    pub fn get_funding_eligibility(env: Env, invoice_id: BytesN<32>) -> InvoiceFundingEligibility {
+        let invoice = Self::get_invoice(&env, invoice_id.clone());
+        let mut rejection_reasons = Vec::new(&env);
+        let listing_expiry_timestamp = if invoice.status == InvoiceStatus::Listed {
+            let preview = listing_expiry_preview(&env, &invoice);
+            if preview.is_expired {
+                rejection_reasons.push_back(InvoiceFundingRejectionReason::ListingExpired);
+            }
+            Some(preview.expiry_timestamp)
+        } else {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::InvoiceNotListed);
+            None
+        };
+
+        let attestation: Option<Attestation> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Attestation(invoice_id));
+        let now = env.ledger().timestamp();
+        let attestation_valid_until = attestation.as_ref().map(|value| value.valid_until);
+        match attestation.as_ref() {
+            None => rejection_reasons.push_back(InvoiceFundingRejectionReason::AttestationMissing),
+            Some(value) if now > value.valid_until => {
+                rejection_reasons.push_back(InvoiceFundingRejectionReason::AttestationExpired);
+            }
+            Some(_) => {}
+        }
+
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        let issuer_verified = Self::is_verified_in(&env, &registry_id, &invoice.issuer);
+        if !issuer_verified {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::IssuerNotVerified);
+        }
+        let buyer_verified = Self::is_verified_in(&env, &registry_id, &invoice.buyer);
+        if !buyer_verified {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::BuyerNotVerified);
+        }
+
+        let asset_supported = env
+            .storage()
+            .persistent()
+            .has(&DataKey::SupportedAsset(invoice.funding_asset));
+        if !asset_supported {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::UnsupportedAsset);
+        }
+
+        let discount_bps_valid = (1..=5000).contains(&invoice.discount_bps);
+        if !discount_bps_valid {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::InvalidDiscount);
+        }
+
+        InvoiceFundingEligibility {
+            invoice_status: invoice.status,
+            listing_expiry_timestamp,
+            attestation_valid_until,
+            issuer_verified,
+            buyer_verified,
+            asset_supported,
+            discount_bps_valid,
+            is_eligible: rejection_reasons.is_empty(),
+            rejection_reasons,
+        }
+    }
+
+    /// Reports whether `caller` can currently invoke `repay` for an invoice.
+    ///
+    /// The view reports the full remaining balance and does not require caller
+    /// authorization; `caller` must still sign the actual repayment
+    /// transaction. It performs no token calls.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist.
+    pub fn get_repayment_eligibility(
+        env: Env,
+        invoice_id: BytesN<32>,
+        caller: Address,
+    ) -> RepaymentEligibility {
+        let invoice = Self::get_invoice(&env, invoice_id);
+        let mut rejection_reasons = Vec::new(&env);
+        if is_paused(&env) {
+            rejection_reasons.push_back(RepaymentRejectionReason::ContractPaused);
+        }
+        if caller != invoice.buyer {
+            rejection_reasons.push_back(RepaymentRejectionReason::CallerNotBuyer);
+        }
+        if !matches!(
+            invoice.status,
+            InvoiceStatus::Funded | InvoiceStatus::Active | InvoiceStatus::Confirmed
+        ) {
+            rejection_reasons.push_back(RepaymentRejectionReason::InvalidStatus);
+        }
+        if invoice.remaining_balance == 0 {
+            rejection_reasons.push_back(RepaymentRejectionReason::NoAmountDue);
+        }
+        if env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::EscrowContract)
+            .is_none()
+            || invoice.funding_pool.is_none()
+            || invoice.funded_at.is_none()
+        {
+            rejection_reasons.push_back(RepaymentRejectionReason::SettlementNotConfigured);
+        }
+
+        let is_eligible = rejection_reasons.is_empty();
+        RepaymentEligibility {
+            amount_due: invoice.remaining_balance,
+            action: if is_eligible {
+                RepaymentAction::Repay
+            } else {
+                RepaymentAction::Unavailable
+            },
+            is_eligible,
+            rejection_reasons,
+        }
     }
 
     /// Returns the funding asset for an invoice.
