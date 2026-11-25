@@ -553,6 +553,35 @@ impl RegistryContract {
         profile
     }
 
+    /// Checks whether an address has a registered profile.
+    ///
+    /// Returns `true` for profiles in any verification state, including
+    /// Pending, Verified, and Revoked. When the entry exists, its TTL is
+    /// extended using the same threshold and target duration as the write
+    /// path.
+    ///
+    /// # Auth
+    /// No authorization is required — this is a read-only view.
+    ///
+    /// # Panics
+    /// This function does not panic; addresses without a profile are reported
+    /// as `false`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if the address has a registered profile.
+    pub fn has_profile(env: Env, address: Address) -> bool {
+        let key = DataKey::Profile(address);
+        match env.storage().persistent().get::<_, Profile>(&key) {
+            Some(_) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                true
+            }
+            None => false,
+        }
+    }
+
     /// Checks whether a registered profile is verified.
     ///
     /// Returns `false` for addresses that have never been registered as well

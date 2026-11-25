@@ -78,10 +78,15 @@ batch_register_issuers(entries) → Vec<Address>   ← admin only, max 50, retur
 batch_register_buyers(entries) → Vec<Address>    ← admin only, max 50, returns skipped
 is_verified(address) → bool
 get_profile(address) → Profile
+has_profile(address) → bool                         ← true regardless of verification status
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
 ```
+
+`has_profile(address)` returns `false` only when the address has no registered
+profile. It returns `true` for Pending, Verified, and Revoked profiles, without
+changing their verification state.
 
 **The registry is enumerable without replaying events.** Every registration
 path — single and batch, issuer and buyer — appends the new address to a
