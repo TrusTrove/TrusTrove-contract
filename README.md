@@ -146,7 +146,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 
 #### `list_for_financing(invoice_id, discount_bps) → bool`
 - Marks a `Created` invoice as available for financing (`Listed` status).
-- `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
+- `discount_bps`: Annualized discount rate in basis points (valid range: `1..=5000`, where 5,000 = 50% max). `0` panics with `InvalidDiscount` and values above 5,000 panic with `DiscountTooHigh`.
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
 - Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
@@ -186,7 +186,7 @@ loop {
 
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
-- **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
+- **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
 
 ### escrow_contract
@@ -202,13 +202,16 @@ pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 get_lock_record(invoice_id) → Option<EscrowRecord>
 get_lock_expiration(invoice_id) → Option<u64>
+get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
-Read-only views (`get_locked`) stay callable.
+Read-only views (`get_locked`, `get_lock_record`, `get_lock_expiration`, `has_lock`) stay callable.
 
 ### pool_contract
+
+When upgrading a pool that predates the lifetime funding counter, the admin must call `backfill_cumulative_funded` once with the sum of successful `invoice_funded` event amounts before relying on the realized-loss ratio. Fresh pools initialize the counter automatically.
 
 USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
@@ -360,6 +363,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
 | Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
+| Escrow | `has_lock` | `has_lock(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_lock_expiration` | `get_lock_expiration(invoice_id: BytesN<32>) -> Option<u64>` |
@@ -367,6 +371,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
 | Escrow | `get_history_page` | `get_history_page(invoice_id: BytesN<32>, offset: u32, limit: u32) -> (Vec<EscrowEvent>, u32)` |
+| Escrow | `get_release_authorization` | `get_release_authorization(caller: Address) -> ReleaseAuthorization` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
 | Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
 | Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
@@ -400,6 +405,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_realized_loss_ratio_bps` | `get_realized_loss_ratio_bps() -> u32` |
+| Pool | `backfill_cumulative_funded` | `backfill_cumulative_funded(total_funded: u128) -> ()` |
 | Pool | `get_share_price` | `get_share_price() -> u128` |
 | Pool | `get_lifetime_deposited_volume` | `get_lifetime_deposited_volume() -> u128` |
 | Pool | `get_lifetime_withdrawn_volume` | `get_lifetime_withdrawn_volume() -> u128` |
@@ -424,7 +431,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 173 public entry points across five deployable contracts.**
+**Total: 177 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -480,7 +487,7 @@ Pool ──[shares]──► LP
 ```
 
 #### Step 2 — Create & List (no funds move)
-The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 1 and 5,000, representing 0.01% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. A zero discount fails with `InvoiceError::InvalidDiscount`, and `discount_bps > 5000` fails with `InvoiceError::DiscountTooHigh`.
 
 
 Before listing, an Underwrite agent must sign an `AttestationPayload` (v2 layout: `domain_separator`, `invoice_id`, `contract_address`, `network_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`) off-chain with a secp256k1 key. `contract_address` and `network_id` bind the signature to one deployed invoice contract on one network, so attestations cannot replay across testnet/mainnet or redeploys (issue #822); `valid_until` (seconds, ledger timestamp) bounds how long the assessment unlocks listing (issue #823). Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice, and with `AttestationExpired` once the stored attestation's `valid_until` has passed. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
@@ -853,7 +860,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
 | 10 | `AlreadyConfirmed` | Caller has already confirmed delivery |
 | 11 | `DueDateNotPassed` | Invoice due date has not passed yet |
-| 12 | `InvalidDiscount` | Discount computation resulted in an invalid state |
+| 12 | `InvalidDiscount` | `discount_bps` is 0 (listing requires at least 1 bp), or a discount computation resulted in an invalid state |
 | 13 | `UnsupportedAsset` | Token asset is not registered as supported |
 | 14 | `ListingNotExpired` | Invoice listing has not reached expiry |
 | 15 | `MathOverflow` | Arithmetic operation overflowed or underflowed |
