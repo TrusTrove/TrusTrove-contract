@@ -9,6 +9,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `escrow`: `default_resolved` audit event data payload updated to `(u128, u64)`
+  representing `(amount, lock_age)` to record elapsed lock seconds alongside
+  the invoice ID, pool, caller, and resolved amount. Failed default attempts
+  produce no event (#1193)
 - `pool`: `get_share_price` now documents its rounding. The 1e18 fixed-point
   price is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` truncated toward
   zero, so it is deterministic and never overstates a share. Tests pin the
