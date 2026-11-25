@@ -460,6 +460,55 @@ impl RegistryContract {
         true
     }
 
+    /// Removes one metadata key from an existing profile.
+    ///
+    /// # Auth
+    /// * Requires `address.require_auth()`.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotRegistered` if no profile exists for `address`.
+    /// * `RegistryError::InvalidMetadata` if `metadata_key` is not present.
+    pub fn remove_metadata_key(env: Env, address: Address, metadata_key: String) -> bool {
+        require_not_paused(&env);
+        address.require_auth();
+        let key = DataKey::Profile(address.clone());
+        let mut profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotRegistered));
+        if !profile.metadata.contains_key(metadata_key.clone()) {
+            panic_with_error!(&env, RegistryError::InvalidMetadata);
+        }
+        profile.metadata.remove(metadata_key.clone());
+        env.storage().persistent().set(&key, &profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::metadata_key_removed(&env, &address, &metadata_key);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the number of metadata keys stored on `address`'s profile.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if no profile exists for `address`.
+    pub fn get_metadata_key_count(env: Env, address: Address) -> u32 {
+        Self::require_initialized(&env);
+        let key = DataKey::Profile(address.clone());
+        let profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_instance_ttl(&env);
+        profile.metadata.len()
+    }
+
     /// Retrieves a registered profile by address.
     ///
     /// Reads the profile entry from persistent storage, extends its TTL using
@@ -540,6 +589,45 @@ impl RegistryContract {
                 verified
             }
             None => false,
+        }
+    }
+
+    /// Returns the ledger timestamp when `address` became currently verified.
+    ///
+    /// Returns `Some(timestamp)` only while the profile is in `Verified` state.
+    /// The timestamp is set by `verify_profile(..., true)` and `reinstate`, and
+    /// cleared on revocation or `verify_profile(..., false)`.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    pub fn get_verified_since(env: Env, address: Address) -> Option<u64> {
+        Self::require_initialized(&env);
+        let profile_key = DataKey::Profile(address.clone());
+        let profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&profile_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let since_key = DataKey::VerifiedSince(address);
+        let since: Option<u64> = env.storage().persistent().get(&since_key);
+        if since.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&since_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+        Self::extend_instance_ttl(&env);
+
+        if profile.verified() && !profile.revoked() {
+            since
+        } else {
+            None
         }
     }
 
@@ -774,11 +862,21 @@ impl RegistryContract {
             env.storage()
                 .persistent()
                 .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            let verified_since_key = DataKey::VerifiedSince(address.clone());
+            if env.storage().persistent().has(&verified_since_key) {
+                env.storage().persistent().extend_ttl(
+                    &verified_since_key,
+                    TTL_THRESHOLD,
+                    TTL_EXTEND_TO,
+                );
+            }
             Self::extend_instance_ttl(&env);
             return true;
         }
         profile.set_verified(false);
         profile.set_revoked(true);
+        let verified_since_key = DataKey::VerifiedSince(address.clone());
+        env.storage().persistent().remove(&verified_since_key);
         env.storage().persistent().set(&key, &profile);
         env.storage()
             .persistent()
@@ -843,6 +941,13 @@ impl RegistryContract {
         }
         profile.set_verified(true);
         profile.set_revoked(false);
+        let verified_since_key = DataKey::VerifiedSince(address.clone());
+        env.storage()
+            .persistent()
+            .set(&verified_since_key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .extend_ttl(&verified_since_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         env.storage().persistent().set(&key, &profile);
         env.storage()
             .persistent()
@@ -899,11 +1004,21 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        let verified_since_key = DataKey::VerifiedSince(address.clone());
         profile.set_verified(verify);
         if verify {
             profile.set_revoked(false);
+            env.storage()
+                .persistent()
+                .set(&verified_since_key, &env.ledger().timestamp());
+            env.storage().persistent().extend_ttl(
+                &verified_since_key,
+                TTL_THRESHOLD,
+                TTL_EXTEND_TO,
+            );
         } else {
             profile.set_revoked(true);
+            env.storage().persistent().remove(&verified_since_key);
         }
         env.storage().persistent().set(&key, &profile);
         env.storage()

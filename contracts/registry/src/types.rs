@@ -110,4 +110,7 @@ pub enum DataKey {
     /// addresses) for `list_profiles`, so a caller can size the last page
     /// without first enumerating.
     ProfileCount(Role),
+    /// Ledger timestamp when the address most recently became verified. Cleared
+    /// on revocation and set again on reinstatement or verification.
+    VerifiedSince(Address),
 }

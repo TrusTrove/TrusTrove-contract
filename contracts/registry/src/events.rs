@@ -4,7 +4,7 @@
 // positionally; migrating them is a schema change, not an SDK repair,
 // so it is deliberately out of scope for the #826 upgrade.
 #![allow(deprecated)]
-use soroban_sdk::{Address, BytesN, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env, String, Symbol};
 
 pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
     env.events()
@@ -50,6 +50,14 @@ pub fn profile_verified(env: &Env, address: &Address, status: bool) {
 pub fn profile_updated(env: &Env, address: &Address) {
     env.events()
         .publish((Symbol::new(env, "profile_updated"), address.clone()), ());
+}
+
+/// Emitted when the profile owner removes one metadata key.
+pub fn metadata_key_removed(env: &Env, address: &Address, key: &String) {
+    env.events().publish(
+        (Symbol::new(env, "metadata_key_removed"), address.clone()),
+        key.clone(),
+    );
 }
 
 pub fn address_reinstated(env: &Env, address: &Address) {

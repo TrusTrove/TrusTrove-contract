@@ -115,6 +115,55 @@ pub struct FundingContext {
     pub funding_asset: Address,
 }
 
+fn settlement_summary_from_invoice(env: &Env, invoice: &Invoice) -> SettlementSummary {
+    let discount = invoice.face_value.saturating_sub(invoice.funded_amount);
+    let (term, elapsed, earned_by_pool, refund_to_buyer) =
+        if let Some(funded_at) = invoice.funded_at {
+            let as_of = if invoice.status == InvoiceStatus::Repaid {
+                invoice
+                    .repaid_at
+                    .unwrap_or_else(|| env.ledger().timestamp())
+            } else {
+                env.ledger().timestamp()
+            };
+            let term = invoice.due_date.saturating_sub(funded_at);
+            let elapsed = as_of.saturating_sub(funded_at);
+            let earned = if term == 0 || elapsed >= term {
+                discount
+            } else {
+                discount
+                    .checked_mul(elapsed as u128)
+                    .unwrap_or_else(|| panic_with_error!(env, InvoiceError::MathOverflow))
+                    / (term as u128)
+            };
+            (
+                Some(term),
+                Some(elapsed),
+                Some(earned),
+                Some(discount.saturating_sub(earned)),
+            )
+        } else {
+            (None, None, None, None)
+        };
+
+    SettlementSummary {
+        status: invoice.status,
+        face_value: invoice.face_value,
+        funded_amount: invoice.funded_amount,
+        discount_bps: invoice.discount_bps,
+        discount,
+        funded_at: invoice.funded_at,
+        due_date: invoice.due_date,
+        repaid_at: invoice.repaid_at,
+        term,
+        elapsed,
+        earned_by_pool,
+        refund_to_buyer,
+        repaid_amount: invoice.repaid_amount,
+        remaining_balance: invoice.remaining_balance,
+    }
+}
+
 #[contract]
 pub struct InvoiceContract;
 
@@ -2704,6 +2753,19 @@ impl InvoiceContract {
             buyer: invoice.buyer,
             funding_asset: invoice.funding_asset,
         }
+    }
+
+    /// Returns a settlement summary for reconciling invoice economics.
+    ///
+    /// For unsettled invoices, earned/refund fields are projected using the
+    /// current ledger timestamp; for repaid invoices, `repaid_at` is used.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotInitialized` if the contract has not been initialized.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    pub fn get_settlement_summary(env: Env, invoice_id: BytesN<32>) -> SettlementSummary {
+        let invoice = Self::get_invoice(&env, invoice_id);
+        settlement_summary_from_invoice(&env, &invoice)
     }
 
     /// Returns the funding asset for an invoice.

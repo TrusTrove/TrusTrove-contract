@@ -273,3 +273,23 @@ pub struct InvoiceIdPage {
     /// empty request is needed.
     pub next: Option<u32>,
 }
+
+/// Settlement summary for reconciling invoice economics.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct SettlementSummary {
+    pub status: InvoiceStatus,
+    pub face_value: u128,
+    pub funded_amount: u128,
+    pub discount_bps: u32,
+    pub discount: u128,
+    pub funded_at: Option<u64>,
+    pub due_date: u64,
+    pub repaid_at: Option<u64>,
+    pub term: Option<u64>,
+    pub elapsed: Option<u64>,
+    pub earned_by_pool: Option<u128>,
+    pub refund_to_buyer: Option<u128>,
+    pub repaid_amount: u128,
+    pub remaining_balance: u128,
+}
