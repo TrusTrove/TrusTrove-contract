@@ -1,7 +1,8 @@
 #![no_std]
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
 use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
@@ -747,7 +748,8 @@ impl EscrowContract {
             .persistent()
             .remove(&DataKey::LockedLedger(invoice_id.clone()));
         Self::extend_instance_ttl(&env);
-        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount);
+        let lock_age = now.saturating_sub(record.locked_at);
+        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount, lock_age);
         true
     }
 
@@ -1165,6 +1167,53 @@ impl EscrowContract {
         total
     }
 
+    /// Returns the configured asset's custody token balance held by the escrow contract.
+    ///
+    /// # Invariants and Reconciliation
+    /// This view inspects the balance of `usdc_asset` at `env.current_contract_address()`.
+    /// The returned custody balance may differ from the sum of active [`Self::get_locked`]
+    /// records because:
+    /// - Direct or unsolicited token transfers to the escrow contract address increase
+    ///   the token custody balance without creating or updating an escrow lock record.
+    /// - Residual balances or dust following partial repayments or fee reconciliations
+    ///   may remain held in escrow.
+    /// - Inter-transaction states between funding lock and release may temporarily exhibit
+    ///   non-matching totals.
+    ///
+    /// # Safety
+    /// This method is purely a read-only query. It performs no transfers, burns, or
+    /// balance modifications, and does not alter contract storage.
+    pub fn get_custody_balance(env: Env) -> i128 {
+        let usdc = Self::usdc_client(&env);
+        usdc.balance(&env.current_contract_address())
+    }
+
+    /// Returns a deterministic digest (SHA-256) committing to the active lock's
+    /// invoice ID, amount, timestamp, and recipient.
+    ///
+    /// Returns `None` if no active lock exists for the specified invoice.
+    /// When a partial repayment or release occurs via [`Self::release_to_pool`],
+    /// the recorded amount decreases in place, deterministically producing a
+    /// different checksum.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - 32-byte invoice identifier to query.
+    pub fn get_lock_checksum(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        let key = DataKey::Locked(invoice_id);
+        let record = env.storage().persistent().get::<_, EscrowRecord>(&key)?;
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let mut payload = Bytes::new(&env);
+        payload.append(&record.invoice_id.into());
+        payload.append(&Bytes::from_slice(&env, &record.amount.to_be_bytes()));
+        payload.append(&Bytes::from_slice(&env, &record.locked_at.to_be_bytes()));
+        payload.append(&record.issuer.to_xdr(&env));
+        Some(env.crypto().sha256(&payload).into())
+    }
+
     /// Returns the history of escrow events for an invoice.
     ///
     /// # Arguments
@@ -1194,6 +1243,43 @@ impl EscrowContract {
                 history
             }
             None => Vec::new(&env),
+        }
+    }
+
+    /// Returns the number of escrow history events recorded for an invoice.
+    ///
+    /// This view allows consumers to plan paginated reads without loading the
+    /// entire event vector. Returns `0` if no history exists for the invoice.
+    /// The count is preserved even after the active lock is released or removed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The number of history events recorded for the invoice, or `0`
+    ///   if no history entry exists.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_history_count(&invoice_id);
+    /// ```
+    pub fn get_history_count(env: Env, invoice_id: BytesN<32>) -> u32 {
+        let key = DataKey::History(invoice_id);
+        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
+            Some(history) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                history.len()
+            }
+            None => 0,
         }
     }
 

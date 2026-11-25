@@ -72,6 +72,7 @@ pub fn default_resolved(
     pool: &Address,
     caller: &Address,
     amount: u128,
+    lock_age: u64,
 ) {
     env.events().publish(
         (
@@ -80,7 +81,7 @@ pub fn default_resolved(
             pool.clone(),
             caller.clone(),
         ),
-        amount,
+        (amount, lock_age),
     );
 }
 

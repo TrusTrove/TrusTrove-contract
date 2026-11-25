@@ -810,9 +810,11 @@ Emitted when default is resolved and funds returned to pool.
 | `topic[0]` | `Symbol` | `"default_resolved"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
 | `topic[2]` | `Address` | Pool contract address |
-| **Data** | `u128` | Returned amount |
+| `topic[3]` | `Address` | Caller address that triggered the default resolution |
+| **Data** | `(u128, u64)` | `(returned_amount, lock_age)` where `lock_age` is elapsed seconds funds remained in escrow before default handling |
 
-**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs:311`
+**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs`
+**Source:** `contracts/escrow/src/events.rs:69`
 
 ---
 
@@ -923,7 +925,22 @@ Emitted when an account profile's details or metadata are updated.
 | `topic[1]` | `Address` | Profile address |
 | **Data** | `()` | None |
 
-**Emitted by:** `update_profile()` in `contracts/registry/src/lib.rs:323` and `update_metadata()` at line 363
+**Emitted by:** `update_profile()` and `update_metadata()` in `contracts/registry/src/lib.rs`
+
+---
+
+### `metadata_key_removed`
+
+Emitted when a profile owner removes one metadata key.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_removed"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `String` | Metadata key removed |
+
+**Emitted by:** `remove_metadata_key()` in `contracts/registry/src/lib.rs`
 
 ---
 
@@ -1074,6 +1091,150 @@ Emitted when the admin disengages the emergency circuit breaker.
 | **Data** | `()` | None |
 
 **Emitted by:** `unpause()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `profile_version`
+
+Emitted whenever a profile's update sequence number changes (#1128): `1` on registration, then once per write that actually changes the stored profile. A consumer that sees the version for an address jump by more than one has missed an update and should re-read the profile with `get_profile`. No-op calls (identical metadata, idempotent `revoke`/`reinstate`, `verify_profile` with the value already held) do not emit it.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"profile_version"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `u64` | New version |
+
+**Emitted by:** every `register_*` / `batch_register_*` (new profiles only), `update_profile`, `update_metadata`, `verify_profile`, `revoke`, `reinstate` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_proposed`
+
+Emitted when the admin proposes a delayed admin transfer (#1124). The current admin stays in control until the proposal is accepted.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_proposed"` |
+| `topic[1]` | `Address` | Current admin |
+| **Data** | `(Address, u64)` | `(new_admin, activates_at)` |
+
+**Emitted by:** `propose_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_accepted`
+
+Emitted when the proposed admin accepts a delayed transfer at or after `activates_at`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_accepted"` |
+| `topic[1]` | `Address` | Previous admin |
+| **Data** | `Address` | New admin |
+
+**Emitted by:** `accept_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_cancelled`
+
+Emitted when the admin or the guardian cancels a pending delayed transfer.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_cancelled"` |
+| `topic[1]` | `Address` | Caller (admin or guardian) |
+| **Data** | `Address` | The `new_admin` that was proposed |
+
+**Emitted by:** `cancel_admin_transfer()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `guardian_set`
+
+Emitted when the admin configures the emergency guardian (#1125).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"guardian_set"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `Address` | Guardian |
+
+**Emitted by:** `set_guardian()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `guardian_removed`
+
+Emitted when the admin removes the emergency guardian.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"guardian_removed"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `()` | None |
+
+**Emitted by:** `remove_guardian()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_frozen`
+
+Emitted when the guardian freezes admin-only writes. Not emitted when already frozen.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_frozen"` |
+| `topic[1]` | `Address` | Guardian |
+| **Data** | `()` | None |
+
+**Emitted by:** `freeze_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_unfrozen`
+
+Emitted when the guardian lifts the admin freeze. Not emitted when not frozen.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_unfrozen"` |
+| `topic[1]` | `Address` | Guardian |
+| **Data** | `()` | None |
+
+**Emitted by:** `unfreeze_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `metadata_key_policy_set`
+
+Emitted when the admin changes the metadata key policy (#1120).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_policy_set"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `MetadataKeyPolicy` | `Unrestricted` or `AllowlistV1` |
+
+**Emitted by:** `set_metadata_key_policy()` in `contracts/registry/src/lib.rs`  
 **Source:** `contracts/registry/src/events.rs`
 
 ---
