@@ -1287,20 +1287,20 @@ fn test_create_with_purchase_order_hash_stores_and_emits_hash() {
         &Some(purchase_order_hash.clone()),
     );
 
-    assert_eq!(
-        client.get_purchase_order_hash(&invoice_id),
-        Some(purchase_order_hash.clone())
-    );
     let events = env.events().all();
     let (event_contract, topics, data) = events.last().expect("expected creation event");
     assert_eq!(event_contract, client.address);
     assert_eq!(
         Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
-        Symbol::new(&env, "invoice_created_with_purchase_order_hash")
+        Symbol::new(&env, "invoice_created_with_po_hash")
     );
     assert_eq!(
         <(u128, BytesN<32>)>::try_from_val(&env, &data).unwrap(),
         (DEFAULT_FACE_VALUE, purchase_order_hash)
+    );
+    assert_eq!(
+        client.get_purchase_order_hash(&invoice_id),
+        Some(BytesN::from_array(&env, &[42u8; 32]))
     );
 }
 
@@ -1368,6 +1368,15 @@ fn test_correct_invoice_updates_terms_indexes_and_invalidates_attestation() {
         &other_asset,
     ));
 
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected correction event");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_terms_corrected")
+    );
+    let (old_digest, new_digest) = <(BytesN<32>, BytesN<32>)>::try_from_val(&env, &data).unwrap();
+    assert_ne!(old_digest, new_digest);
+
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.buyer, other_buyer);
     assert_eq!(invoice.face_value, corrected_value);
@@ -1383,15 +1392,6 @@ fn test_correct_invoice_updates_terms_indexes_and_invalidates_attestation() {
     assert_eq!(new_buyer_invoices.len(), 1);
     assert_eq!(new_buyer_invoices.get(0).unwrap().id, invoice_id);
 
-    let events = env.events().all();
-    let (_, topics, data) = events.last().expect("expected correction event");
-    assert_eq!(
-        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
-        Symbol::new(&env, "invoice_terms_corrected")
-    );
-    let (old_digest, new_digest) =
-        <(BytesN<32>, BytesN<32>)>::try_from_val(&env, &data).unwrap();
-    assert_ne!(old_digest, new_digest);
 }
 
 #[test]
@@ -1399,8 +1399,6 @@ fn test_correct_invoice_same_terms_is_idempotent() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
-    let event_count = env.events().all().len();
-
     assert!(client.correct_invoice(
         &invoice_id,
         &buyer,
@@ -1408,7 +1406,7 @@ fn test_correct_invoice_same_terms_is_idempotent() {
         &due_date,
         &usdc,
     ));
-    assert_eq!(env.events().all().len(), event_count);
+    assert!(env.events().all().is_empty());
 }
 
 #[test]
@@ -1440,9 +1438,6 @@ fn test_update_listing_terms_changes_discount_and_is_idempotent() {
     client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
 
     assert!(client.update_listing_terms(&invoice_id, &5000));
-    let updated = client.get(&invoice_id);
-    assert_eq!(updated.status, InvoiceStatus::Listed);
-    assert_eq!(updated.discount_bps, 5000);
     let events = env.events().all();
     let (_, topics, data) = events.last().expect("expected listing terms event");
     assert_eq!(
@@ -1450,9 +1445,11 @@ fn test_update_listing_terms_changes_discount_and_is_idempotent() {
         Symbol::new(&env, "invoice_listing_terms_updated")
     );
     assert_eq!(<(u32, u32)>::try_from_val(&env, &data).unwrap(), (200, 5000));
-    let event_count = env.events().all().len();
+    let updated = client.get(&invoice_id);
+    assert_eq!(updated.status, InvoiceStatus::Listed);
+    assert_eq!(updated.discount_bps, 5000);
     assert!(client.update_listing_terms(&invoice_id, &5000));
-    assert_eq!(env.events().all().len(), event_count);
+    assert!(env.events().all().is_empty());
 }
 
 #[test]
@@ -1480,6 +1477,13 @@ fn test_delist_returns_invoice_to_created_and_removes_listed_membership() {
     client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
 
     assert!(client.delist(&invoice_id, &false));
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected delisting event");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_delisted")
+    );
+    assert_eq!(InvoiceStatus::try_from_val(&env, &data).unwrap(), InvoiceStatus::Created);
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Created);
     assert_eq!(invoice.discount_bps, 0);
@@ -1497,13 +1501,6 @@ fn test_delist_returns_invoice_to_created_and_removes_listed_membership() {
             .len(),
         1
     );
-    let events = env.events().all();
-    let (_, topics, data) = events.last().expect("expected delisting event");
-    assert_eq!(
-        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
-        Symbol::new(&env, "invoice_delisted")
-    );
-    assert_eq!(InvoiceStatus::try_from_val(&env, &data).unwrap(), InvoiceStatus::Created);
 }
 
 #[test]

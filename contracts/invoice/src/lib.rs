@@ -1018,7 +1018,15 @@ impl InvoiceContract {
     ) -> BytesN<32> {
         require_not_paused(&env);
         issuer.require_auth();
-        Self::create_inner(&env, issuer, buyer, face_value, due_date, funding_asset, None)
+        Self::create_inner(
+            &env,
+            issuer,
+            buyer,
+            face_value,
+            due_date,
+            funding_asset,
+            None,
+        )
     }
 
     /// Creates an invoice with an optional buyer-provided purchase-order hash.
@@ -1429,12 +1437,7 @@ impl InvoiceContract {
         invoice.discount_bps = discount_bps;
         Self::save_invoice(&env, inv_key, &invoice);
         Self::extend_instance_ttl(&env);
-        events::invoice_listing_terms_updated(
-            &env,
-            &invoice_id,
-            old_discount_bps,
-            discount_bps,
-        );
+        events::invoice_listing_terms_updated(&env, &invoice_id, old_discount_bps, discount_bps);
         true
     }
 
@@ -4225,16 +4228,20 @@ fn remove_from_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) 
     let count_key = DataKey::BuyerIndexCount(buyer.clone());
     let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
 
-    let position = env.storage().persistent().get::<_, u32>(&position_key).or_else(|| {
-        // Existing buyer rows predate position markers; locate one once and
-        // compact it into the new O(1) representation.
-        (0..count).find(|index| {
-            env.storage()
-                .persistent()
-                .get::<_, BytesN<32>>(&DataKey::BuyerIndexEntry(buyer.clone(), *index))
-                .is_some_and(|id| id == *invoice_id)
-        })
-    });
+    let position = env
+        .storage()
+        .persistent()
+        .get::<_, u32>(&position_key)
+        .or_else(|| {
+            // Existing buyer rows predate position markers; locate one once and
+            // compact it into the new O(1) representation.
+            (0..count).find(|index| {
+                env.storage()
+                    .persistent()
+                    .get::<_, BytesN<32>>(&DataKey::BuyerIndexEntry(buyer.clone(), *index))
+                    .is_some_and(|id| id == *invoice_id)
+            })
+        });
     let Some(position) = position else {
         return;
     };

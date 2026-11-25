@@ -39,7 +39,7 @@ pub fn invoice_created_with_purchase_order_hash(
 ) {
     env.events().publish(
         (
-            Symbol::new(env, "invoice_created_with_purchase_order_hash"),
+            Symbol::new(env, "invoice_created_with_po_hash"),
             invoice_id.clone(),
             issuer.clone(),
             buyer.clone(),
@@ -70,7 +70,10 @@ pub fn invoice_terms_corrected(
     new_digest: &BytesN<32>,
 ) {
     env.events().publish(
-        (Symbol::new(env, "invoice_terms_corrected"), invoice_id.clone()),
+        (
+            Symbol::new(env, "invoice_terms_corrected"),
+            invoice_id.clone(),
+        ),
         (old_digest.clone(), new_digest.clone()),
     );
 }

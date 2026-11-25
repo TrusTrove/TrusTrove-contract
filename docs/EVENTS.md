@@ -29,7 +29,7 @@ Emitted when a new invoice is created.
 
 **Emitted by:** `create()` in `contracts/invoice/src/lib.rs:276`
 
-### `invoice_created_with_purchase_order_hash`
+### `invoice_created_with_po_hash`
 
 Companion event emitted only when creation includes a buyer-authorized
 purchase-order hash. The existing `invoice_created` topics and `u128` payload
@@ -38,7 +38,7 @@ remain unchanged for compatibility.
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
-| `topic[0]` | `Symbol` | `"invoice_created_with_purchase_order_hash"` |
+| `topic[0]` | `Symbol` | `"invoice_created_with_po_hash"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
 | `topic[2]` | `Address` | Issuer address |
 | `topic[3]` | `Address` | Buyer address who consented to the hash |
