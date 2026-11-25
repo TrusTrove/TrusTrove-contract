@@ -1656,12 +1656,44 @@ fn test_handle_default_allows_at_grace_period_boundary() {
     let invoice_id = generate_invoice_id(&env, 10);
     let amount: u128 = 1_000_000_000;
 
+    assert_eq!(client.get_lock_expiration(&invoice_id), None);
+    let expected_expiration = env.ledger().timestamp() + 60;
     client.lock(&invoice_id, &amount, &issuer);
-    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert_eq!(
+        client.get_lock_expiration(&invoice_id),
+        Some(expected_expiration)
+    );
+    env.ledger().set_timestamp(expected_expiration);
 
     let result = client.handle_default(&invoice_id, &pool);
     assert!(result);
     assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(client.get_lock_expiration(&invoice_id), None);
+}
+
+#[test]
+fn test_lock_expiration_matches_stored_default_period() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 11);
+    let period = 120u64;
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockSeconds, &period);
+    });
+    let expiration = env.ledger().timestamp() + period;
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    assert_eq!(client.get_lock_expiration(&invoice_id), Some(expiration));
+    env.ledger().set_timestamp(expiration - 1);
+    assert_eq!(
+        client.try_handle_default(&invoice_id, &pool),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::NotAuthorized as u32
+        )))
+    );
+    env.ledger().set_timestamp(expiration);
+    assert!(client.handle_default(&invoice_id, &pool));
 }
 
 #[test]
