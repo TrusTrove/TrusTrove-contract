@@ -139,11 +139,7 @@ impl RegistryContract {
         }
         // #130: new profiles start unverified; admin must verify via verify_profile.
         let profile = Profile::new(Role::Issuer, false, env.ledger().timestamp(), metadata);
-        let key = DataKey::Profile(address.clone());
-        env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::store_new_profile(&env, &address, &profile);
         Self::index_profile(&env, &Role::Issuer, &address);
         events::issuer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
@@ -225,10 +221,7 @@ impl RegistryContract {
             // #130: new profiles start unverified; admin must verify via verify_profile.
             let profile = Profile::new(Role::Issuer, false, env.ledger().timestamp(), metadata);
 
-            env.storage().persistent().set(&key, &profile);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::store_new_profile(&env, &address, &profile);
             Self::index_profile(&env, &Role::Issuer, &address);
             events::issuer_registered(&env, &address);
             registered += 1;
@@ -295,10 +288,7 @@ impl RegistryContract {
             // #130: new profiles start unverified; admin must verify via verify_profile.
             let profile = Profile::new(Role::Buyer, false, env.ledger().timestamp(), metadata);
 
-            env.storage().persistent().set(&key, &profile);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::store_new_profile(&env, &address, &profile);
             Self::index_profile(&env, &Role::Buyer, &address);
             events::buyer_registered(&env, &address);
             registered += 1;
@@ -359,11 +349,7 @@ impl RegistryContract {
         }
         // #130: new profiles start unverified; admin must verify via verify_profile.
         let profile = Profile::new(Role::Buyer, false, env.ledger().timestamp(), metadata);
-        let key = DataKey::Profile(address.clone());
-        env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::store_new_profile(&env, &address, &profile);
         Self::index_profile(&env, &Role::Buyer, &address);
         events::buyer_registered(&env, &address);
         Self::extend_instance_ttl(&env);
@@ -411,9 +397,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotRegistered));
         profile.metadata = metadata;
         env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         events::profile_updated(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -452,9 +436,7 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotRegistered));
         profile.metadata = metadata;
         env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         events::profile_updated(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -482,9 +464,7 @@ impl RegistryContract {
         }
         profile.metadata.remove(metadata_key.clone());
         env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         events::metadata_key_removed(&env, &address, &metadata_key);
         Self::extend_instance_ttl(&env);
         true
@@ -502,9 +482,7 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         Self::extend_instance_ttl(&env);
         profile.metadata.len()
     }
@@ -547,10 +525,30 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        Self::extend_profile_ttl(&env, &address);
+        profile
+    }
+
+    /// Returns the schema version of a registered profile.
+    ///
+    /// Newly registered profiles explicitly store [`PROFILE_SCHEMA_VERSION`].
+    /// Profiles written before the version key was introduced default to
+    /// version 1; their `Profile` values remain stored and decoded unchanged.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    pub fn get_profile_schema_version(env: Env, address: Address) -> u32 {
+        let profile_key = DataKey::Profile(address.clone());
+        let _: Profile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        Self::extend_profile_ttl(&env, &address);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        profile
+            .get(&DataKey::ProfileSchemaVersion(address))
+            .unwrap_or(1)
     }
 
     /// Checks whether a registered profile is verified.
@@ -579,13 +577,11 @@ impl RegistryContract {
     /// let verified = client.is_verified(&issuer);
     /// ```
     pub fn is_verified(env: Env, address: Address) -> bool {
-        let key = DataKey::Profile(address);
+        let key = DataKey::Profile(address.clone());
         match env.storage().persistent().get::<_, Profile>(&key) {
             Some(profile) => {
                 let verified = profile.verified();
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Self::extend_profile_ttl(&env, &address);
                 verified
             }
             None => false,
@@ -611,9 +607,7 @@ impl RegistryContract {
             .persistent()
             .get(&profile_key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        env.storage()
-            .persistent()
-            .extend_ttl(&profile_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
 
         let since_key = DataKey::VerifiedSince(address);
         let since: Option<u64> = env.storage().persistent().get(&since_key);
@@ -632,13 +626,11 @@ impl RegistryContract {
     }
 
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
-        let key = DataKey::Profile(address);
+        let key = DataKey::Profile(address.clone());
         match env.storage().persistent().get::<_, Profile>(&key) {
             None => VerificationStatus::Unregistered,
             Some(profile) => {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Self::extend_profile_ttl(&env, &address);
                 if profile.verified() {
                     VerificationStatus::Verified
                 } else if profile.revoked() {
@@ -684,13 +676,11 @@ impl RegistryContract {
     /// let role = client.get_role(&issuer); // Some(Role::Issuer)
     /// ```
     pub fn get_role(env: Env, address: Address) -> Option<Role> {
-        let key = DataKey::Profile(address);
+        let key = DataKey::Profile(address.clone());
         match env.storage().persistent().get::<_, Profile>(&key) {
             Some(profile) => {
                 let role = profile.role();
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Self::extend_profile_ttl(&env, &address);
                 Some(role)
             }
             None => None,
@@ -859,9 +849,7 @@ impl RegistryContract {
         if profile.revoked() {
             // Only an already revoked profile is idempotent; Pending must transition.
             // Extend TTLs so repeated admin reads don't let storage age out.
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            Self::extend_profile_ttl(&env, &address);
             let verified_since_key = DataKey::VerifiedSince(address.clone());
             if env.storage().persistent().has(&verified_since_key) {
                 env.storage().persistent().extend_ttl(
@@ -878,9 +866,7 @@ impl RegistryContract {
         let verified_since_key = DataKey::VerifiedSince(address.clone());
         env.storage().persistent().remove(&verified_since_key);
         env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         events::address_revoked(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -949,9 +935,7 @@ impl RegistryContract {
             .persistent()
             .extend_ttl(&verified_since_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         events::address_reinstated(&env, &address);
         Self::extend_instance_ttl(&env);
         true
@@ -1021,9 +1005,7 @@ impl RegistryContract {
             env.storage().persistent().remove(&verified_since_key);
         }
         env.storage().persistent().set(&key, &profile);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_profile_ttl(&env, &address);
         events::profile_verified(&env, &address, verify);
         Self::extend_instance_ttl(&env);
         true
@@ -1279,6 +1261,31 @@ impl RegistryContract {
         env.storage()
             .instance()
             .extend_ttl(TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    fn store_new_profile(env: &Env, address: &Address, profile: &Profile) {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Profile(address.clone()), profile);
+        env.storage().persistent().set(
+            &DataKey::ProfileSchemaVersion(address.clone()),
+            &PROFILE_SCHEMA_VERSION,
+        );
+        Self::extend_profile_ttl(env, address);
+    }
+
+    fn extend_profile_ttl(env: &Env, address: &Address) {
+        let profile_key = DataKey::Profile(address.clone());
+        env.storage()
+            .persistent()
+            .extend_ttl(&profile_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let version_key = DataKey::ProfileSchemaVersion(address.clone());
+        if env.storage().persistent().has(&version_key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&version_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
     }
 
     fn validate_metadata(env: &Env, metadata: &Map<String, String>) {

@@ -67,6 +67,14 @@ All contracts follow a consistent TTL extension pattern:
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
+| `ProfileSchemaVersion(Address)` | `u32` | Explicit schema version; missing entries on pre-marker profiles mean v1 |
+
+`get_profile_schema_version(address)` returns the explicit schema version for a
+registered profile, or v1 when its marker is absent. New profiles write the
+current `PROFILE_SCHEMA_VERSION` (v1). The marker is stored separately from
+`Profile`, preserving the existing contract-type encoding for profiles already
+in persistent storage. Profile reads and writes extend the marker TTL alongside
+the profile TTL when a marker exists.
 
 #### Profile Enumeration Index
 
@@ -203,15 +211,19 @@ let status = if !profile_exists {
   `revoke` only flips the profile's verification flags — so a slot is never
   rewritten or freed, and revoked profiles stay enumerated.
 - `get_profile(address)` returns the full `Profile` struct or panics with
-  `NotFound` if absent.
+  `NotFound` if absent. `get_profile_schema_version(address)` reports its
+  schema version and likewise panics with `NotFound` for unknown addresses;
+  profiles predating the marker return v1.
 - `get_verification_status(address)` returns a three-valued enum
   (`Unregistered`, `Verified`, `Revoked`).
 
 ### Storage Key Count
 
-**Approximately 2 keys per registered address** — one `Profile` record and one
-`ProfileIndex(role, n)` slot — **plus 2 constant `ProfileCount(role)` keys**
-(one per role) that exist once the first profile of that role is registered.
+**Approximately 3 keys per newly registered address** — one `Profile` record,
+one `ProfileSchemaVersion` marker, and one `ProfileIndex(role, n)` slot —
+**plus 2 constant `ProfileCount(role)` keys** (one per role) that exist once
+the first profile of that role is registered. Profiles stored before the
+version marker was introduced do not have a separate marker key.
 
 ---
 

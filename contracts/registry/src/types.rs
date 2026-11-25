@@ -94,6 +94,9 @@ pub enum DataKey {
     /// transfer admin/ownership, pause, revoke, reinstate or change itself.
     Verifier,
     Profile(Address),
+    /// Schema version for a profile. Missing entries on existing profiles
+    /// are interpreted as version 1 to preserve their original encoding.
+    ProfileSchemaVersion(Address),
     /// The `index`-th registered address for `role`, in registration order.
     ///
     /// Written once per successful registration by every registration path
