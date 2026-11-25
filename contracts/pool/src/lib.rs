@@ -11,7 +11,7 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, IntoVal,
     String, Symbol, Vec,
 };
-use trusttrove_pause::{require_not_paused, set_paused};
+use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
 mod bench;
 mod constants;
@@ -2248,6 +2248,22 @@ impl PoolContract {
     /// share; a price of `1_050_000_000_000_000_000` means 1.05. An empty
     /// pool with no shares reports `0`, since no price can be formed yet.
     ///
+    /// # Rounding
+    /// Deterministic: `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` in
+    /// integer arithmetic, truncated toward zero. The price is never rounded
+    /// up, so it never overstates what a share is worth, and every client
+    /// that reads this view gets the same number instead of reimplementing
+    /// the division with its own rounding (issue #1166). For example, a pool
+    /// holding `30_200_000_000` against `30_000_000_000` shares reports
+    /// `1_006_666_666_666_666_666`, not `…667`.
+    ///
+    /// | Pool state | Price |
+    /// | --- | --- |
+    /// | Empty (no shares) | `0` |
+    /// | After the first deposit | exactly `SHARE_PRICE_SCALE` (1.0) |
+    /// | After yield is repaid | above `SHARE_PRICE_SCALE` |
+    /// | After a default absorbs a loss | below `SHARE_PRICE_SCALE` |
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     ///
@@ -2470,6 +2486,195 @@ impl PoolContract {
     pub fn get_utilization_rate(env: Env) -> u32 {
         let totals = Self::totals(&env);
         Self::utilization_bps_or_panic(&env, totals.funded, totals.deposits)
+    }
+
+    /// Returns the largest additional principal this pool can fund now.
+    ///
+    /// The result is limited by both available liquidity and the configured
+    /// utilization cap. Utilization uses the same integer-truncated basis-point
+    /// calculation as `fund_invoice`; therefore the returned amount is the
+    /// largest amount whose post-funding utilization does not exceed the cap.
+    /// An empty pool returns `0`.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    /// * `Overflow` if pool totals violate `TotalFunded <= TotalDeposits` or
+    ///   the current utilization cannot be represented safely.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let amount = client.get_max_fundable_amount();
+    /// ```
+    pub fn get_max_fundable_amount(env: Env) -> u128 {
+        Self::require_initialized(&env);
+        if is_paused(&env) {
+            return 0;
+        }
+        let totals = Self::totals(&env);
+        Self::max_fundable_amount(
+            &env,
+            totals.deposits,
+            totals.funded,
+            totals.max_utilization_bps,
+        )
+    }
+
+    /// Reports whether an invoice can be funded and why it would be rejected.
+    ///
+    /// This view reads the invoice funding context and registry verification
+    /// state, and reports the pool's current liquidity and utilization limits.
+    /// It does not write pool storage or extend storage TTLs. Missing invoices
+    /// retain the invoice contract's `NotFound` error.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    /// * The invoice contract's `NotFound` error if `invoice_id` is unknown.
+    /// * `Overflow` if pool accounting or a funding-amount calculation cannot
+    ///   be represented safely.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let eligibility = client.get_funding_eligibility(&invoice_id);
+    /// ```
+    pub fn get_funding_eligibility(env: Env, invoice_id: BytesN<32>) -> FundingEligibility {
+        Self::require_initialized(&env);
+        let totals = Self::totals(&env);
+        let max_fundable_amount = Self::max_fundable_amount(
+            &env,
+            totals.deposits,
+            totals.funded,
+            totals.max_utilization_bps,
+        );
+        let utilization_rate_bps =
+            Self::utilization_bps_or_panic(&env, totals.funded, totals.deposits);
+        let available_liquidity = totals.deposits - totals.funded;
+        let paused = is_paused(&env);
+        let max_fundable_amount = if paused { 0 } else { max_fundable_amount };
+
+        let invoice_contract = Self::invoice_contract(&env)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        let mut args = Vec::new(&env);
+        args.push_back(invoice_id.clone().into_val(&env));
+        let ctx: FundingContext = env.invoke_contract(
+            &invoice_contract,
+            &Symbol::new(&env, "get_funding_context"),
+            args,
+        );
+
+        let mut rejection_reasons = Vec::new(&env);
+        if paused {
+            rejection_reasons.push_back(FundingRejectionReason::ContractPaused);
+        }
+        if env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(invoice_id.clone()))
+        {
+            rejection_reasons.push_back(FundingRejectionReason::AlreadyFunded);
+        }
+        if ctx.status != 1 {
+            rejection_reasons.push_back(FundingRejectionReason::InvoiceNotListed);
+        }
+
+        let registry_id = Self::registry_contract(&env);
+        let mut args = Vec::new(&env);
+        args.push_back(ctx.issuer.clone().into_val(&env));
+        let issuer_verified: bool =
+            env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
+        if !issuer_verified {
+            rejection_reasons.push_back(FundingRejectionReason::IssuerNotVerified);
+        }
+        let mut args = Vec::new(&env);
+        args.push_back(ctx.buyer.clone().into_val(&env));
+        let buyer_verified: bool =
+            env.invoke_contract(&registry_id, &Symbol::new(&env, "is_verified"), args);
+        if !buyer_verified {
+            rejection_reasons.push_back(FundingRejectionReason::BuyerNotVerified);
+        }
+
+        let funding_asset_matches = ctx.funding_asset == Self::funding_asset(&env);
+        if !funding_asset_matches {
+            rejection_reasons.push_back(FundingRejectionReason::AssetMismatch);
+        }
+
+        if ctx.discount_bps > 10_000 {
+            rejection_reasons.push_back(FundingRejectionReason::InvalidAmount);
+        }
+        let min_discount_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinDiscountBps)
+            .unwrap_or(0u32);
+        if ctx.discount_bps <= 10_000 && ctx.discount_bps < min_discount_bps {
+            rejection_reasons.push_back(FundingRejectionReason::DiscountBelowMinimum);
+        }
+
+        let max_time_to_maturity: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64);
+        if max_time_to_maturity > 0 {
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.into_val(&env));
+            let due_date: u64 =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_due_date"), args);
+            let remaining = due_date.saturating_sub(env.ledger().timestamp());
+            if remaining > max_time_to_maturity {
+                rejection_reasons.push_back(FundingRejectionReason::MaturityTooLong);
+            }
+        }
+
+        let funded_amount = if ctx.discount_bps > 10_000 {
+            0
+        } else {
+            match ctx
+                .face_value
+                .checked_mul(10_000 - ctx.discount_bps as u128)
+            {
+                Some(scaled) => {
+                    let amount = scaled / 10_000;
+                    if amount == 0 {
+                        rejection_reasons.push_back(FundingRejectionReason::InvalidAmount);
+                    }
+                    amount
+                }
+                None => {
+                    rejection_reasons.push_back(FundingRejectionReason::Overflow);
+                    0
+                }
+            }
+        };
+
+        if funded_amount > available_liquidity {
+            rejection_reasons.push_back(FundingRejectionReason::InsufficientLiquidity);
+        }
+        let max_utilization_fundable = Self::max_fundable_at_utilization(
+            totals.deposits,
+            totals.funded,
+            totals.max_utilization_bps,
+        );
+        if funded_amount > max_utilization_fundable {
+            rejection_reasons.push_back(FundingRejectionReason::UtilizationCapExceeded);
+        }
+
+        FundingEligibility {
+            invoice_status: ctx.status,
+            funding_asset_matches,
+            funded_amount,
+            available_liquidity,
+            max_fundable_amount,
+            utilization_rate_bps,
+            max_utilization_bps: totals.max_utilization_bps,
+            is_eligible: rejection_reasons.is_empty(),
+            rejection_reasons,
+        }
     }
 
     /// Suggests a `discount_bps` for an issuer to consider when calling
@@ -3076,6 +3281,47 @@ impl PoolContract {
             .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
 
         scaled_funded.checked_div(total_deposits).unwrap_or(0) as u32
+    }
+
+    fn max_fundable_amount(
+        env: &Env,
+        total_deposits: u128,
+        total_funded: u128,
+        max_utilization_bps: u32,
+    ) -> u128 {
+        if total_funded > total_deposits {
+            panic_with_error!(env, PoolError::Overflow);
+        }
+        Self::utilization_bps_or_panic(env, total_funded, total_deposits);
+        let available = total_deposits - total_funded;
+        available.min(Self::max_fundable_at_utilization(
+            total_deposits,
+            total_funded,
+            max_utilization_bps,
+        ))
+    }
+
+    fn max_fundable_at_utilization(
+        total_deposits: u128,
+        total_funded: u128,
+        max_utilization_bps: u32,
+    ) -> u128 {
+        if total_deposits == 0 || max_utilization_bps >= MAX_UTILIZATION_BPS {
+            return total_deposits
+                .min(u128::MAX / 10_000)
+                .saturating_sub(total_funded);
+        }
+
+        // Because funding compares the floored basis-point rate with the cap,
+        // the largest valid total is ceil(deposits * (cap + 1) / 10_000) - 1.
+        // Split the multiplication to avoid overflowing for large deposits.
+        let multiplier = max_utilization_bps as u128 + 1;
+        let whole = (total_deposits / 10_000) * multiplier;
+        let remainder_product = (total_deposits % 10_000) * multiplier;
+        let remainder_ceil =
+            remainder_product / 10_000 + u128::from(remainder_product % 10_000 != 0);
+        let max_total_funded = (whole + remainder_ceil - 1).min(u128::MAX / 10_000);
+        max_total_funded.saturating_sub(total_funded)
     }
 
     fn require_initialized(env: &Env) {

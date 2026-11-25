@@ -9,6 +9,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `pool`: `get_share_price` now documents its rounding. The 1e18 fixed-point
+  price is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` truncated toward
+  zero, so it is deterministic and never overstates a share. Tests pin the
+  value for an empty pool (`0`), after the first deposit (exactly 1.0), after
+  yield (`1_006_666_666_666_666_666` for 30.2e9 over 30e9) and after a default
+  (`673_333_333_333_333_333`), the truncation against round-to-nearest, that
+  the view needs no authorization, and the `Overflow` boundary (#1166)
 - `invoice`: `list_for_financing` and `batch_list_for_financing` now require
   `discount_bps` in `1..=5000`. A zero discount is rejected with
   `InvoiceError::InvalidDiscount` (the batch path reports it as a failed

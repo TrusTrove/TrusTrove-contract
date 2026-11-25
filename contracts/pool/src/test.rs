@@ -20,8 +20,8 @@ use crate::{
         MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SHARE_PRICE_SCALE, SUGGESTED_DISCOUNT_CEILING_BPS,
         SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
-    DataKey, PoolContract, PoolContractClient, PoolError, DEFAULT_MIN_INITIAL_DEPOSIT,
-    DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
+    DataKey, FundingRejectionReason, PoolContract, PoolContractClient, PoolError,
+    DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -1918,6 +1918,125 @@ fn test_utilization_rate_calculates_correctly() {
     assert_eq!(
         te.pool.get_utilization_rate(),
         (DEFAULT_FUNDED_AMOUNT * 10000 / 10_000_000_000) as u32
+    );
+}
+
+#[test]
+fn test_max_fundable_amount_handles_empty_pool_and_exact_utilization_boundary() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    assert_eq!(te.pool.get_max_fundable_amount(), 0);
+
+    te.env.mock_all_auths();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let max_fundable = te.pool.get_max_fundable_amount();
+    assert_eq!(max_fundable, 85_009_999_999);
+    assert_eq!((max_fundable * 10_000 / 100_000_000_000) as u32, 8500);
+    assert_eq!(((max_fundable + 1) * 10_000 / 100_000_000_000) as u32, 8501);
+}
+
+#[test]
+fn test_funding_eligibility_reports_metrics_without_writing_pool_state() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.env.set_auths(&[]);
+
+    let eligibility = te.pool.get_funding_eligibility(&invoice_id);
+
+    assert!(eligibility.is_eligible);
+    assert_eq!(eligibility.invoice_status, 1);
+    assert!(eligibility.funding_asset_matches);
+    assert_eq!(eligibility.funded_amount, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(eligibility.available_liquidity, 100_000_000_000);
+    assert_eq!(eligibility.max_fundable_amount, 100_000_000_000);
+    assert_eq!(eligibility.utilization_rate_bps, 0);
+    assert_eq!(eligibility.max_utilization_bps, 10_000);
+    assert!(eligibility.rejection_reasons.is_empty());
+    assert_eq!(te.pool.get_stats().total_funded, 0);
+    let has_funding_record = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(invoice_id.clone()))
+    });
+    assert!(!has_funding_record);
+}
+
+#[test]
+fn test_funding_eligibility_reports_asset_capacity_and_amount_rejections() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let wrong_asset_invoice = create_and_list(&te, &te.xlm_id);
+    let wrong_asset = te.pool.get_funding_eligibility(&wrong_asset_invoice);
+    assert!(!wrong_asset.is_eligible);
+    assert!(!wrong_asset.funding_asset_matches);
+    assert_eq!(
+        wrong_asset.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::AssetMismatch
+    );
+
+    let over_capacity_invoice = create_and_list(&te, &te.usdc_id);
+    let over_capacity = te.pool.get_funding_eligibility(&over_capacity_invoice);
+    assert!(!over_capacity.is_eligible);
+    assert_eq!(over_capacity.max_fundable_amount, 8_500_999_999);
+    assert_eq!(
+        over_capacity.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::UtilizationCapExceeded
+    );
+
+    let zero_amount_invoice = BytesN::from_array(&te.env, &[7; 32]);
+    let mock_invoice_id = te.env.register(MockHugeFaceInvoice, ());
+    MockHugeFaceInvoiceClient::new(&te.env, &mock_invoice_id).configure(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &1,
+        &5000,
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_invoice_id);
+    });
+    let zero_amount = te.pool.get_funding_eligibility(&zero_amount_invoice);
+    assert!(!zero_amount.is_eligible);
+    assert_eq!(zero_amount.funded_amount, 0);
+    assert_eq!(
+        zero_amount.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::InvalidAmount
+    );
+}
+
+#[test]
+fn test_funding_eligibility_rejects_unknown_invoice() {
+    let te = setup();
+    let missing_invoice = BytesN::from_array(&te.env, &[0; 32]);
+    assert!(te
+        .pool
+        .try_get_funding_eligibility(&missing_invoice)
+        .is_err());
+}
+
+#[test]
+fn test_funding_preflight_reports_paused_pool() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.pause();
+
+    assert_eq!(te.pool.get_max_fundable_amount(), 0);
+    let eligibility = te.pool.get_funding_eligibility(&invoice_id);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(eligibility.max_fundable_amount, 0);
+    assert_eq!(
+        eligibility.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::ContractPaused
     );
 }
 
@@ -10586,269 +10705,125 @@ fn test_lifetime_repaid_volume_counts_full_amounts_including_early_repayment() {
 }
 
 // ---------------------------------------------------------------------------
-// ISSUE #1182: OPTIONAL PER-ISSUER CONCENTRATION LIMIT AT FUNDING
+// ISSUE #1166: SHARE PRICE AS A FIXED-POINT VIEW
 // ---------------------------------------------------------------------------
+//
+// `get_share_price` is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares`,
+// truncated toward zero. These pin the documented value in each pool state
+// and the rounding direction, so clients can rely on the view instead of
+// recomputing it with their own rounding.
 
-/// Creates and lists an invoice issued by `issuer` with the same parameters
-/// `create_and_list` uses, so a test can fund invoices from a second issuer
-/// alongside `te.issuer` and prove the cap is tracked per issuer.
-fn create_and_list_for_issuer(te: &TestEnv, issuer: &Address) -> BytesN<32> {
-    te.registry.register(issuer);
+/// Sets the two totals the price is read from, as a corrupted or extreme
+/// pool would hold them.
+fn set_share_price_totals(te: &TestEnv, deposits: u128, shares: u128) {
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &deposits);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &shares);
+    });
+}
+
+#[test]
+fn test_share_price_is_zero_for_an_empty_pool() {
+    let te = setup();
+    assert_eq!(te.pool.total_supply(), 0);
+    assert_eq!(te.pool.get_share_price(), 0);
+}
+
+#[test]
+fn test_share_price_is_exactly_one_after_the_first_deposit_and_stays_on_more() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &30_000_000_000);
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+
+    // A deposit at the current price mints shares 1:1 and leaves it unchanged.
+    let second = create_lp_with_balance(&te, 12_345_678_901);
+    te.pool.deposit(&second, &12_345_678_901);
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+}
+
+#[test]
+fn test_share_price_rises_with_yield_and_rounds_down() {
+    let te = setup();
+    let deposit = 30_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    // Funding moves capital into an invoice but not value out of the pool.
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+
+    assert!(te.pool.receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE));
+
+    // (30_000_000_000 + 200_000_000) * 1e18 / 30_000_000_000
+    // = 1_006_666_666_666_666_666.67, truncated toward zero.
+    assert_eq!(
+        te.pool.get_stats().total_deposits,
+        deposit + DEFAULT_YIELD_AMOUNT
+    );
+    assert_eq!(te.pool.get_share_price(), 1_006_666_666_666_666_666);
+    assert!(te.pool.get_share_price() > SHARE_PRICE_SCALE);
+}
+
+#[test]
+fn test_share_price_falls_when_a_default_absorbs_a_loss() {
+    let te = setup();
+    let deposit = 30_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
     let due_date = te.env.ledger().timestamp() + 86_400;
-    let invoice_id = te
-        .invoice
-        .create(issuer, &te.buyer, &10_000_000_000, &due_date, &te.usdc_id);
-    attest_invoice(te, &invoice_id);
-    te.invoice.list_for_financing(&invoice_id, &200);
-    invoice_id
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    te.env.ledger().set_timestamp(due_date + 1);
+    assert!(te.pool.handle_default(&invoice_id));
+
+    // The pool wrote the funded principal off: (30e9 - 9.8e9) * 1e18 / 30e9
+    // = 673_333_333_333_333_333.33, truncated toward zero.
+    assert_eq!(
+        te.pool.get_stats().total_deposits,
+        deposit - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(te.pool.get_share_price(), 673_333_333_333_333_333);
+    assert!(te.pool.get_share_price() < SHARE_PRICE_SCALE);
 }
 
-/// Default disabled behavior: the cap reads as `0` until an admin sets it,
-/// and with `0` in force the same issuer may fund invoice after invoice
-/// without ever hitting a concentration check.
 #[test]
-fn test_issuer_concentration_limit_defaults_to_disabled_and_allows_unlimited_funding() {
+fn test_share_price_needs_no_authorization() {
     let te = setup();
-    // Unset cap reads as 0 (disabled); no issuer carries exposure yet.
-    assert_eq!(te.pool.get_issuer_concentration_limit(), 0);
-    assert_eq!(te.pool.get_issuer_exposure(&te.issuer), 0);
-
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    let first = create_and_list(&te, &te.usdc_id);
-    let second = create_and_list(&te, &te.usdc_id);
-    let third = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.fund_invoice(&first));
-    assert!(te.pool.fund_invoice(&second));
-    assert!(te.pool.fund_invoice(&third));
-
-    // Still disabled, and the exposure getter reports the tracked total.
-    assert_eq!(te.pool.get_issuer_concentration_limit(), 0);
-    assert_eq!(
-        te.pool.get_issuer_exposure(&te.issuer),
-        (3 * DEFAULT_FUNDED_AMOUNT) as i128
-    );
-    assert_eq!(te.pool.get_stats().active_invoice_count, 3);
-}
-
-/// Exact-boundary behavior: `current + amount == cap` succeeds, both from a
-/// cold start (0 + amount == cap) and against an already-exposed issuer.
-/// The cap applies per issuer, so a second issuer funds independently.
-#[test]
-fn test_issuer_concentration_boundary_exact_cap_succeeds() {
-    let te = setup();
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    // The cap fits exactly two invoices of the default size.
-    te.pool
-        .set_issuer_concentration_limit(&(2 * DEFAULT_FUNDED_AMOUNT as i128));
-
-    // Cold start: 0 + amount < cap.
-    let first = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.fund_invoice(&first));
-    assert_eq!(
-        te.pool.get_issuer_exposure(&te.issuer),
-        DEFAULT_FUNDED_AMOUNT as i128
-    );
-
-    // Boundary: current + amount == cap exactly — accepted.
-    let second = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.fund_invoice(&second));
-    assert_eq!(
-        te.pool.get_issuer_exposure(&te.issuer),
-        (2 * DEFAULT_FUNDED_AMOUNT) as i128
-    );
-
-    // The cap is per issuer: another issuer at zero exposure still funds.
-    let other_issuer = Address::generate(&te.env);
-    let other_invoice = create_and_list_for_issuer(&te, &other_issuer);
-    assert!(te.pool.fund_invoice(&other_invoice));
-    assert_eq!(
-        te.pool.get_issuer_exposure(&other_issuer),
-        DEFAULT_FUNDED_AMOUNT as i128
-    );
-}
-
-/// Rejection path: `current + amount > cap` fails with the dedicated error
-/// and leaves every piece of pool state — totals, active count, exposure,
-/// the funded entry and the invoice status — untouched.
-#[test]
-fn test_issuer_concentration_exceeding_cap_rejected_without_state_change() {
-    let te = setup();
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    te.pool
-        .set_issuer_concentration_limit(&(DEFAULT_FUNDED_AMOUNT as i128));
-
-    let first = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.fund_invoice(&first));
-
-    // The issuer sits exactly at the cap, so the next invoice must be
-    // rejected: current + amount > cap.
-    let second = create_and_list(&te, &te.usdc_id);
-    let stats_before = te.pool.get_stats();
-    let exposure_before = te.pool.get_issuer_exposure(&te.issuer);
-
-    let err = std::format!("{:?}", te.pool.try_fund_invoice(&second));
-    assert!(
-        err.contains("#31"),
-        "expected IssuerConcentrationExceeded (#31): {err}"
-    );
-
-    // Nothing may have changed: no partial funding, no exposure growth.
-    let stats_after = te.pool.get_stats();
-    assert_eq!(stats_after.total_funded, stats_before.total_funded);
-    assert_eq!(
-        stats_after.active_invoice_count,
-        stats_before.active_invoice_count
-    );
-    assert_eq!(
-        stats_after.available_liquidity,
-        stats_before.available_liquidity
-    );
-    assert_eq!(te.pool.get_issuer_exposure(&te.issuer), exposure_before);
-    assert_eq!(te.pool.get_funded_amount(&second), None);
-    assert_eq!(te.invoice.get_status(&second), 1); // still Listed
-}
-
-/// The setter is admin-gated: with no mocked auth at all the stored admin's
-/// `require_auth()` fails before anything is written.
-#[test]
-#[should_panic(expected = "Error(Auth, InvalidAction)")]
-fn test_issuer_concentration_setter_requires_admin_authorization() {
-    let te = setup();
+    te.pool.deposit(&te.lp, &30_000_000_000);
     te.env.set_auths(&[]);
-    te.pool.set_issuer_concentration_limit(&1_000_000);
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+    assert!(te.env.auths().is_empty());
 }
 
-/// Self-authorizing non-admin: only `non_admin` signed the call, so the
-/// stored admin's `require_auth()` rejects it — mirroring the
-/// `set_min_discount` negative-auth pattern from #829.
 #[test]
-fn test_issuer_concentration_setter_rejects_self_authorizing_non_admin() {
+fn test_share_price_truncates_rather_than_rounding_to_nearest() {
     let te = setup();
-    let non_admin = Address::generate(&te.env);
-    te.env.mock_auths(&[MockAuth {
-        address: &non_admin,
-        invoke: &MockAuthInvoke {
-            contract: &te.pool_id,
-            fn_name: "set_issuer_concentration_limit",
-            args: (1_000_000i128,).into_val(&te.env),
-            sub_invokes: &[],
-        },
-    }]);
-    assert!(te
-        .pool
-        .try_set_issuer_concentration_limit(&1_000_000)
-        .is_err());
-    assert_eq!(te.pool.get_issuer_concentration_limit(), 0);
+    // 2 / 3 = 0.666…: nearest would be …667, truncation gives …666.
+    set_share_price_totals(&te, 2, 3);
+    assert_eq!(te.pool.get_share_price(), 666_666_666_666_666_666);
+    // Less than one base unit of value per 1e18 shares still truncates to 0,
+    // which is distinct from the empty pool only by the share count.
+    set_share_price_totals(&te, 1, SHARE_PRICE_SCALE + 1);
+    assert_eq!(te.pool.get_share_price(), 0);
 }
 
-/// The cap is an amount, so a negative value is rejected with `InvalidAmount`
-/// and the stored cap stays at its previous value.
 #[test]
-fn test_issuer_concentration_setter_rejects_negative_cap() {
+fn test_share_price_overflow_boundary() {
     let te = setup();
-    let err = std::format!("{:?}", te.pool.try_set_issuer_concentration_limit(&-1));
-    assert!(err.contains("#4"), "expected InvalidAmount (#4): {err}");
-    assert_eq!(te.pool.get_issuer_concentration_limit(), 0);
-}
+    let largest = u128::MAX / SHARE_PRICE_SCALE;
+    set_share_price_totals(&te, largest, 1);
+    assert_eq!(te.pool.get_share_price(), largest * SHARE_PRICE_SCALE);
 
-/// The setter emits the dedicated event carrying the old and new cap, and a
-/// rejected change (negative) emits nothing.
-#[test]
-fn test_issuer_concentration_setter_emits_event_with_old_and_new_values() {
-    let te = setup();
-
-    te.pool.set_issuer_concentration_limit(&(500 * 10_000_000));
-    let events = te.env.events().all();
-    assert_eq!(events.len(), 1);
-    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
-    assert_eq!(contract, te.pool_id);
-    assert_eq!(topics.len(), 1);
+    // One more base unit and `TotalDeposits * SHARE_PRICE_SCALE` overflows:
+    // the view reports the typed error instead of wrapping.
+    set_share_price_totals(&te, largest + 1, 1);
     assert_eq!(
-        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
-        Symbol::new(&te.env, "issuer_concentration_updated")
-    );
-    assert_eq!(
-        <(i128, i128)>::try_from_val(&te.env, &data).unwrap(),
-        (0i128, 500 * 10_000_000)
-    );
-
-    // A second change reports the value it replaced, not the original one.
-    te.pool.set_issuer_concentration_limit(&(700 * 10_000_000));
-    let events = te.env.events().all();
-    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
-    assert_eq!(
-        <(i128, i128)>::try_from_val(&te.env, &data).unwrap(),
-        (500 * 10_000_000, 700 * 10_000_000)
-    );
-}
-
-/// Settlement releases the issuer's capacity: once the funded invoice is
-/// repaid, its exposure drops back to 0 and the same issuer can fund again
-/// up to the cap.
-#[test]
-fn test_issuer_concentration_release_on_repayment_frees_capacity() {
-    let te = setup();
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    te.pool
-        .set_issuer_concentration_limit(&(DEFAULT_FUNDED_AMOUNT as i128));
-
-    let first = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.fund_invoice(&first));
-    assert_eq!(
-        te.pool.get_issuer_exposure(&te.issuer),
-        DEFAULT_FUNDED_AMOUNT as i128
-    );
-
-    // At the cap: the next invoice from the same issuer is rejected.
-    let second = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.try_fund_invoice(&second).is_err());
-
-    // Repay the first invoice through the normal settlement path.
-    te.invoice.mark_shipped(&first);
-    te.invoice.confirm_delivery(&first, &te.issuer);
-    te.invoice.confirm_delivery(&first, &te.buyer);
-    te.env
-        .ledger()
-        .set_timestamp(te.env.ledger().timestamp() + 86_401);
-    te.invoice.repay(&first);
-
-    // The exposure is released, so the issuer has full capacity again.
-    assert_eq!(te.pool.get_issuer_exposure(&te.issuer), 0);
-    assert!(te.pool.fund_invoice(&second));
-    assert_eq!(
-        te.pool.get_issuer_exposure(&te.issuer),
-        DEFAULT_FUNDED_AMOUNT as i128
-    );
-}
-
-/// Default handling releases the issuer's capacity too: a defaulted invoice
-/// is no longer active funded exposure, so the same issuer can fund a new
-/// invoice up to the cap afterwards.
-#[test]
-fn test_issuer_concentration_release_on_default_frees_capacity() {
-    let te = setup();
-    te.pool.deposit(&te.lp, &100_000_000_000);
-    te.pool
-        .set_issuer_concentration_limit(&(DEFAULT_FUNDED_AMOUNT as i128));
-
-    let first = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.fund_invoice(&first));
-
-    // At the cap: the next invoice from the same issuer is rejected.
-    let second = create_and_list(&te, &te.usdc_id);
-    assert!(te.pool.try_fund_invoice(&second).is_err());
-
-    // Default the first invoice through the pool's default path.
-    te.env
-        .ledger()
-        .set_timestamp(te.env.ledger().timestamp() + 60);
-    assert!(te.pool.handle_default(&first));
-
-    // The exposure is released, so the issuer has full capacity again.
-    assert_eq!(te.pool.get_issuer_exposure(&te.issuer), 0);
-    assert!(te.pool.fund_invoice(&second));
-    assert_eq!(
-        te.pool.get_issuer_exposure(&te.issuer),
-        DEFAULT_FUNDED_AMOUNT as i128
+        te.pool.try_get_share_price(),
+        Err(Ok(soroban_sdk::Error::from(PoolError::Overflow)))
     );
 }

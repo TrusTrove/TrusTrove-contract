@@ -235,6 +235,8 @@ get_issuer_concentration_limit() → i128
 get_issuer_exposure(issuer) → i128           ← active funded exposure, released on repayment/default
 get_stats() → PoolStats
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
+get_max_fundable_amount() → u128        ← available principal under liquidity and utilization caps
+get_funding_eligibility(invoice_id) → FundingEligibility  ← invoice state and funding rejection reasons
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
 transfer_shares(from, to, amount) → ()      ← non-standard legacy alias of transfer
@@ -245,6 +247,11 @@ decimals() → u32                     ← per-instance, set at initialize
 name() → String                      ← set at initialize()
 symbol() → String                    ← set at initialize()
 ```
+
+The funding preflight views are permissionless and read-only. The maximum
+fundable amount uses the same rounded basis-point cap as `fund_invoice`, while
+the eligibility result includes the invoice's computed amount, pool capacity,
+asset match, current utilization, and any applicable rejection reasons.
 
 ---
 
@@ -416,6 +423,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_lifetime_repaid_volume` | `get_lifetime_repaid_volume() -> u128` |
 | Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
 | Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
+| Pool | `get_max_fundable_amount` | `get_max_fundable_amount() -> u128` |
+| Pool | `get_funding_eligibility` | `get_funding_eligibility(invoice_id: BytesN<32>) -> FundingEligibility` |
 | Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |
 | Pool | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> Option<u128>` |
 | Pool | `set_max_utilization` | `set_max_utilization(admin: Address, new_cap_bps: u32) -> bool` |
@@ -437,7 +446,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 180 public entry points across five deployable contracts.**
+**Total: 179 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
