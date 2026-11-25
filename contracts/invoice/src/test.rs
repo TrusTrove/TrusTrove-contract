@@ -1391,7 +1391,6 @@ fn test_correct_invoice_updates_terms_indexes_and_invalidates_attestation() {
     let new_buyer_invoices = client.get_by_buyer(&other_buyer, &0, &MAX_PAGE_SIZE);
     assert_eq!(new_buyer_invoices.len(), 1);
     assert_eq!(new_buyer_invoices.get(0).unwrap().id, invoice_id);
-
 }
 
 #[test]
@@ -1399,13 +1398,7 @@ fn test_correct_invoice_same_terms_is_idempotent() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
-    assert!(client.correct_invoice(
-        &invoice_id,
-        &buyer,
-        &DEFAULT_FACE_VALUE,
-        &due_date,
-        &usdc,
-    ));
+    assert!(client.correct_invoice(&invoice_id, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc,));
     assert!(env.events().all().is_empty());
 }
 
@@ -1415,13 +1408,8 @@ fn test_correct_invoice_rejects_issuer_as_buyer() {
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
-    let result = client.try_correct_invoice(
-        &invoice_id,
-        &issuer,
-        &DEFAULT_FACE_VALUE,
-        &due_date,
-        &usdc,
-    );
+    let result =
+        client.try_correct_invoice(&invoice_id, &issuer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     assert_eq!(
         result.err().and_then(|error| error.ok()),
         Some(soroban_sdk::Error::from(InvoiceError::InvalidParticipants))
@@ -1444,7 +1432,10 @@ fn test_update_listing_terms_changes_discount_and_is_idempotent() {
         Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
         Symbol::new(&env, "invoice_listing_terms_updated")
     );
-    assert_eq!(<(u32, u32)>::try_from_val(&env, &data).unwrap(), (200, 5000));
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&env, &data).unwrap(),
+        (200, 5000)
+    );
     let updated = client.get(&invoice_id);
     assert_eq!(updated.status, InvoiceStatus::Listed);
     assert_eq!(updated.discount_bps, 5000);
@@ -1483,7 +1474,10 @@ fn test_delist_returns_invoice_to_created_and_removes_listed_membership() {
         Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
         Symbol::new(&env, "invoice_delisted")
     );
-    assert_eq!(InvoiceStatus::try_from_val(&env, &data).unwrap(), InvoiceStatus::Created);
+    assert_eq!(
+        InvoiceStatus::try_from_val(&env, &data).unwrap(),
+        InvoiceStatus::Created
+    );
     let invoice = client.get(&invoice_id);
     assert_eq!(invoice.status, InvoiceStatus::Created);
     assert_eq!(invoice.discount_bps, 0);
@@ -1536,7 +1530,9 @@ fn test_delist_rejects_invoice_that_is_not_listed() {
     let result = client.try_delist(&invoice_id, &false);
     assert_eq!(
         result.err().and_then(|error| error.ok()),
-        Some(soroban_sdk::Error::from(InvoiceError::InvalidStatusTransition))
+        Some(soroban_sdk::Error::from(
+            InvoiceError::InvalidStatusTransition
+        ))
     );
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
 }
