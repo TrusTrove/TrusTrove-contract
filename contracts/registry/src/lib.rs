@@ -31,6 +31,11 @@ const MAX_METADATA_VALUE_LEN: u32 = 512;
 /// matter how many profiles a role accumulates. Callers page through the index
 /// with `start` / `limit` instead of asking for everything at once.
 const MAX_LIST_LIMIT: u32 = 50;
+/// Maximum number of addresses a single `batch_get_roles` call may inspect.
+///
+/// Kept equal to the other batch caps so a compliance screen can fetch roles
+/// for many accounts per transaction without an unbounded storage walk.
+const MAX_ROLE_LOOKUPS: u32 = 50;
 /// Minimum delay, in seconds of ledger time, between `propose_admin` and the
 /// earliest `accept_admin` (#1124). One day gives operators time to notice a
 /// proposal made with a compromised key and cancel it (or have the guardian
