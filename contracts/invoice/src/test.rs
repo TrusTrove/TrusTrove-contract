@@ -8189,3 +8189,80 @@ fn test_created_at_range_index_view() {
         Err(Ok(InvoiceError::InvalidPageSize.into()))
     );
 }
+
+#[test]
+fn test_get_settlement_summary_projects_unsettled_and_repaid() {
+    let (env, client, issuer, buyer, _registry, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let before_funding = client.get_settlement_summary(&invoice_id);
+    assert_eq!(before_funding.status, InvoiceStatus::Listed);
+    assert_eq!(before_funding.earned_by_pool, None);
+    assert_eq!(before_funding.refund_to_buyer, None);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+
+    let funded_at = client.get(&invoice_id).funded_at.unwrap();
+    let mid = funded_at + (due_date - funded_at) / 2;
+    env.ledger().with_mut(|l| l.timestamp = mid);
+    let projected = client.get_settlement_summary(&invoice_id);
+    let expected_earned =
+        projected.discount * ((mid - funded_at) as u128) / ((due_date - funded_at) as u128);
+    assert_eq!(projected.status, InvoiceStatus::Funded);
+    assert_eq!(
+        projected.discount,
+        DEFAULT_FACE_VALUE - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(projected.earned_by_pool, Some(expected_earned));
+    assert_eq!(
+        projected.refund_to_buyer,
+        Some(projected.discount - expected_earned)
+    );
+
+    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+    client.repay(&invoice_id);
+    let settled = client.get_settlement_summary(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.earned_by_pool, projected.earned_by_pool);
+    assert_eq!(settled.refund_to_buyer, projected.refund_to_buyer);
+    assert_eq!(settled.repaid_amount, DEFAULT_FACE_VALUE);
+    assert_eq!(settled.remaining_balance, 0);
+    let _ = escrow;
+}
+
+#[test]
+fn test_get_settlement_summary_early_repayment_full_refund() {
+    let (env, client, buyer, invoice_id, _pool, _escrow) = setup_confirmed_invoice();
+    mint_tokens(
+        &env,
+        &client.get(&invoice_id).funding_asset,
+        &buyer,
+        DEFAULT_FACE_VALUE as i128,
+    );
+    client.repay_early(&invoice_id);
+    let settled = client.get_settlement_summary(&invoice_id);
+    assert_eq!(settled.status, InvoiceStatus::Repaid);
+    assert_eq!(settled.earned_by_pool, Some(0));
+    assert_eq!(
+        settled.refund_to_buyer,
+        Some(DEFAULT_FACE_VALUE - DEFAULT_FUNDED_AMOUNT)
+    );
+}
+
+#[test]
+fn test_get_settlement_summary_not_found() {
+    let (env, client, _issuer, _buyer, _registry, _usdc) = setup();
+    let missing = BytesN::from_array(&env, &[9u8; 32]);
+    let err = client
+        .try_get_settlement_summary(&missing)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, InvoiceError::NotFound.into());
+}

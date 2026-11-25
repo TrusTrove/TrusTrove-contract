@@ -923,7 +923,22 @@ Emitted when an account profile's details or metadata are updated.
 | `topic[1]` | `Address` | Profile address |
 | **Data** | `()` | None |
 
-**Emitted by:** `update_profile()` in `contracts/registry/src/lib.rs:323` and `update_metadata()` at line 363
+**Emitted by:** `update_profile()` and `update_metadata()` in `contracts/registry/src/lib.rs`
+
+---
+
+### `metadata_key_removed`
+
+Emitted when a profile owner removes one metadata key.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_removed"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `String` | Metadata key removed |
+
+**Emitted by:** `remove_metadata_key()` in `contracts/registry/src/lib.rs`
 
 ---
 
