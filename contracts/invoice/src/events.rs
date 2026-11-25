@@ -75,6 +75,22 @@ pub fn both_confirmed(env: &Env, invoice_id: &BytesN<32>) {
         .publish((Symbol::new(env, "both_confirmed"), invoice_id.clone()), ());
 }
 
+pub fn delivery_confirmation_summary(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    issuer_confirmed: bool,
+    buyer_confirmed: bool,
+    completed_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "delivery_confirmation_summary"),
+            invoice_id.clone(),
+        ),
+        (issuer_confirmed, buyer_confirmed, completed_at),
+    );
+}
+
 pub fn invoice_repaid(env: &Env, invoice_id: &BytesN<32>, amount: u128) {
     env.events().publish(
         (Symbol::new(env, "invoice_repaid"), invoice_id.clone()),

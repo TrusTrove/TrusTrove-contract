@@ -134,6 +134,13 @@ pub enum DataKey {
     AssetMetadata(Address),
     MaxInvoiceLifetime,
     CreatedAtIndexEntry(u32),
+    /// Optional SHA-256 memo hash for an invoice. Appended for storage-key
+    /// discriminant compatibility; absent for invoices created previously.
+    InvoiceMemoHash(BytesN<32>),
+    /// Ledger timestamp of the buyer's first valid delivery confirmation.
+    /// Appended for storage-key discriminant compatibility; absent for older
+    /// invoices and invoices without buyer confirmation.
+    BuyerConfirmedAt(BytesN<32>),
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).

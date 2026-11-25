@@ -107,6 +107,29 @@ Emitted when both issuer and buyer have confirmed delivery (invoice advances to 
 
 ---
 
+### `delivery_confirmation_summary`
+
+Emitted exactly once when the second participant makes a valid delivery
+confirmation and the invoice transitions from `Active` to `Confirmed`. It is
+emitted after the existing `both_confirmed` and `delivery_confirmed` events.
+It is not emitted for the first confirmation, invalid or unauthorized calls,
+or a call that does not create a new completion transition.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"delivery_confirmation_summary"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `(bool, bool, u64)` | `(issuer_confirmed, buyer_confirmed, completed_at)`; completion timestamp is Unix seconds from the ledger |
+
+Both confirmation flags are `true` in this completion event. `completed_at`
+records the delivery-completion transition; it is distinct from the buyer's
+first-confirmation timestamp when the buyer confirms first.
+
+**Emitted by:** `confirm_delivery()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `invoice_repaid`
 
 Emitted when the buyer repays the invoice.

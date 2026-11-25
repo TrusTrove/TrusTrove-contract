@@ -260,6 +260,24 @@ fn mock_pool_with_asset(env: &Env, asset: &Address) -> Address {
     pool_id
 }
 
+fn create_active_invoice(
+    env: &Env,
+    client: &InvoiceContractClient<'_>,
+    issuer: &Address,
+    buyer: &Address,
+    usdc: &Address,
+) -> BytesN<32> {
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(issuer, buyer, &DEFAULT_FACE_VALUE, &due_date, usdc);
+    attest(env, client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    let pool = mock_pool_with_asset(env, usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, usdc, &DEFAULT_FUNDED_AMOUNT);
+    client.mark_shipped(&invoice_id);
+    invoice_id
+}
+
 // --------------- Mock Agent Registry (Underwrite) ---------------
 //
 // Stands in for the agent-registry contract from the separate
@@ -3339,6 +3357,180 @@ fn test_double_confirmation_panics() {
     client.mark_shipped(&invoice_id);
     client.confirm_delivery(&invoice_id, &issuer);
     client.confirm_delivery(&invoice_id, &issuer);
+}
+
+#[test]
+fn test_create_with_memo_hash_persists_hash_and_none_is_absent() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let hash_bytes = [0x42; 32];
+    let expected_hash = BytesN::from_array(&env, &hash_bytes);
+    let mut memo_hash = soroban_sdk::Bytes::new(&env);
+    memo_hash.extend_from_array(&hash_bytes);
+
+    let invoice_with_hash = client.create_with_memo_hash(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &usdc,
+        &Some(memo_hash),
+    );
+    assert_eq!(
+        client.get_memo_hash(&invoice_with_hash),
+        Some(expected_hash)
+    );
+
+    let invoice_without_hash =
+        client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &(due_date + 1), &usdc);
+    assert_eq!(client.get_memo_hash(&invoice_without_hash), None);
+}
+
+#[test]
+fn test_create_with_memo_hash_rejects_invalid_length() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut memo_hash = soroban_sdk::Bytes::new(&env);
+    memo_hash.push_back(1);
+
+    let result = client.try_create_with_memo_hash(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &usdc,
+        &Some(memo_hash),
+    );
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        InvoiceError::InvalidMemoHash.into()
+    );
+}
+
+#[test]
+fn test_create_with_memo_hash_still_requires_issuer_authorization() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    env.set_auths(&[]);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let mut memo_hash = soroban_sdk::Bytes::new(&env);
+    memo_hash.extend_from_array(&[0x42; 32]);
+
+    let result = client.try_create_with_memo_hash(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &usdc,
+        &Some(memo_hash),
+    );
+    assert!(result.is_err());
+    assert_eq!(client.get_invoice_count_by_issuer(&issuer), 0);
+}
+
+#[test]
+fn test_buyer_confirmation_timestamp_is_persisted_once() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let invoice_id = create_active_invoice(&env, &client, &issuer, &buyer, &usdc);
+    assert_eq!(client.get_buyer_confirmed_at(&invoice_id), None);
+
+    let buyer_confirmed_at = env.ledger().timestamp() + 10;
+    env.ledger().set_timestamp(buyer_confirmed_at);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(
+        client.get_buyer_confirmed_at(&invoice_id),
+        Some(buyer_confirmed_at)
+    );
+
+    env.ledger().set_timestamp(buyer_confirmed_at + 10);
+    let repeated = client.try_confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(
+        repeated.unwrap_err().unwrap(),
+        InvoiceError::AlreadyConfirmed.into()
+    );
+    assert_eq!(
+        client.get_buyer_confirmed_at(&invoice_id),
+        Some(buyer_confirmed_at)
+    );
+
+    let completion_time = buyer_confirmed_at + 20;
+    env.ledger().set_timestamp(completion_time);
+    client.confirm_delivery(&invoice_id, &issuer);
+    assert_eq!(
+        client.get_buyer_confirmed_at(&invoice_id),
+        Some(buyer_confirmed_at)
+    );
+}
+
+#[test]
+fn test_invalid_delivery_state_does_not_store_buyer_confirmation_timestamp() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let result = client.try_confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        InvoiceError::InvalidStatusTransition.into()
+    );
+    assert_eq!(client.get_buyer_confirmed_at(&invoice_id), None);
+}
+
+#[test]
+fn test_delivery_confirmation_summary_only_emits_on_completion() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let invoice_id = create_active_invoice(&env, &client, &issuer, &buyer, &usdc);
+
+    let stranger = Address::generate(&env);
+    let unauthorized = client.try_confirm_delivery(&invoice_id, &stranger);
+    assert_eq!(
+        unauthorized.unwrap_err().unwrap(),
+        InvoiceError::NotAuthorized.into()
+    );
+    assert!(!env.events().all().iter().any(|event| {
+        let (_, topics, _) = event;
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap()
+            == Symbol::new(&env, "delivery_confirmation_summary")
+    }));
+
+    client.confirm_delivery(&invoice_id, &issuer);
+    let first_confirmation_events = env.events().all();
+    assert!(!first_confirmation_events.iter().any(|event| {
+        let (_, topics, _) = event;
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap()
+            == Symbol::new(&env, "delivery_confirmation_summary")
+    }));
+
+    let completed_at = env.ledger().timestamp() + 25;
+    env.ledger().set_timestamp(completed_at);
+    client.confirm_delivery(&invoice_id, &buyer);
+    let completion_events = env.events().all();
+    let expected_topics = (
+        Symbol::new(&env, "delivery_confirmation_summary"),
+        invoice_id.clone(),
+    )
+        .into_val(&env);
+    let mut summary_count = 0;
+    for (event_contract, topics, data) in completion_events.iter() {
+        if event_contract == client.address && topics == expected_topics {
+            summary_count += 1;
+            let summary: (bool, bool, u64) =
+                <(bool, bool, u64)>::try_from_val(&env, &data).unwrap();
+            assert_eq!(summary, (true, true, completed_at));
+        }
+    }
+    assert_eq!(summary_count, 1);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+
+    let repeated = client.try_confirm_delivery(&invoice_id, &issuer);
+    assert_eq!(
+        repeated.unwrap_err().unwrap(),
+        InvoiceError::InvalidStatusTransition.into()
+    );
+    assert!(!env.events().all().iter().any(|event| {
+        let (_, topics, _) = event;
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap()
+            == Symbol::new(&env, "delivery_confirmation_summary")
+    }));
 }
 
 #[test]

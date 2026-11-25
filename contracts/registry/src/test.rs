@@ -4451,6 +4451,67 @@ fn test_get_metadata_key_count_tracks_operations() {
 }
 
 #[test]
+fn test_get_metadata_key_batch_preserves_order_and_missing_values() {
+    let (env, _admin, client) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    let unknown = Address::generate(&env);
+    let metadata_key = String::from_str(&env, "name");
+    let first_metadata = map![
+        &env,
+        (metadata_key.clone(), String::from_str(&env, "First"))
+    ];
+    let second_metadata = map![
+        &env,
+        (
+            String::from_str(&env, "site"),
+            String::from_str(&env, "example")
+        )
+    ];
+    client.register_issuer(&first, &first_metadata);
+    client.register_buyer(&second, &second_metadata);
+
+    let addresses = vec![&env, first, second, unknown];
+    let values = client.get_metadata_key_batch(&addresses, &metadata_key);
+    assert_eq!(
+        values,
+        vec![&env, Some(String::from_str(&env, "First")), None, None]
+    );
+}
+
+#[test]
+fn test_get_metadata_key_batch_empty_and_maximum_size() {
+    let (env, _admin, client) = setup();
+    let empty = Vec::new(&env);
+    assert!(client
+        .get_metadata_key_batch(&empty, &String::from_str(&env, "name"))
+        .is_empty());
+
+    let mut addresses = Vec::new(&env);
+    for _ in 0..crate::MAX_METADATA_LOOKUP_BATCH_SIZE {
+        addresses.push_back(Address::generate(&env));
+    }
+    let values = client.get_metadata_key_batch(&addresses, &String::from_str(&env, "name"));
+    assert_eq!(values.len(), crate::MAX_METADATA_LOOKUP_BATCH_SIZE);
+    assert!(values.iter().all(|value| value.is_none()));
+}
+
+#[test]
+fn test_get_metadata_key_batch_rejects_oversized_batch() {
+    let (env, _admin, client) = setup();
+    let mut addresses = Vec::new(&env);
+    for _ in 0..=crate::MAX_METADATA_LOOKUP_BATCH_SIZE {
+        addresses.push_back(Address::generate(&env));
+    }
+
+    let result = client.try_get_metadata_key_batch(&addresses, &String::from_str(&env, "name"));
+    assert_eq!(
+        result.unwrap_err().unwrap(),
+        RegistryError::BatchSizeExceeded.into()
+    );
+}
+
+#[test]
 fn test_get_metadata_key_count_not_found_panics() {
     let (env, _admin, client) = setup();
     let unknown = Address::generate(&env);
