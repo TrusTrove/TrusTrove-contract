@@ -1217,9 +1217,10 @@ impl EscrowContract {
     /// * `lock`, `release_to_issuer`: the configured pool contract.
     /// * `release_to_pool`: the invoice contract the pool's
     ///   `get_invoice_contract` view reports, which must also equal the
-    ///   reference pinned with [`Self::set_invoice_contract`] when one is set
-    ///   (#820, #997). If the pool cannot answer, or the pin disagrees with it,
-    ///   no address may call it and the flag is `false`.
+    ///   reference pinned with [`Self::set_invoice_contract`] when one is set,
+    ///   exactly as `release_to_pool` resolves it. If the pool cannot answer,
+    ///   or the pin disagrees with it, no address may call it and the flag is
+    ///   `false`.
     /// * `handle_default`: the stored admin or the configured pool contract.
     /// * `release_after_timeout`: anyone.
     ///
