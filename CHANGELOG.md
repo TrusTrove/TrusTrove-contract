@@ -7,6 +7,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `pool`: `get_share_price` now documents its rounding. The 1e18 fixed-point
+  price is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` truncated toward
+  zero, so it is deterministic and never overstates a share. Tests pin the
+  value for an empty pool (`0`), after the first deposit (exactly 1.0), after
+  yield (`1_006_666_666_666_666_666` for 30.2e9 over 30e9) and after a default
+  (`673_333_333_333_333_333`), the truncation against round-to-nearest, that
+  the view needs no authorization, and the `Overflow` boundary (#1166)
+- `invoice`: `list_for_financing` and `batch_list_for_financing` now require
+  `discount_bps` in `1..=5000`. A zero discount is rejected with
+  `InvoiceError::InvalidDiscount` (the batch path reports it as a failed
+  entry), and values above 5000 keep failing with `DiscountTooHigh`. Adds a
+  proptest over the rejected range (`0` and `5001..=u32::MAX`) that checks the
+  exact error and that the invoice and `get_counts()` are unchanged, plus
+  pinned boundary cases for 1, 5000 and 5001 (#849)
+
 ### Fixed
 
 - `invoice`: cap repayment yield at the full discount at maturity, including
@@ -15,6 +32,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `escrow`: `get_release_authorization(caller)` view, returning a
+  `ReleaseAuthorization` that reports which escrow write entry points
+  (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
+  `release_after_timeout`) the address may call under the current
+  configuration, including the pinned invoice reference and the pause state.
+  Read-only, needs no auth, and never replaces the write paths' own
+  `require_auth` checks (#1198)
 - `invoice`: `get_issuer_invoice_ids(address, page, page_size)` view returning
   a bounded page of one issuer's invoice IDs in creation order without loading
   any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
@@ -27,6 +51,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pool`: `get_lifetime_deposited_volume()` view backed by a cumulative counter
   incremented by every successful `deposit`. Withdrawals never reduce it, and
   older instances read `0` until their first deposit (#1172)
+- `invoice`: `get_invoice_ids_by_status(status, cursor, page_size)` view and
+  `InvoiceIdPage { ids, next }` type for indexers. It returns up to
+  `page_size` (`1..=MAX_PAGE_SIZE`, else `InvalidPageSize`) invoice IDs for
+  one status without decoding invoices, plus a `next` cursor that is `None`
+  when the walk is complete. It walks the status index backwards, so
+  invoices that stay in the status are never skipped while others change
+  status, though one may be returned twice. `get_by_status` and the storage
+  layout are unchanged (#1152)
 - `pool`: `get_lifetime_withdrawn_volume()` view backed by a cumulative counter
   incremented only by successful LP `withdraw` amounts. Failed calls and
   internal funding transfers leave it unchanged (#1173)

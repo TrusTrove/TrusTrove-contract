@@ -58,6 +58,11 @@ contracts. Deployed addresses are saved to `.deployed-addresses`.
 | `--only <contract>` | Redeploy a single contract (hotfix mode) |
 | `--help` | Show usage |
 
+Run `bash scripts/deploy.sh --dry-run` or `pwsh -File scripts/deploy.ps1 -DryRun`
+to inspect the planned deployment and wiring. Preview needs no Stellar CLI.
+It leaves `.deployed-addresses`, `.env.deployed`, and `deployments.json` intact.
+With fresh mode, it plans against an empty address list without clearing it.
+
 #### Single-Contract Hotfix Redeploys
 
 To hotfix a single contract without rerunning the full pipeline, pass
@@ -203,6 +208,30 @@ This checks each contract responds to a read-only query
 invoice contract's post-deploy wiring is in place
 (`get_escrow_contract`, `get_agent_registry_contract`,
 `is_supported_asset`).
+
+### Release Checklist, Bindings, and ABI Verification
+
+Before announcing a release or rotating testnet/mainnet addresses, run the
+read-only tooling checks documented in [docs/TOOLING.md](./docs/TOOLING.md):
+
+1. **Verify TypeScript client bindings match compiled WASM specs (`#1205`):**
+   ```bash
+   python3 scripts/generate_ts_bindings.py --check
+   ```
+2. **Run ABI compatibility check against deployed testnet contracts (`#1206`):**
+   ```bash
+   python3 scripts/check_abi_compat.py --network testnet --mode rpc
+   ```
+3. **Validate release manifest, WASM SHA-256 hashes, target network, and contract references (`#1212`):**
+   ```bash
+   python3 scripts/verify_release.py \
+     --manifest release-manifest.json \
+     --network testnet \
+     --env-file .env \
+     --env-deployed .env.deployed \
+     --deployments-json deployments.json \
+     --check-onchain
+   ```
 
 ### Contract Address Lifecycle & Rotation Policy
 

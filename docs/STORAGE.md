@@ -59,6 +59,11 @@ All contracts follow a consistent TTL extension pattern:
 | DataKey | Type | Description | Set During |
 |---------|------|-------------|------------|
 | `Admin` | `Address` | Contract admin address | `initialize()` |
+| `Verifier` | `Address` | Optional verifier role | `set_verifier()` |
+| `Guardian` | `Address` | Optional emergency guardian (#1125) | `set_guardian()` |
+| `AdminFrozen` | `bool` | `true` while the guardian has frozen admin-only writes | `freeze_admin()` / `unfreeze_admin()` |
+| `PendingAdmin` | `PendingAdminTransfer { new_admin: Address, activates_at: u64 }` | Pending delayed admin transfer (#1124); removed on accept, cancel or any immediate transfer | `propose_admin()` |
+| `MetadataKeyPolicy` | `MetadataKeyPolicy` | Active metadata key policy (#1120); absent = `Unrestricted` | `set_metadata_key_policy()` |
 
 ### Persistent Storage
 
@@ -67,6 +72,18 @@ All contracts follow a consistent TTL extension pattern:
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
+
+#### Profile Update Sequence Number (#1128)
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `ProfileVersion(Address)` | `u64` | Per-profile update counter, read with `get_profile_version(address)` |
+
+- Stored beside `Profile(Address)`, not inside it, so existing `Profile`
+  entries decode unchanged after the upgrade.
+- Set to `1` on registration and incremented only when a write changes the
+  stored profile. Profiles registered before #1128 have no entry and report
+  `0` until their first change.
 
 #### Profile Enumeration Index
 
@@ -209,8 +226,9 @@ let status = if !profile_exists {
 
 ### Storage Key Count
 
-**Approximately 2 keys per registered address** — one `Profile` record and one
-`ProfileIndex(role, n)` slot — **plus 2 constant `ProfileCount(role)` keys**
+**Approximately 3 keys per registered address** — one `Profile` record, one
+`ProfileIndex(role, n)` slot and one `ProfileVersion(address)` counter —
+**plus 2 constant `ProfileCount(role)` keys**
 (one per role) that exist once the first profile of that role is registered.
 
 ---
@@ -299,8 +317,8 @@ Cancelled = 8   // issuer cancelled before listing
 | `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`, `get_issuer_invoice_ids`) |
 | `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
 | `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
-| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
-| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
+| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
+| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
 | `StatusCount(u32)` | `u64` | Count of invoices in each status | On write (`increment_status_count` / `decrement_status_count`, issue #830) |
 
 #### Indexing Notes
@@ -309,6 +327,13 @@ Cancelled = 8   // issuer cancelled before listing
   maintain a count key and an ordered list of entries.
 - Index entries are appended — no compaction on status transitions (entries
   are added to the new status but not removed from the old).
+- `get_invoice_ids_by_status()` walks one status index backwards from its
+  end, `page_size` rows per call (`1..=MAX_PAGE_SIZE`), returning IDs plus a
+  `next` cursor. It checks each row against its `StatusMembership` marker
+  instead of decoding the `Invoice`, falling back to the invoice record only
+  for rows without a matching marker (pre-#831 data). The backward walk
+  keeps it from skipping invoices when `remove_from_status_index` swaps the
+  last row into a removed slot between calls (#1152).
 - `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
   (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
   `page_size` index entries, so cost is bounded regardless of index size.
