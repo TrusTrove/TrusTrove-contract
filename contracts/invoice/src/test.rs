@@ -1343,7 +1343,7 @@ fn test_correct_invoice_updates_terms_indexes_and_invalidates_attestation() {
     let (env, client, issuer, buyer, registry, usdc) = setup();
     let other_buyer = Address::generate(&env);
     registry.register(&other_buyer);
-    let other_asset = env.register_contract(None, MockToken);
+    let other_asset = env.register(MockToken, ());
     client.add_supported_asset(&other_asset);
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let purchase_order_hash = BytesN::from_array(&env, &[7u8; 32]);
