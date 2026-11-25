@@ -94,9 +94,6 @@ pub enum DataKey {
     /// transfer admin/ownership, pause, revoke, reinstate or change itself.
     Verifier,
     Profile(Address),
-    /// Schema version for a profile. Missing entries on existing profiles
-    /// are interpreted as version 1 to preserve their original encoding.
-    ProfileSchemaVersion(Address),
     /// The `index`-th registered address for `role`, in registration order.
     ///
     /// Written once per successful registration by every registration path
@@ -116,4 +113,10 @@ pub enum DataKey {
     /// Ledger timestamp when the address most recently became verified. Cleared
     /// on revocation and set again on reinstatement or verification.
     VerifiedSince(Address),
+    /// Schema version for a profile. Missing entries on existing profiles
+    /// are interpreted as version 1 to preserve their original encoding.
+    ///
+    /// Keep this variant last so the serialized discriminants of existing
+    /// storage keys remain unchanged.
+    ProfileSchemaVersion(Address),
 }
