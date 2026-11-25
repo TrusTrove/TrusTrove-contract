@@ -5,7 +5,7 @@ extern crate std;
 use crate::{
     DataKey, Profile, RegistryContract, RegistryContractClient, RegistryError, Role,
     VerificationStatus, MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN,
-    PROFILE_SCHEMA_VERSION, TTL_EXTEND_TO, TTL_THRESHOLD,
+    MAX_STATUS_BATCH_SIZE, PROFILE_SCHEMA_VERSION, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -2293,6 +2293,74 @@ fn test_get_verification_status_unregistered() {
         client.get_verification_status(&unknown),
         VerificationStatus::Unregistered
     );
+}
+
+#[test]
+fn test_get_verification_status_batch_preserves_order_and_reports_missing() {
+    let (env, admin, client) = setup();
+    let verified = Address::generate(&env);
+    let pending = Address::generate(&env);
+    let revoked = Address::generate(&env);
+    let unregistered = Address::generate(&env);
+
+    client.register_issuer(&pending, &map![&env]);
+    client.register_issuer(&verified, &map![&env]);
+    client.verify_profile(&admin, &verified, &true);
+    client.register_buyer(&revoked, &map![&env]);
+    client.verify_profile(&admin, &revoked, &true);
+    client.revoke(&revoked);
+
+    let addresses = vec![
+        &env,
+        unregistered.clone(),
+        revoked,
+        pending,
+        verified,
+        unregistered,
+    ];
+    assert_eq!(
+        client.get_verification_status_batch(&addresses),
+        vec![
+            &env,
+            VerificationStatus::Unregistered,
+            VerificationStatus::Revoked,
+            VerificationStatus::Pending,
+            VerificationStatus::Verified,
+            VerificationStatus::Unregistered,
+        ]
+    );
+}
+
+#[test]
+fn test_get_verification_status_batch_accepts_empty_and_maximum_batch() {
+    let (env, _admin, client) = setup();
+    assert_eq!(
+        client.get_verification_status_batch(&Vec::new(&env)),
+        Vec::<VerificationStatus>::new(&env)
+    );
+
+    let unknown = Address::generate(&env);
+    let mut addresses = Vec::new(&env);
+    for _ in 0..MAX_STATUS_BATCH_SIZE {
+        addresses.push_back(unknown.clone());
+    }
+    let statuses = client.get_verification_status_batch(&addresses);
+    assert_eq!(statuses.len(), MAX_STATUS_BATCH_SIZE);
+    assert_eq!(statuses.first(), Some(VerificationStatus::Unregistered));
+    assert_eq!(statuses.last(), Some(VerificationStatus::Unregistered));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_get_verification_status_batch_rejects_oversized_input() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let mut addresses = Vec::new(&env);
+    for _ in 0..=MAX_STATUS_BATCH_SIZE {
+        addresses.push_back(unknown.clone());
+    }
+
+    client.get_verification_status_batch(&addresses);
 }
 
 #[test]

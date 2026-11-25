@@ -21,6 +21,9 @@ const MAX_METADATA_SIZE: u32 = 20;
 const MAX_METADATA_KEY_LEN: u32 = 64;
 /// Maximum length of a single metadata value.
 const MAX_METADATA_VALUE_LEN: u32 = 512;
+/// Maximum number of addresses a single `get_verification_status_batch` call
+/// may inspect.
+const MAX_STATUS_BATCH_SIZE: u32 = 50;
 /// Maximum number of addresses a single `list_profiles` call may return.
 ///
 /// Mirrors the 50-entry cap enforced on `batch_register_issuers` /
@@ -626,20 +629,43 @@ impl RegistryContract {
     }
 
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
-        let key = DataKey::Profile(address.clone());
-        match env.storage().persistent().get::<_, Profile>(&key) {
-            None => VerificationStatus::Unregistered,
-            Some(profile) => {
-                Self::extend_profile_ttl(&env, &address);
-                if profile.verified() {
-                    VerificationStatus::Verified
-                } else if profile.revoked() {
-                    VerificationStatus::Revoked
-                } else {
-                    VerificationStatus::Pending
-                }
-            }
+        Self::verification_status(&env, &address)
+    }
+
+    /// Returns verification statuses for the supplied addresses in input order.
+    ///
+    /// Each result has the same semantics as
+    /// [`get_verification_status`](Self::get_verification_status), including
+    /// `Unregistered` for addresses without a stored profile. Missing profiles
+    /// do not fail the batch, and repeated addresses produce repeated results.
+    /// At most 50 addresses may be supplied per call.
+    ///
+    /// # Auth
+    /// No authorization is required — this is a read-only view.
+    ///
+    /// # Panics
+    /// * `RegistryError::BatchSizeExceeded` if `addresses.len() > 50`.
+    ///
+    /// # Returns
+    /// * `Vec<VerificationStatus>` - One status per input address, preserving
+    ///   the input order.
+    ///
+    /// # Cost
+    /// Bounded by the number of supplied addresses, with at most one profile
+    /// storage read per address.
+    pub fn get_verification_status_batch(
+        env: Env,
+        addresses: Vec<Address>,
+    ) -> Vec<VerificationStatus> {
+        if addresses.len() > MAX_STATUS_BATCH_SIZE {
+            panic_with_error!(&env, RegistryError::BatchSizeExceeded);
         }
+
+        let mut statuses = Vec::new(&env);
+        for address in addresses.iter() {
+            statuses.push_back(Self::verification_status(&env, &address));
+        }
+        statuses
     }
 
     /// Returns the decoded [`Role`] of a registered address, if any.
@@ -1231,6 +1257,23 @@ impl RegistryContract {
 }
 
 impl RegistryContract {
+    fn verification_status(env: &Env, address: &Address) -> VerificationStatus {
+        let key = DataKey::Profile(address.clone());
+        match env.storage().persistent().get::<_, Profile>(&key) {
+            None => VerificationStatus::Unregistered,
+            Some(profile) => {
+                Self::extend_profile_ttl(env, address);
+                if profile.verified() {
+                    VerificationStatus::Verified
+                } else if profile.revoked() {
+                    VerificationStatus::Revoked
+                } else {
+                    VerificationStatus::Pending
+                }
+            }
+        }
+    }
+
     fn require_admin(env: &Env) -> Address {
         env.storage()
             .instance()

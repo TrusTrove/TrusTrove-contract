@@ -214,8 +214,12 @@ let status = if !profile_exists {
   `NotFound` if absent. `get_profile_schema_version(address)` reports its
   schema version and likewise panics with `NotFound` for unknown addresses;
   profiles predating the marker return v1.
-- `get_verification_status(address)` returns a three-valued enum
-  (`Unregistered`, `Verified`, `Revoked`).
+- `get_verification_status(address)` returns one of `Unregistered`, `Pending`,
+  `Verified` or `Revoked`.
+- `get_verification_status_batch(addresses)` returns one status per supplied
+  address in input order, including `Unregistered` for missing profiles. The
+  view is capped at 50 addresses and reads the existing `Profile` entries; it
+  introduces no storage keys or changes to profile decoding.
 
 ### Storage Key Count
 

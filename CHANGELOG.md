@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `registry`: `get_verification_status_batch(addresses)` read-only view,
+  returning one status per address in input order and reporting missing
+  profiles as `Unregistered`. The batch is capped at 50 addresses and rejects
+  larger inputs with `RegistryError::BatchSizeExceeded` (#1122)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,

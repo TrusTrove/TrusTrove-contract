@@ -81,6 +81,7 @@ get_profile(address) → Profile
 get_profile_schema_version(address) → u32              ← defaults legacy profiles to v1
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
+get_verification_status_batch(addresses) → Vec<VerificationStatus> ← ordered results, max 50
 revoke(address) → bool
 ```
 
@@ -94,6 +95,11 @@ then page through `list_profiles(role, start, limit)` with `limit ≤ 50`
 are never indexed twice, pages are contiguous and non-overlapping, and revoked
 profiles remain enumerated (revocation flips verification, it does not
 deregister the profile).
+
+Dashboards can request statuses for up to 50 addresses in one
+`get_verification_status_batch(addresses)` call. Results have one-to-one
+correspondence with the input order, and missing profiles are reported as
+`Unregistered` without aborting the batch (`BatchSizeExceeded` above the cap).
 
 **Revocation is prospective, not retroactive.** `is_verified()` is re-checked
 at every point where new business gets committed — `invoice.create()`,
@@ -276,6 +282,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `is_verified` | `is_verified(address: Address) -> bool` |
 | Registry | `get_verified_since` | `get_verified_since(address: Address) -> Option<u64>` |
 | Registry | `get_verification_status` | `get_verification_status(address: Address) -> VerificationStatus` |
+| Registry | `get_verification_status_batch` | `get_verification_status_batch(addresses: Vec<Address>) -> Vec<VerificationStatus>` |
 | Registry | `get_role` | `get_role(address: Address) -> Option<Role>` |
 | Registry | `get_profile_count` | `get_profile_count(role: Role) -> u32` |
 | Registry | `list_profiles` | `list_profiles(role: Role, start: u32, limit: u32) -> Vec<Address>` |
