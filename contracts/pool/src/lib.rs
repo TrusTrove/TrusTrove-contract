@@ -2174,6 +2174,22 @@ impl PoolContract {
     /// share; a price of `1_050_000_000_000_000_000` means 1.05. An empty
     /// pool with no shares reports `0`, since no price can be formed yet.
     ///
+    /// # Rounding
+    /// Deterministic: `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` in
+    /// integer arithmetic, truncated toward zero. The price is never rounded
+    /// up, so it never overstates what a share is worth, and every client
+    /// that reads this view gets the same number instead of reimplementing
+    /// the division with its own rounding (issue #1166). For example, a pool
+    /// holding `30_200_000_000` against `30_000_000_000` shares reports
+    /// `1_006_666_666_666_666_666`, not `…667`.
+    ///
+    /// | Pool state | Price |
+    /// | --- | --- |
+    /// | Empty (no shares) | `0` |
+    /// | After the first deposit | exactly `SHARE_PRICE_SCALE` (1.0) |
+    /// | After yield is repaid | above `SHARE_PRICE_SCALE` |
+    /// | After a default absorbs a loss | below `SHARE_PRICE_SCALE` |
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     ///
