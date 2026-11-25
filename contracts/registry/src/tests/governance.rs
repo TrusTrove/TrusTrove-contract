@@ -605,3 +605,13 @@ fn switching_policy_keeps_existing_metadata_readable() {
     client.set_metadata_key_policy(&MetadataKeyPolicy::Unrestricted);
     client.update_profile(&issuer, &meta(&env, "another_key", "y"));
 }
+
+#[test]
+fn removing_a_metadata_key_bumps_version() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &meta(&env, "name", "Acme"));
+    client.remove_metadata_key(&issuer, &String::from_str(&env, "name"));
+    assert_eq!(last_version_event(&env), Some(2));
+    assert_eq!(client.get_profile_version(&issuer), 2);
+}

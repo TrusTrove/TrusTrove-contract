@@ -550,6 +550,7 @@ impl RegistryContract {
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         events::metadata_key_removed(&env, &address, &metadata_key);
+        Self::bump_profile_version(&env, &address);
         Self::extend_instance_ttl(&env);
         true
     }
@@ -1071,6 +1072,7 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        let flags_before = profile.packed_flags;
         let verified_since_key = DataKey::VerifiedSince(address.clone());
         profile.set_verified(verify);
         if verify {
