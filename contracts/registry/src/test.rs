@@ -4312,3 +4312,151 @@ fn test_revoke_pending_verified_and_revoked_transitions() {
     );
     assert_eq!(revoked_events, 2);
 }
+
+#[test]
+fn test_verified_since_set_on_verify_and_clear_on_revoke() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    assert!(client.verify_profile(&admin, &issuer, &true));
+    assert_eq!(client.get_verified_since(&issuer), Some(1_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 2_000);
+    assert!(client.revoke(&issuer));
+    assert_eq!(client.get_verified_since(&issuer), None);
+}
+
+#[test]
+fn test_verified_since_reset_on_reinstate() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    client.verify_profile(&admin, &issuer, &true);
+    env.ledger().with_mut(|l| l.timestamp = 2_000);
+    client.revoke(&issuer);
+    env.ledger().with_mut(|l| l.timestamp = 3_000);
+    assert!(client.reinstate(&issuer));
+
+    assert_eq!(client.get_verified_since(&issuer), Some(3_000));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+}
+
+#[test]
+fn test_verified_since_not_found_panics() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let err = client
+        .try_get_verified_since(&unknown)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+}
+
+#[test]
+fn test_remove_metadata_key_success() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let metadata = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme")
+        ),
+        (
+            String::from_str(&env, "site"),
+            String::from_str(&env, "example.com")
+        )
+    ];
+    client.register_issuer(&issuer, &metadata);
+
+    assert!(client.remove_metadata_key(&issuer, &String::from_str(&env, "site")));
+    let events = env.events().all();
+    let profile = client.get_profile(&issuer);
+    assert_eq!(profile.metadata.len(), 1);
+    assert!(!profile
+        .metadata
+        .contains_key(String::from_str(&env, "site")));
+    assert!(profile
+        .metadata
+        .contains_key(String::from_str(&env, "name")));
+
+    let mut found = false;
+    for e in events.iter() {
+        let topics: soroban_sdk::Vec<soroban_sdk::Val> = e.1.clone();
+        if topics.len() != 2 {
+            continue;
+        }
+        let name: Result<Symbol, _> = Symbol::try_from_val(&env, &topics.get(0).unwrap());
+        let addr: Result<Address, _> = Address::try_from_val(&env, &topics.get(1).unwrap());
+        let data: Result<String, _> = String::try_from_val(&env, &e.2);
+        if name.ok() == Some(Symbol::new(&env, "metadata_key_removed"))
+            && addr.ok() == Some(issuer.clone())
+            && data.ok() == Some(String::from_str(&env, "site"))
+        {
+            found = true;
+            break;
+        }
+    }
+    assert!(found);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_remove_metadata_key_missing_key_panics() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.remove_metadata_key(&issuer, &String::from_str(&env, "missing"));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_remove_metadata_key_unregistered_panics() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    client.remove_metadata_key(&unknown, &String::from_str(&env, "k"));
+}
+
+#[test]
+fn test_get_metadata_key_count_tracks_operations() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert_eq!(client.get_metadata_key_count(&issuer), 0);
+
+    let m1 = map![
+        &env,
+        (String::from_str(&env, "a"), String::from_str(&env, "1"))
+    ];
+    client.update_metadata(&issuer, &m1);
+    assert_eq!(client.get_metadata_key_count(&issuer), 1);
+
+    let m2 = map![
+        &env,
+        (String::from_str(&env, "a"), String::from_str(&env, "1")),
+        (String::from_str(&env, "b"), String::from_str(&env, "2"))
+    ];
+    client.update_metadata(&issuer, &m2);
+    assert_eq!(client.get_metadata_key_count(&issuer), 2);
+
+    client.remove_metadata_key(&issuer, &String::from_str(&env, "a"));
+    assert_eq!(client.get_metadata_key_count(&issuer), 1);
+}
+
+#[test]
+fn test_get_metadata_key_count_not_found_panics() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let err = client
+        .try_get_metadata_key_count(&unknown)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+}
