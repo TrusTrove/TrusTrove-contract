@@ -11,7 +11,7 @@ fi
 echo "Verifying deployment manifest checksums and metadata against $MANIFEST_PATH ..."
 
 # Use python to parse json safely and recompute/check hashes
-python3 - "$MANIFEST_PATH" <<'EOF'
+python3 - <<'EOF' "$MANIFEST_PATH"
 import json, hashlib, os, sys
 
 manifest_path = sys.argv[1] if len(sys.argv) > 1 else "deployment-manifest.json"
