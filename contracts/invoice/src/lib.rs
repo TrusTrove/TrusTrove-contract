@@ -1157,6 +1157,7 @@ impl InvoiceContract {
     ///   has since been revoked.
     /// * `InvoiceError::BuyerNotVerified` if the buyer's registry verification
     ///   has since been revoked.
+    /// * `InvoiceError::InvalidDiscount` if `discount_bps` is 0.
     /// * `InvoiceError::DiscountTooHigh` if `discount_bps` is greater than 5000.
     ///
     /// # Returns
@@ -1207,6 +1208,9 @@ impl InvoiceContract {
             &invoice.buyer,
             InvoiceError::BuyerNotVerified,
         );
+        if discount_bps == 0 {
+            panic_with_error!(&env, InvoiceError::InvalidDiscount);
+        }
         if discount_bps > 5000 {
             panic_with_error!(&env, InvoiceError::DiscountTooHigh);
         }
@@ -1245,7 +1249,8 @@ impl InvoiceContract {
     ///
     /// Tolerant behavior is right here because the interesting failures are
     /// per-invoice state an issuer listing a backlog cannot avoid (already
-    /// listed, revoked verification, missing attestation). Reverting the whole
+    /// listed, revoked verification, missing attestation, a discount outside
+    /// `1..=5000`). Reverting the whole
     /// batch would force the caller to bisect by trial and error, and would also
     /// discard the successful listings that already emitted events.
     ///
@@ -1353,7 +1358,8 @@ impl InvoiceContract {
         {
             return false;
         }
-        if discount_bps > 5000 {
+        // Same range as `list_for_financing`: 1..=5000 bps.
+        if discount_bps == 0 || discount_bps > 5000 {
             return false;
         }
         invoice.status = InvoiceStatus::Listed;
