@@ -134,13 +134,20 @@ pub enum DataKey {
     AssetMetadata(Address),
     MaxInvoiceLifetime,
     CreatedAtIndexEntry(u32),
+    // Ledger timestamp at which the issuer's delivery confirmation was
+    // recorded (issue #1160). Written at most once per party by
+    // `confirm_delivery` and read by `get_lifecycle_timestamps`. Kept as a
+    // separate entry rather than an `Invoice` field so the existing `Invoice`
+    // encoding — and every already-deployed record — stays byte-for-byte
+    // unchanged. Appended after every existing variant so already-deployed
+    // key discriminants stay stable.
+    IssuerConfirmedAt(BytesN<32>),
+    // Ledger timestamp at which the buyer's delivery confirmation was
+    // recorded (issue #1160). Mirrors `IssuerConfirmedAt`.
+    BuyerConfirmedAt(BytesN<32>),
     /// Optional SHA-256 memo hash for an invoice. Appended for storage-key
     /// discriminant compatibility; absent for invoices created previously.
     InvoiceMemoHash(BytesN<32>),
-    /// Ledger timestamp of the buyer's first valid delivery confirmation.
-    /// Appended for storage-key discriminant compatibility; absent for older
-    /// invoices and invoices without buyer confirmation.
-    BuyerConfirmedAt(BytesN<32>),
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).
@@ -279,6 +286,84 @@ pub struct InvoiceIdPage {
     /// complete. An exactly full last page also returns `None`, so no extra
     /// empty request is needed.
     pub next: Option<u32>,
+}
+
+/// Age of an invoice's attestation, returned by
+/// [`InvoiceContract::get_attestation_age`](crate::InvoiceContract::get_attestation_age)
+/// (issue #1158).
+///
+/// Lets funding and risk clients judge how stale an underwriting assessment
+/// is without loading and decoding the whole [`Attestation`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttestationAge {
+    /// Ledger timestamp (seconds) at which the attestation was submitted,
+    /// copied verbatim from [`Attestation::submitted_at`].
+    pub submitted_at: u64,
+    /// Ledger time elapsed since submission: `now - submitted_at` at the
+    /// moment of the read, saturating at `0` if the ledger timestamp ever
+    /// reported an earlier time than the stored submission timestamp.
+    pub age_seconds: u64,
+}
+
+/// Every lifecycle timestamp recorded for an invoice, returned by
+/// [`InvoiceContract::get_lifecycle_timestamps`](crate::InvoiceContract::get_lifecycle_timestamps)
+/// (issue #1160).
+///
+/// Each field is `None` when the contract has not recorded that transition;
+/// see the method documentation for the per-field meaning of absence.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LifecycleTimestamps {
+    /// When the invoice was created. `Some` for every stored invoice;
+    /// optional so clients can treat all seven fields uniformly.
+    pub created_at: Option<u64>,
+    /// When the invoice was listed for financing; `None` until
+    /// `list_for_financing` succeeds.
+    pub listed_at: Option<u64>,
+    /// When the invoice was funded; `None` until `mark_funded` succeeds.
+    pub funded_at: Option<u64>,
+    /// When the goods were reported shipped; `None` until `mark_shipped`
+    /// succeeds.
+    pub shipped_at: Option<u64>,
+    /// When repayment settled the invoice; `None` while the invoice is
+    /// outstanding and for invoices that were defaulted, cancelled or
+    /// expired rather than repaid.
+    pub repaid_at: Option<u64>,
+    /// Earlier of the issuer's and buyer's delivery-confirmation
+    /// timestamps; `None` until at least one party confirms, and for
+    /// invoices confirmed before confirmation timestamps were tracked.
+    pub first_confirmation_at: Option<u64>,
+    /// Later of the issuer's and buyer's delivery-confirmation timestamps;
+    /// `None` until both parties confirm. Equal to `first_confirmation_at`
+    /// when both confirmations landed in the same ledger.
+    pub second_confirmation_at: Option<u64>,
+}
+
+/// Compact financing terms for an invoice, returned by
+/// [`InvoiceContract::get_financing_terms`](crate::InvoiceContract::get_financing_terms)
+/// (issue #1138).
+///
+/// Everything a pool or wallet client needs to evaluate an invoice before
+/// funding, collected in one storage read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinancingTerms {
+    /// Full face value in USDC stroops, same as [`Invoice::face_value`].
+    pub face_value: u128,
+    /// Discount in basis points, same as [`Invoice::discount_bps`].
+    pub discount_bps: u32,
+    /// Funding asset (token contract), same as [`Invoice::funding_asset`].
+    pub funding_asset: Address,
+    /// Unix timestamp (seconds) at which repayment is due, same as
+    /// [`Invoice::due_date`].
+    pub due_date: u64,
+    /// Issuer address, same as [`Invoice::issuer`].
+    pub issuer: Address,
+    /// Buyer address, same as [`Invoice::buyer`].
+    pub buyer: Address,
+    /// Current lifecycle status, same as [`Invoice::status`].
+    pub status: InvoiceStatus,
 }
 
 /// Settlement summary for reconciling invoice economics.

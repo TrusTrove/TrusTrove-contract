@@ -236,12 +236,13 @@ let status = if !profile_exists {
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
-| `InvoiceMemoHash(BytesN<32>)` | `BytesN<32>` | Optional issuer memo hash; absent for existing invoices or invoices created without a hash |
+| `IssuerConfirmedAt(BytesN<32>)` | `u64` | Ledger timestamp of the issuer's first valid delivery confirmation; absent for invoices not confirmed by the issuer |
 | `BuyerConfirmedAt(BytesN<32>)` | `u64` | Ledger timestamp of the buyer's first valid delivery confirmation; absent for older invoices and unconfirmed buyers |
+| `InvoiceMemoHash(BytesN<32>)` | `BytesN<32>` | Optional issuer memo hash; absent for existing invoices or invoices created without a hash |
 
-The memo hash and buyer timestamp use separate keys appended to the storage
-key enum, so they do not change the stored `Invoice` record layout. Their
-getters return `None` when the associated key is absent.
+The memo hash and confirmation timestamps use separate keys appended to the
+storage key enum, so they do not change the stored `Invoice` record layout.
+Their getters return `None` when the associated key is absent.
 
 #### Supported Asset Allow-List
 
