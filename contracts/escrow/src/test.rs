@@ -1672,6 +1672,29 @@ fn test_handle_default_allows_at_grace_period_boundary() {
 }
 
 #[test]
+fn test_lock_expiration_matches_stored_default_period() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 11);
+    let period = 120u64;
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockSeconds, &period);
+    });
+    let expiration = env.ledger().timestamp() + period;
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    assert_eq!(client.get_lock_expiration(&invoice_id), Some(expiration));
+    env.ledger().set_timestamp(expiration - 1);
+    assert_eq!(
+        client.try_handle_default(&invoice_id, &pool),
+        Err(Ok(EscrowError::NotAuthorized))
+    );
+    env.ledger().set_timestamp(expiration);
+    assert!(client.handle_default(&invoice_id, &pool));
+}
+
+#[test]
 fn test_handle_default_second_call_returns_false_without_side_effects() {
     let (env, client, _admin, pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 1);

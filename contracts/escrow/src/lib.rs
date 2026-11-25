@@ -84,6 +84,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::UsdcAsset, &usdc_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockSeconds, &DEFAULT_MIN_LOCK_SECONDS);
         Self::extend_instance_ttl(&env);
         // #867: every other contract announces initialization; escrow must
         // too, so an indexer sees admin/pool/asset without reading storage.
@@ -670,7 +673,7 @@ impl EscrowContract {
     /// * `NotAuthorized` if the record has not been locked long enough to satisfy the grace period.
     ///
     /// # Coupling with `invoice.trigger_default`
-    /// This grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from
+    /// This grace period (measured from
     /// [`EscrowRecord::locked_at`]) is independent of, and not known to,
     /// `invoice.trigger_default`'s own due-date gate (`now >= due_date`).
     /// Since issue #819 the funding path releases the principal to the issuer
@@ -717,7 +720,7 @@ impl EscrowContract {
         // A timestamp rollback (or a malformed record seeded with a future
         // `locked_at`) must fail the grace-period check as a typed
         // authorization error, not underflow `now - locked_at`.
-        if now < record.locked_at || now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
+        if now < record.locked_at || now - record.locked_at < Self::min_lock_seconds(&env) {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
@@ -1023,6 +1026,13 @@ impl EscrowContract {
         }
     }
 
+    fn min_lock_seconds(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinLockSeconds)
+            .unwrap_or(DEFAULT_MIN_LOCK_SECONDS)
+    }
+
     /// Returns the first timestamp at which the minimum lock no longer blocks
     /// default handling. Returns `None` when there is no active escrow.
     /// Fails with `MathOverflow` if the expiration cannot fit in a `u64`.
@@ -1032,7 +1042,7 @@ impl EscrowContract {
         let record: EscrowRecord = storage.get(&key)?;
         let expiration = record
             .locked_at
-            .checked_add(DEFAULT_MIN_LOCK_SECONDS)
+            .checked_add(Self::min_lock_seconds(&env))
             .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
         storage.extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Some(expiration)
