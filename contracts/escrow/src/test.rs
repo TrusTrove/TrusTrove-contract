@@ -2262,6 +2262,30 @@ fn test_get_history_does_not_create_missing_entry() {
 }
 
 #[test]
+fn test_get_history_page_pagination_and_total_count() {
+    let (env, client, admin, pool_contract, usdc_asset, issuer) = setup();
+    let invoice_id = generate_invoice_id(&env, 999);
+
+    client.lock(&invoice_id, &1000, &issuer);
+    client.release_to_issuer(&invoice_id, &issuer);
+
+    let (page1, total1) = client.get_history_page(&invoice_id, &0, &1);
+    assert_eq!(total1, 2);
+    assert_eq!(page1.len(), 1);
+
+    let (page2, total2) = client.get_history_page(&invoice_id, &1, &10);
+    assert_eq!(total2, 2);
+    assert_eq!(page2.len(), 1);
+
+    let (page_empty, total_empty) = client.get_history_page(&invoice_id, &10, &5);
+    assert_eq!(total_empty, 2);
+    assert_eq!(page_empty.len(), 0);
+
+    let full_history = client.get_history(&invoice_id);
+    assert_eq!(full_history.len() as u32, total1);
+}
+
+#[test]
 fn test_get_history_returns_action_log() {
     let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 16);
