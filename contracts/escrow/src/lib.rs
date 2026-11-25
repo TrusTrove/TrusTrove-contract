@@ -1245,6 +1245,43 @@ impl EscrowContract {
         }
     }
 
+    /// Returns the number of escrow history events recorded for an invoice.
+    ///
+    /// This view allows consumers to plan paginated reads without loading the
+    /// entire event vector. Returns `0` if no history exists for the invoice.
+    /// The count is preserved even after the active lock is released or removed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `u32` - The number of history events recorded for the invoice, or `0`
+    ///   if no history entry exists.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let count = client.get_history_count(&invoice_id);
+    /// ```
+    pub fn get_history_count(env: Env, invoice_id: BytesN<32>) -> u32 {
+        let key = DataKey::History(invoice_id);
+        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
+            Some(history) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                history.len()
+            }
+            None => 0,
+        }
+    }
+
     /// Reads up to 100 escrow events in append order, starting at `offset`.
     /// Returns the matching events and the total number of stored events.
     /// An offset at or beyond the end returns an empty page with the same total.

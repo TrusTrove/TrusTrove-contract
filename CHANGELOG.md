@@ -32,6 +32,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `escrow`: `get_history_count(invoice_id)` view, returning the number of
+  history events recorded for an invoice (`u32`) or `0` when absent. Preserves
+  access after active lock removal and enables planning paginated reads
+  without loading full history vectors into memory (#1195)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
