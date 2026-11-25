@@ -61,3 +61,15 @@ pub const SUGGESTED_DISCOUNT_CEILING_BPS: u32 = 5_000;
 /// `share_decimals`, otherwise wallets render its share balances at the wrong
 /// precision.
 pub const DEFAULT_SHARE_DECIMALS: u32 = 7;
+
+/// Fixed-point scale for LP share prices reported by the `get_share_price`
+/// view and the `share_price_updated` repayment event (issue #1171).
+///
+/// A share price is `TotalDeposits / TotalShares`, both of which are held in
+/// the funding asset's base units (stroops for a 7-decimal asset), so the
+/// ratio is close to 1. Multiplying by 1e18 keeps 18 fractional digits — the
+/// WAD convention — so indexers can compare prices across pools funding
+/// assets with different decimals without knowing each asset's precision.
+/// `1_000_000_000_000_000_000` therefore represents exactly 1.0, and a price
+/// of `1_050_000_000_000_000_000` represents 1.05.
+pub const SHARE_PRICE_SCALE: u128 = 1_000_000_000_000_000_000;
