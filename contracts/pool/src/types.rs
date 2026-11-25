@@ -6,7 +6,7 @@
 //! equals `100%` and `1` bp equals `0.01%`. For example, a
 //! `utilization_rate_bps` value of `7500` represents a utilization of `75%`.
 
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
 /// Aggregate, pool-wide accounting snapshot returned by `get_pool_stats`.
 #[contracttype]
@@ -200,4 +200,46 @@ pub struct PoolConfig {
     /// Maximum number of invoices accepted by one `batch_fund_invoice` call
     /// (`MAX_BATCH_SIZE`).
     pub max_batch_size: u32,
+}
+
+/// Why a listed invoice would currently be rejected by `fund_invoice`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FundingRejectionReason {
+    ContractPaused,
+    AlreadyFunded,
+    InvoiceNotListed,
+    IssuerNotVerified,
+    BuyerNotVerified,
+    AssetMismatch,
+    InvalidAmount,
+    DiscountBelowMinimum,
+    MaturityTooLong,
+    InsufficientLiquidity,
+    UtilizationCapExceeded,
+    Overflow,
+}
+
+/// Read-only snapshot of an invoice's current funding eligibility.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FundingEligibility {
+    /// Invoice status discriminant; `1` means `Listed`.
+    pub invoice_status: u32,
+    /// Whether the invoice funding asset matches this pool.
+    pub funding_asset_matches: bool,
+    /// Computed principal in funding-asset base units, or `0` when invalid.
+    pub funded_amount: u128,
+    /// Pool liquidity currently available for funding.
+    pub available_liquidity: u128,
+    /// Largest additional principal the pool can fund under current capacity.
+    pub max_fundable_amount: u128,
+    /// Current utilization in basis points.
+    pub utilization_rate_bps: u32,
+    /// Configured utilization cap in basis points.
+    pub max_utilization_bps: u32,
+    /// True when no funding rejection reasons apply.
+    pub is_eligible: bool,
+    /// Every currently applicable funding rejection reason.
+    pub rejection_reasons: Vec<FundingRejectionReason>,
 }
