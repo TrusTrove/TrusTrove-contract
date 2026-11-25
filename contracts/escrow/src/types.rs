@@ -138,4 +138,6 @@ pub enum DataKey {
     /// **Storage-key layout:** appended at the end of the unnumbered enum
     /// (index 8) — see the note on [`DataKey::IssuerReleased`].
     LockedLedger(BytesN<32>),
+    /// Minimum seconds before default handling. Instance key with a u64 value.
+    MinLockSeconds,
 }
