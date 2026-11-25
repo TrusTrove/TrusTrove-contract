@@ -253,7 +253,7 @@ let status = if !profile_exists {
 
 | DataKey | Type | Description |
 |---------|------|-------------|
-| `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
+| `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID. Never deleted; `exists(invoice_id)` checks its presence without reading, writing or TTL-bumping it |
 
 #### Supported Asset Allow-List
 
