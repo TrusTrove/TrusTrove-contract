@@ -376,6 +376,9 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
+| Invoice | `get_financing_terms` | `get_financing_terms(invoice_id: BytesN<32>) -> FinancingTerms` |
+| Invoice | `get_lifecycle_timestamps` | `get_lifecycle_timestamps(invoice_id: BytesN<32>) -> LifecycleTimestamps` |
+| Invoice | `get_seconds_to_maturity` | `get_seconds_to_maturity(invoice_id: BytesN<32>) -> i128` |
 | Invoice | `get_settlement_summary` | `get_settlement_summary(invoice_id: BytesN<32>) -> SettlementSummary` |
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
@@ -485,7 +488,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 185 public entry points across five deployable contracts.**
+**Total: 189 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
