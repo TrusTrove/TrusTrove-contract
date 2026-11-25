@@ -133,6 +133,7 @@ repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
+get_attestation_age(invoice_id) → Option<AttestationAge>
 get_by_status(status, page, page_size) → Vec<Invoice>
 get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
@@ -141,6 +142,9 @@ get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
+get_financing_terms(invoice_id) → FinancingTerms
+get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
+get_seconds_to_maturity(invoice_id) → i128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
 
@@ -177,6 +181,40 @@ loop {
     }
 }
 ```
+
+#### `get_attestation_age` / `get_lifecycle_timestamps` / `get_financing_terms` / `get_seconds_to_maturity`
+
+Read-only companion views for clients that would otherwise stitch several calls
+together. None of them writes storage, bumps a TTL, or changes listing
+eligibility.
+
+- `get_attestation_age(invoice_id) → Option<AttestationAge>` returns
+  `AttestationAge { submitted_at, age_seconds }`, where `age_seconds` is the
+  current ledger timestamp minus the recorded submission time (saturating at
+  `0`). Returns `None` when the invoice has no attestation, including for an
+  unknown invoice ID.
+- `get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps` returns the
+  optional `created_at`, `listed_at`, `funded_at`, `shipped_at`, `repaid_at`,
+  `first_confirmation_at` and `second_confirmation_at`. Each field is `None`
+  until the contract records that transition: creation is always present;
+  listing, funding, shipping and repayment appear when those calls succeed
+  (`repaid_at` stays `None` for defaulted, cancelled or expired invoices).
+  `first_confirmation_at`/`second_confirmation_at` order the issuer's and
+  buyer's `confirm_delivery` timestamps by time: the first is `None` until one
+  party confirms, the second until both (equal when both confirm in the same
+  ledger). Invoices confirmed before #1160 only carry the boolean flags, so
+  both report `None`.
+- `get_financing_terms(invoice_id) → FinancingTerms` returns
+  `FinancingTerms { face_value, discount_bps, funding_asset, due_date, issuer,
+  buyer, status }` in one storage read, alongside the older single-field views
+  and the `get_funding_terms` tuple.
+- `get_seconds_to_maturity(invoice_id) → i128` returns `due_date - now` at the
+  current ledger timestamp: positive while time remains, `0` exactly at
+  `due_date`, negative once overdue. Whole days are `seconds / 86_400`. The
+  signed subtraction cannot overflow at the `u64` bounds.
+
+All four require no authorization. Except for the age view (`None`), they panic
+with `NotFound` (`#2`) for an unknown invoice.
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -299,6 +337,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
 | Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
 | Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `get_attestation_age` | `get_attestation_age(invoice_id: BytesN<32>) -> Option<AttestationAge>` |
+| Invoice | `get_attestation_evidence_hash` | `get_attestation_evidence_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
@@ -340,7 +380,12 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
+| Invoice | `get_financing_terms` | `get_financing_terms(invoice_id: BytesN<32>) -> FinancingTerms` |
+| Invoice | `get_lifecycle_timestamps` | `get_lifecycle_timestamps(invoice_id: BytesN<32>) -> LifecycleTimestamps` |
+| Invoice | `get_seconds_to_maturity` | `get_seconds_to_maturity(invoice_id: BytesN<32>) -> i128` |
 | Invoice | `get_settlement_summary` | `get_settlement_summary(invoice_id: BytesN<32>) -> SettlementSummary` |
+| Invoice | `get_funding_eligibility` | `get_funding_eligibility(invoice_id: BytesN<32>) -> InvoiceFundingEligibility` |
+| Invoice | `get_repayment_eligibility` | `get_repayment_eligibility(invoice_id: BytesN<32>, caller: Address) -> RepaymentEligibility` |
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |

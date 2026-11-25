@@ -5,7 +5,7 @@ use soroban_sdk::{
     xdr::{FromXdr, ToXdr},
     Address, Bytes, BytesN, Env, IntoVal, Map, String, Symbol, Vec,
 };
-use trusttrove_pause::{require_not_paused, set_paused};
+use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -161,6 +161,22 @@ fn settlement_summary_from_invoice(env: &Env, invoice: &Invoice) -> SettlementSu
         refund_to_buyer,
         repaid_amount: invoice.repaid_amount,
         remaining_balance: invoice.remaining_balance,
+    }
+}
+
+fn listing_expiry_preview(env: &Env, invoice: &Invoice) -> ListingExpiryPreview {
+    let expiry_window = env
+        .storage()
+        .instance()
+        .get(&DataKey::ExpiryWindow)
+        .unwrap_or(7 * 24 * 60 * 60);
+    let listed_at = invoice.listed_at.unwrap_or(0);
+    let expiry_timestamp = listed_at
+        .checked_add(expiry_window)
+        .unwrap_or_else(|| panic_with_error!(env, InvoiceError::MathOverflow));
+    ListingExpiryPreview {
+        expiry_timestamp,
+        is_expired: env.ledger().timestamp() >= expiry_timestamp,
     }
 }
 
@@ -572,6 +588,62 @@ impl InvoiceContract {
             bump_persistent(&env, &key);
         }
         attestation
+    }
+
+    /// Returns the age of an invoice's attestation (issue #1158).
+    ///
+    /// Reports when the attestation was submitted and how much ledger time
+    /// has elapsed since then, so funding and risk clients can weigh how
+    /// stale an underwriting assessment is without decoding the whole
+    /// [`Attestation`].
+    ///
+    /// This is a pure read: it performs no storage writes, no TTL bumps and
+    /// does not change listing eligibility. [`Self::list_for_financing`]
+    /// keeps gating on attestation presence and `valid_until` alone — the
+    /// age reported here is advisory and never consulted by the contract.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Some(AttestationAge)` containing `submitted_at` (the ledger
+    ///   timestamp recorded by `submit_attestation`) and `age_seconds`, the
+    ///   current ledger timestamp minus `submitted_at` (saturating at `0`).
+    /// * `None` when the invoice has no attestation. An unknown invoice ID
+    ///   therefore also yields `None` rather than an error.
+    ///
+    /// # Example
+    /// ```ignore
+    /// if let Some(age) = client.get_attestation_age(&invoice_id) {
+    ///     // Reject funding terms backed by a stale assessment client-side.
+    ///     if age.age_seconds > 30 * 24 * 60 * 60 { /* ... */ }
+    /// }
+    /// ```
+    pub fn get_attestation_age(env: Env, invoice_id: BytesN<32>) -> Option<AttestationAge> {
+        let attestation: Option<Attestation> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Attestation(invoice_id));
+        attestation.map(|stored| AttestationAge {
+            submitted_at: stored.submitted_at,
+            age_seconds: env.ledger().timestamp().saturating_sub(stored.submitted_at),
+        })
+    }
+
+    /// Returns the evidence hash for an invoice's attestation, if present.
+    ///
+    /// Uses the same attestation TTL bump policy as `get_attestation`.
+    /// The hash is returned without changing its bytes or interpreting its
+    /// off-chain content.
+    pub fn get_attestation_evidence_hash(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        Self::get_attestation(env, invoice_id).map(|attestation| attestation.evidence_hash)
     }
 
     /// Adds an asset to the allow-list of funding assets that `create`
@@ -1816,12 +1888,31 @@ impl InvoiceContract {
                 panic_with_error!(&env, InvoiceError::AlreadyConfirmed);
             }
             invoice.issuer_confirmed = true;
+            // Issue #1160: record when this party's confirmation landed so
+            // `get_lifecycle_timestamps` can report both confirmation times.
+            // The `AlreadyConfirmed` guard above makes this write happen at
+            // most once per party.
+            let confirmed_at_key = DataKey::IssuerConfirmedAt(invoice_id.clone());
+            env.storage()
+                .persistent()
+                .set(&confirmed_at_key, &env.ledger().timestamp());
+            env.storage()
+                .persistent()
+                .extend_ttl(&confirmed_at_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         }
         if confirmer == invoice.buyer {
             if invoice.buyer_confirmed {
                 panic_with_error!(&env, InvoiceError::AlreadyConfirmed);
             }
             invoice.buyer_confirmed = true;
+            // Issue #1160: mirror the issuer's confirmation timestamp.
+            let confirmed_at_key = DataKey::BuyerConfirmedAt(invoice_id.clone());
+            env.storage()
+                .persistent()
+                .set(&confirmed_at_key, &env.ledger().timestamp());
+            env.storage()
+                .persistent()
+                .extend_ttl(&confirmed_at_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         }
 
         let both_confirmed = invoice.issuer_confirmed && invoice.buyer_confirmed;
@@ -2612,18 +2703,7 @@ impl InvoiceContract {
             panic_with_error!(&env, InvoiceError::NotAuthorized);
         }
 
-        let listed_at = invoice.listed_at.unwrap_or(0);
-        let expiry_window = env
-            .storage()
-            .instance()
-            .get(&DataKey::ExpiryWindow)
-            .unwrap_or(7 * 24 * 60 * 60);
-        let current_time = env.ledger().timestamp();
-        let deadline = listed_at
-            .checked_add(expiry_window)
-            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
-
-        if current_time < deadline {
+        if !listing_expiry_preview(&env, &invoice).is_expired {
             panic_with_error!(&env, InvoiceError::ListingNotExpired);
         }
 
@@ -2830,6 +2910,182 @@ impl InvoiceContract {
         }
     }
 
+    /// Returns the financing terms of an invoice in one compact typed view
+    /// (issue #1138).
+    ///
+    /// Collects the face value, discount, funding asset, due date, issuer,
+    /// buyer and current status into a single storage read, for pool and
+    /// wallet clients that would otherwise call `get_face_value`,
+    /// `get_discount_bps`, `get_funding_asset`, `get_due_date`,
+    /// `get_issuer`, `get_buyer` and `get_status` separately.
+    ///
+    /// Complements, and does not replace, the existing single-field views and
+    /// the legacy `get_funding_terms` tuple. Read-only: performs no storage
+    /// writes and no TTL bumps, and never mutates the invoice record.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * [`FinancingTerms`] - `(face_value, discount_bps, funding_asset,
+    ///   due_date, issuer, buyer, status)` for the invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let terms = client.get_financing_terms(&invoice_id);
+    /// if terms.status == InvoiceStatus::Listed { /* evaluate */ }
+    /// ```
+    pub fn get_financing_terms(env: Env, invoice_id: BytesN<32>) -> FinancingTerms {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        FinancingTerms {
+            face_value: invoice.face_value,
+            discount_bps: invoice.discount_bps,
+            funding_asset: invoice.funding_asset,
+            due_date: invoice.due_date,
+            issuer: invoice.issuer,
+            buyer: invoice.buyer,
+            status: invoice.status,
+        }
+    }
+
+    /// Returns every lifecycle timestamp recorded for an invoice in one typed
+    /// view (issue #1160).
+    ///
+    /// Read-only: performs no storage writes and no TTL bumps.
+    ///
+    /// # What `None` means
+    /// Each field is `None` until the contract has recorded the corresponding
+    /// transition:
+    /// * `created_at` — `Some` for every stored invoice, because creation
+    ///   always records a timestamp. Optional only so clients can treat all
+    ///   seven fields uniformly.
+    /// * `listed_at` — `None` until [`Self::list_for_financing`] succeeds.
+    /// * `funded_at` — `None` until [`Self::mark_funded`] succeeds.
+    /// * `shipped_at` — `None` until [`Self::mark_shipped`] succeeds.
+    /// * `repaid_at` — `None` until repayment settles the invoice through
+    ///   [`Self::repay`], [`Self::repay_partial`] or [`Self::repay_early`].
+    ///   Remains `None` for invoices that became `Defaulted`, `Cancelled` or
+    ///   `Expired` instead of being repaid.
+    /// * `first_confirmation_at` — the earlier of the issuer's and the
+    ///   buyer's delivery-confirmation timestamps; `None` until at least one
+    ///   party confirms. Invoices confirmed before confirmation timestamps
+    ///   were tracked (issue #1160) only carry the boolean flags and so also
+    ///   report `None`.
+    /// * `second_confirmation_at` — the later of the two confirmation
+    ///   timestamps; `None` until both parties have confirmed. Equals
+    ///   `first_confirmation_at` when both confirmations landed in the same
+    ///   ledger.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * [`LifecycleTimestamps`] - the seven optional timestamps above.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let lifecycle = client.get_lifecycle_timestamps(&invoice_id);
+    /// if let (Some(funded), Some(repaid)) = (lifecycle.funded_at, lifecycle.repaid_at) {
+    ///     // fraction of the term the invoice was outstanding
+    /// }
+    /// ```
+    pub fn get_lifecycle_timestamps(env: Env, invoice_id: BytesN<32>) -> LifecycleTimestamps {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        let issuer_confirmed_at: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IssuerConfirmedAt(invoice_id.clone()));
+        let buyer_confirmed_at: Option<u64> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BuyerConfirmedAt(invoice_id.clone()));
+
+        // Order the two recorded confirmations by time, not by role: the
+        // first confirmation is whichever party confirmed first.
+        let (first_confirmation_at, second_confirmation_at) =
+            match (issuer_confirmed_at, buyer_confirmed_at) {
+                (Some(issuer), Some(buyer)) if issuer <= buyer => (Some(issuer), Some(buyer)),
+                (Some(issuer), Some(buyer)) => (Some(buyer), Some(issuer)),
+                (Some(only), None) | (None, Some(only)) => (Some(only), None),
+                (None, None) => (None, None),
+            };
+
+        LifecycleTimestamps {
+            created_at: Some(invoice.created_at),
+            listed_at: invoice.listed_at,
+            funded_at: invoice.funded_at,
+            shipped_at: invoice.shipped_at,
+            repaid_at: invoice.repaid_at,
+            first_confirmation_at,
+            second_confirmation_at,
+        }
+    }
+
+    /// Returns the signed number of seconds from the current ledger timestamp
+    /// to an invoice's due date (issue #1135).
+    ///
+    /// The result is signed so callers never have to special-case maturity:
+    /// * positive — `due_date` is still ahead; that many seconds remain,
+    /// * zero — the ledger timestamp is exactly `due_date`,
+    /// * negative — the due date has passed; the magnitude is how many seconds
+    ///   overdue the invoice is.
+    ///
+    /// Whole days are `seconds / 86_400`, truncated toward zero. The
+    /// subtraction is performed in `i128`, which represents every `u64`
+    /// value losslessly, so it can neither overflow nor wrap at the `u64`
+    /// bounds. Read-only: no storage writes and no TTL bumps.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `i128` - `due_date - now`, in seconds, at the current ledger
+    ///   timestamp.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let seconds = client.get_seconds_to_maturity(&invoice_id);
+    /// if seconds < 0 { /* overdue */ }
+    /// ```
+    pub fn get_seconds_to_maturity(env: Env, invoice_id: BytesN<32>) -> i128 {
+        let invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Invoice(invoice_id))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        // `u64 as i128` is lossless, so this difference cannot overflow.
+        invoice.due_date as i128 - env.ledger().timestamp() as i128
+    }
+
     /// Returns a settlement summary for reconciling invoice economics.
     ///
     /// For unsettled invoices, earned/refund fields are projected using the
@@ -2841,6 +3097,139 @@ impl InvoiceContract {
     pub fn get_settlement_summary(env: Env, invoice_id: BytesN<32>) -> SettlementSummary {
         let invoice = Self::get_invoice(&env, invoice_id);
         settlement_summary_from_invoice(&env, &invoice)
+    }
+
+    /// Reports whether a listed invoice passes its invoice-level funding checks.
+    ///
+    /// Checks listing status and expiry, attestation presence and validity,
+    /// current registry verification for both parties, supported-asset
+    /// membership, and the allowed discount range. It performs no token calls
+    /// and does not change invoice or allow-list storage.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist or the
+    ///   configured registry reference is missing.
+    /// * `InvoiceError::MathOverflow` if the listing expiry timestamp overflows.
+    pub fn get_funding_eligibility(env: Env, invoice_id: BytesN<32>) -> InvoiceFundingEligibility {
+        let invoice = Self::get_invoice(&env, invoice_id.clone());
+        let mut rejection_reasons = Vec::new(&env);
+        let listing_expiry_timestamp = if invoice.status == InvoiceStatus::Listed {
+            let preview = listing_expiry_preview(&env, &invoice);
+            if preview.is_expired {
+                rejection_reasons.push_back(InvoiceFundingRejectionReason::ListingExpired);
+            }
+            Some(preview.expiry_timestamp)
+        } else {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::InvoiceNotListed);
+            None
+        };
+
+        let attestation: Option<Attestation> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Attestation(invoice_id));
+        let now = env.ledger().timestamp();
+        let attestation_valid_until = attestation.as_ref().map(|value| value.valid_until);
+        match attestation.as_ref() {
+            None => rejection_reasons.push_back(InvoiceFundingRejectionReason::AttestationMissing),
+            Some(value) if now > value.valid_until => {
+                rejection_reasons.push_back(InvoiceFundingRejectionReason::AttestationExpired);
+            }
+            Some(_) => {}
+        }
+
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        let issuer_verified = Self::is_verified_in(&env, &registry_id, &invoice.issuer);
+        if !issuer_verified {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::IssuerNotVerified);
+        }
+        let buyer_verified = Self::is_verified_in(&env, &registry_id, &invoice.buyer);
+        if !buyer_verified {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::BuyerNotVerified);
+        }
+
+        let asset_supported = env
+            .storage()
+            .persistent()
+            .has(&DataKey::SupportedAsset(invoice.funding_asset));
+        if !asset_supported {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::UnsupportedAsset);
+        }
+
+        let discount_bps_valid = (1..=5000).contains(&invoice.discount_bps);
+        if !discount_bps_valid {
+            rejection_reasons.push_back(InvoiceFundingRejectionReason::InvalidDiscount);
+        }
+
+        InvoiceFundingEligibility {
+            invoice_status: invoice.status,
+            listing_expiry_timestamp,
+            attestation_valid_until,
+            issuer_verified,
+            buyer_verified,
+            asset_supported,
+            discount_bps_valid,
+            is_eligible: rejection_reasons.is_empty(),
+            rejection_reasons,
+        }
+    }
+
+    /// Reports whether `caller` can currently invoke `repay` for an invoice.
+    ///
+    /// The view reports the full remaining balance and does not require caller
+    /// authorization; `caller` must still sign the actual repayment
+    /// transaction. It performs no token calls.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice does not exist.
+    pub fn get_repayment_eligibility(
+        env: Env,
+        invoice_id: BytesN<32>,
+        caller: Address,
+    ) -> RepaymentEligibility {
+        let invoice = Self::get_invoice(&env, invoice_id);
+        let mut rejection_reasons = Vec::new(&env);
+        if is_paused(&env) {
+            rejection_reasons.push_back(RepaymentRejectionReason::ContractPaused);
+        }
+        if caller != invoice.buyer {
+            rejection_reasons.push_back(RepaymentRejectionReason::CallerNotBuyer);
+        }
+        if !matches!(
+            invoice.status,
+            InvoiceStatus::Funded | InvoiceStatus::Active | InvoiceStatus::Confirmed
+        ) {
+            rejection_reasons.push_back(RepaymentRejectionReason::InvalidStatus);
+        }
+        if invoice.remaining_balance == 0 {
+            rejection_reasons.push_back(RepaymentRejectionReason::NoAmountDue);
+        }
+        if env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::EscrowContract)
+            .is_none()
+            || invoice.funding_pool.is_none()
+            || invoice.funded_at.is_none()
+        {
+            rejection_reasons.push_back(RepaymentRejectionReason::SettlementNotConfigured);
+        }
+
+        let is_eligible = rejection_reasons.is_empty();
+        RepaymentEligibility {
+            amount_due: invoice.remaining_balance,
+            action: if is_eligible {
+                RepaymentAction::Repay
+            } else {
+                RepaymentAction::Unavailable
+            },
+            is_eligible,
+            rejection_reasons,
+        }
     }
 
     /// Returns the funding asset for an invoice.

@@ -279,6 +279,84 @@ pub struct InvoiceIdPage {
     pub next: Option<u32>,
 }
 
+/// Age of an invoice's attestation, returned by
+/// [`InvoiceContract::get_attestation_age`](crate::InvoiceContract::get_attestation_age)
+/// (issue #1158).
+///
+/// Lets funding and risk clients judge how stale an underwriting assessment
+/// is without loading and decoding the whole [`Attestation`].
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct AttestationAge {
+    /// Ledger timestamp (seconds) at which the attestation was submitted,
+    /// copied verbatim from [`Attestation::submitted_at`].
+    pub submitted_at: u64,
+    /// Ledger time elapsed since submission: `now - submitted_at` at the
+    /// moment of the read, saturating at `0` if the ledger timestamp ever
+    /// reported an earlier time than the stored submission timestamp.
+    pub age_seconds: u64,
+}
+
+/// Every lifecycle timestamp recorded for an invoice, returned by
+/// [`InvoiceContract::get_lifecycle_timestamps`](crate::InvoiceContract::get_lifecycle_timestamps)
+/// (issue #1160).
+///
+/// Each field is `None` when the contract has not recorded that transition;
+/// see the method documentation for the per-field meaning of absence.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct LifecycleTimestamps {
+    /// When the invoice was created. `Some` for every stored invoice;
+    /// optional so clients can treat all seven fields uniformly.
+    pub created_at: Option<u64>,
+    /// When the invoice was listed for financing; `None` until
+    /// `list_for_financing` succeeds.
+    pub listed_at: Option<u64>,
+    /// When the invoice was funded; `None` until `mark_funded` succeeds.
+    pub funded_at: Option<u64>,
+    /// When the goods were reported shipped; `None` until `mark_shipped`
+    /// succeeds.
+    pub shipped_at: Option<u64>,
+    /// When repayment settled the invoice; `None` while the invoice is
+    /// outstanding and for invoices that were defaulted, cancelled or
+    /// expired rather than repaid.
+    pub repaid_at: Option<u64>,
+    /// Earlier of the issuer's and buyer's delivery-confirmation
+    /// timestamps; `None` until at least one party confirms, and for
+    /// invoices confirmed before confirmation timestamps were tracked.
+    pub first_confirmation_at: Option<u64>,
+    /// Later of the issuer's and buyer's delivery-confirmation timestamps;
+    /// `None` until both parties confirm. Equal to `first_confirmation_at`
+    /// when both confirmations landed in the same ledger.
+    pub second_confirmation_at: Option<u64>,
+}
+
+/// Compact financing terms for an invoice, returned by
+/// [`InvoiceContract::get_financing_terms`](crate::InvoiceContract::get_financing_terms)
+/// (issue #1138).
+///
+/// Everything a pool or wallet client needs to evaluate an invoice before
+/// funding, collected in one storage read.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct FinancingTerms {
+    /// Full face value in USDC stroops, same as [`Invoice::face_value`].
+    pub face_value: u128,
+    /// Discount in basis points, same as [`Invoice::discount_bps`].
+    pub discount_bps: u32,
+    /// Funding asset (token contract), same as [`Invoice::funding_asset`].
+    pub funding_asset: Address,
+    /// Unix timestamp (seconds) at which repayment is due, same as
+    /// [`Invoice::due_date`].
+    pub due_date: u64,
+    /// Issuer address, same as [`Invoice::issuer`].
+    pub issuer: Address,
+    /// Buyer address, same as [`Invoice::buyer`].
+    pub buyer: Address,
+    /// Current lifecycle status, same as [`Invoice::status`].
+    pub status: InvoiceStatus,
+}
+
 /// Settlement summary for reconciling invoice economics.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -297,4 +375,89 @@ pub struct SettlementSummary {
     pub refund_to_buyer: Option<u128>,
     pub repaid_amount: u128,
     pub remaining_balance: u128,
+}
+
+/// Listing expiry information returned by
+/// [`InvoiceContract::get_listing_expiry_preview`](crate::InvoiceContract::get_listing_expiry_preview).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ListingExpiryPreview {
+    /// Timestamp at which the listing becomes eligible for expiration.
+    /// `expire_listing` succeeds at this timestamp.
+    pub expiry_timestamp: u64,
+    /// Whether the current ledger timestamp is at or past `expiry_timestamp`.
+    pub is_expired: bool,
+}
+
+/// A reason an invoice cannot currently be funded.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum InvoiceFundingRejectionReason {
+    InvoiceNotListed,
+    ListingExpired,
+    AttestationMissing,
+    AttestationExpired,
+    IssuerNotVerified,
+    BuyerNotVerified,
+    UnsupportedAsset,
+    InvalidDiscount,
+}
+
+/// Read-only snapshot of an invoice's funding eligibility.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct InvoiceFundingEligibility {
+    /// Current lifecycle status of the invoice.
+    pub invoice_status: InvoiceStatus,
+    /// Listing expiry timestamp, or `None` when the invoice is not listed.
+    pub listing_expiry_timestamp: Option<u64>,
+    /// Attestation validity timestamp, or `None` when no attestation exists.
+    pub attestation_valid_until: Option<u64>,
+    /// Whether the issuer is currently verified in the registry.
+    pub issuer_verified: bool,
+    /// Whether the buyer is currently verified in the registry.
+    pub buyer_verified: bool,
+    /// Whether the invoice funding asset is currently allow-listed.
+    pub asset_supported: bool,
+    /// Whether the discount is within the invoice listing range `1..=5000`.
+    pub discount_bps_valid: bool,
+    /// True when no invoice funding rejection reasons apply.
+    pub is_eligible: bool,
+    /// Every currently applicable invoice-level rejection reason.
+    pub rejection_reasons: Vec<InvoiceFundingRejectionReason>,
+}
+
+/// Repayment operation identified by the repayment eligibility view.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepaymentAction {
+    /// No repayment action is currently available.
+    Unavailable,
+    /// Repay the full remaining balance using `InvoiceContract::repay`.
+    Repay,
+}
+
+/// A reason a caller cannot currently repay an invoice.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RepaymentRejectionReason {
+    ContractPaused,
+    CallerNotBuyer,
+    InvalidStatus,
+    NoAmountDue,
+    SettlementNotConfigured,
+}
+
+/// Read-only snapshot of whether a caller can repay an invoice in full.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct RepaymentEligibility {
+    /// The full remaining balance that `repay` would request.
+    pub amount_due: u128,
+    /// The repayment action when it is currently valid.
+    pub action: RepaymentAction,
+    /// Whether the caller can currently invoke `repay`.
+    pub is_eligible: bool,
+    /// Every currently applicable invoice-level rejection reason.
+    pub rejection_reasons: Vec<RepaymentRejectionReason>,
 }

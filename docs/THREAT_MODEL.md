@@ -202,7 +202,7 @@ Any account can call these.
 | Function | Contract | Notes |
 |----------|----------|-------|
 | `get_profile`, `is_verified`, `get_verification_status`, `get_admin`, `get_verifier` | Registry | Read-only views |
-| `get`, `get_status`, `get_face_value`, `get_discount_bps`, `get_funding_asset`, `get_issuer`, `get_by_status`, `get_invoice_ids_by_status`, `get_by_issuer`, `get_by_buyer`, `get_invoice_count_by_issuer`, `get_invoice_count_by_buyer`, `get_counts`, `get_expiry_window` | Invoice | Read-only views |
+| `get`, `get_status`, `get_face_value`, `get_discount_bps`, `get_funding_asset`, `get_issuer`, `get_by_status`, `get_invoice_ids_by_status`, `get_by_issuer`, `get_by_buyer`, `get_invoice_count_by_issuer`, `get_invoice_count_by_buyer`, `get_counts`, `get_expiry_window`, `get_attestation_evidence_hash`, `get_listing_expiry_preview`, `get_funding_eligibility`, `get_repayment_eligibility` | Invoice | Read-only views |
 | `get_locked`, `get_history` | Escrow | Read-only views |
 | `get_stats`, `get_lp_position`, `get_utilization_rate`, `get_usdc_asset` | Pool | Read-only views |
 | `trigger_default` | Invoice | Callable by any account once `now >= due_date` |
