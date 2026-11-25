@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Map, String};
+use soroban_sdk::{contracttype, Address, BytesN, Map, String};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -85,6 +85,17 @@ impl Profile {
     }
 }
 
+/// One-time proof-of-possession challenge for an account (#1130).
+///
+/// Only a fixed-size 32-byte nonce and its absolute expiry ledger timestamp
+/// are stored; the account signs the submission itself.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationNonce {
+    pub hash: BytesN<32>,
+    pub expires_at: u64,
+}
+
 #[contracttype]
 pub enum DataKey {
     Admin,
@@ -113,4 +124,14 @@ pub enum DataKey {
     /// Ledger timestamp when the address most recently became verified. Cleared
     /// on revocation and set again on reinstatement or verification.
     VerifiedSince(Address),
+    /// Pending one-time proof-of-possession challenge for an address (#1130).
+    /// Removed when a verifier consumes it.
+    VerificationNonce(Address),
+    /// Marks a nonce as spent for this address so it can never be replayed
+    /// (#1130). Kept after consumption, unlike the pending challenge.
+    ConsumedVerificationNonce(Address, BytesN<32>),
+    /// Sticky flag set by the first nonce submission: once an account has
+    /// started the challenge flow, later verifications must supply a fresh
+    /// nonce instead of falling back to the legacy path (#1130).
+    VerificationNonceRequired(Address),
 }

@@ -32,6 +32,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `registry`: account-specific one-time verification challenge nonce.
+  `submit_verification_nonce(address, nonce, expires_at)` requires the
+  account's auth and stores only a 32-byte digest with an absolute expiry;
+  `verify_profile_with_nonce(caller, address, verify, nonce)` requires admin/
+  verifier auth, rejects missing, mismatched, expired or replayed nonces and
+  consumes a valid one atomically. `get_verification_nonce()` exposes the
+  pending challenge, and `verification_nonce_submitted` /
+  `verification_nonce_consumed` events make the flow auditable. Once an
+  account opts in, later verifications cannot bypass the challenge via the
+  legacy `verify_profile` path; revocation still needs no nonce (#1130)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,

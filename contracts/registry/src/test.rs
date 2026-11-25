@@ -4460,3 +4460,200 @@ fn test_get_metadata_key_count_not_found_panics() {
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());
 }
+
+// ============== ISSUE #1130: VERIFICATION CHALLENGE NONCE ==============
+
+#[test]
+fn test_verification_nonce_is_submitted_and_consumed_once() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let nonce = BytesN::from_array(&env, &[0x11u8; 32]);
+    let expires_at = env.ledger().timestamp() + 100;
+
+    assert!(client.submit_verification_nonce(&issuer, &nonce, &expires_at));
+    let submit_events = env.events().all();
+    assert_eq!(
+        count_named_in(&env, &submit_events, "verification_nonce_submitted"),
+        1
+    );
+    assert_eq!(
+        client.get_verification_nonce(&issuer),
+        Some((nonce.clone(), expires_at))
+    );
+
+    assert!(client.verify_profile_with_nonce(&admin, &issuer, &true, &nonce.clone()));
+    let verify_events = env.events().all();
+    assert_eq!(
+        count_named_in(&env, &verify_events, "verification_nonce_consumed"),
+        1
+    );
+    assert_eq!(count_named_in(&env, &verify_events, "profile_verified"), 1);
+    assert!(client.is_verified(&issuer));
+    assert_eq!(client.get_verification_nonce(&issuer), None);
+
+    let spent: bool = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ConsumedVerificationNonce(
+                issuer.clone(),
+                nonce.clone(),
+            ))
+            .unwrap_or(false)
+    });
+    assert!(spent);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_submit_verification_nonce_requires_address_auth() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let nonce = BytesN::from_array(&env, &[1u8; 32]);
+
+    env.set_auths(&[]);
+    client.submit_verification_nonce(&issuer, &nonce, &(env.ledger().timestamp() + 50));
+}
+
+#[test]
+fn test_submit_verification_nonce_rejects_expiry_boundary_and_unregistered() {
+    let (env, _admin, client) = setup();
+    env.ledger().set_timestamp(100);
+    let nonce = BytesN::from_array(&env, &[2u8; 32]);
+    let unknown = Address::generate(&env);
+
+    let err = client
+        .try_submit_verification_nonce(&unknown, &nonce, &101)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotRegistered.into());
+
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    // expiring at "now" is already too late.
+    let err = client
+        .try_submit_verification_nonce(&issuer, &nonce, &100)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::InvalidNonce.into());
+    assert_eq!(client.get_verification_nonce(&issuer), None);
+
+    // One ledger in the future is the smallest accepted boundary.
+    assert!(client.submit_verification_nonce(&issuer, &nonce, &101));
+    assert_eq!(client.get_verification_nonce(&issuer), Some((nonce, 101)));
+}
+
+#[test]
+fn test_expired_nonce_is_rejected_and_not_consumed() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let nonce = BytesN::from_array(&env, &[3u8; 32]);
+    client.submit_verification_nonce(&issuer, &nonce, &(env.ledger().timestamp() + 10));
+
+    env.ledger().set_timestamp(env.ledger().timestamp() + 11);
+    let err = client
+        .try_verify_profile_with_nonce(&admin, &issuer, &true, &nonce.clone())
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NonceExpired.into());
+    assert!(!client.is_verified(&issuer));
+    // The failed verification must not spend the challenge.
+    assert_eq!(
+        client.get_verification_nonce(&issuer),
+        Some((nonce.clone(), env.ledger().timestamp() - 1))
+    );
+
+    // A fresh nonce can replace an unspent expired challenge.
+    let fresh = BytesN::from_array(&env, &[4u8; 32]);
+    let now = env.ledger().timestamp();
+    client.submit_verification_nonce(&issuer, &fresh, &(now + 10));
+    assert!(client.verify_profile_with_nonce(&admin, &issuer, &true, &fresh));
+}
+
+#[test]
+fn test_nonce_replay_is_rejected_on_submit_verify_and_legacy_path() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let nonce = BytesN::from_array(&env, &[5u8; 32]);
+    client.submit_verification_nonce(&issuer, &nonce, &(env.ledger().timestamp() + 50));
+    client.verify_profile_with_nonce(&admin, &issuer, &true, &nonce.clone());
+
+    // The same digest cannot be submitted again for this address.
+    let err = client
+        .try_submit_verification_nonce(&issuer, &nonce, &(env.ledger().timestamp() + 50))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NonceAlreadyUsed.into());
+
+    // Nor can the spent verification be replayed.
+    let err = client
+        .try_verify_profile_with_nonce(&admin, &issuer, &true, &nonce)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::InvalidNonce.into());
+
+    // Once the challenge flow is active, the legacy path cannot skip it.
+    let err = client
+        .try_verify_profile(&admin, &issuer, &true)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NonceRequired.into());
+    assert!(client.is_verified(&issuer));
+}
+
+#[test]
+fn test_nonce_mismatch_and_unauthorized_verifier_leave_challenge_pending() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let nonce = BytesN::from_array(&env, &[6u8; 32]);
+    client.submit_verification_nonce(&issuer, &nonce, &(env.ledger().timestamp() + 50));
+
+    let wrong = BytesN::from_array(&env, &[7u8; 32]);
+    let err = client
+        .try_verify_profile_with_nonce(&admin, &issuer, &true, &wrong)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::InvalidNonce.into());
+
+    let err = client
+        .try_verify_profile_with_nonce(&outsider, &issuer, &true, &nonce.clone())
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::Unauthorized.into());
+    assert!(!client.is_verified(&issuer));
+    assert_eq!(client.get_verification_nonce(&issuer).unwrap().0, nonce);
+
+    // The account can submit a fresh digest and complete the flow.
+    let fresh = BytesN::from_array(&env, &[8u8; 32]);
+    client.submit_verification_nonce(&issuer, &fresh, &(env.ledger().timestamp() + 50));
+    assert!(client.verify_profile_with_nonce(&admin, &issuer, &true, &fresh));
+}
+
+#[test]
+fn test_unverify_needs_no_nonce_and_does_not_consume_it() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let nonce = BytesN::from_array(&env, &[9u8; 32]);
+    client.submit_verification_nonce(&issuer, &nonce, &(env.ledger().timestamp() + 50));
+
+    assert!(client.verify_profile_with_nonce(&admin, &issuer, &false, &nonce.clone()));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(
+        client.get_verification_nonce(&issuer),
+        Some((nonce.clone(), env.ledger().timestamp() + 50))
+    );
+
+    // Revocation does not spend the proof; the pending nonce still works.
+    assert!(client.verify_profile_with_nonce(&admin, &issuer, &true, &nonce));
+    assert!(client.is_verified(&issuer));
+    assert_eq!(client.get_verification_nonce(&issuer), None);
+}

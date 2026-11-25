@@ -67,6 +67,15 @@ All contracts follow a consistent TTL extension pattern:
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
+| `VerificationNonce(Address)` | `VerificationNonce { hash: BytesN<32>, expires_at: u64 }` | Pending one-time proof-of-possession challenge, removed when consumed (#1130) |
+| `ConsumedVerificationNonce(Address, BytesN<32>)` | `bool` | Permanent spent marker preventing nonce replay (#1130) |
+| `VerificationNonceRequired(Address)` | `bool` | Sticky flag set on first submission so later verifications must supply a fresh nonce (#1130) |
+
+`submit_verification_nonce` is authorized by the account itself and only
+stores the fixed-size digest plus an absolute expiry timestamp. Verification
+with `verify_profile_with_nonce` validates and consumes the challenge in the
+same invocation; a failed or replayed attempt leaves the pending entry and
+profile untouched. Un-verification never needs a nonce.
 
 #### Profile Enumeration Index
 

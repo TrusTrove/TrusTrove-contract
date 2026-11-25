@@ -40,6 +40,35 @@ pub fn batch_registered(env: &Env, registered: u32, skipped: u32) {
     );
 }
 
+/// Emitted when an account submits its own one-time verification challenge
+/// (#1130). The nonce and its absolute expiry are data, not topics, so
+/// indexers can correlate the submission with the later consumption.
+pub fn verification_nonce_submitted(
+    env: &Env,
+    address: &Address,
+    nonce: &BytesN<32>,
+    expires_at: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "verification_nonce_submitted"),
+            address.clone(),
+        ),
+        (nonce.clone(), expires_at),
+    );
+}
+
+/// Emitted when a verifier spends an account's challenge (#1130).
+pub fn verification_nonce_consumed(env: &Env, address: &Address, nonce: &BytesN<32>) {
+    env.events().publish(
+        (
+            Symbol::new(env, "verification_nonce_consumed"),
+            address.clone(),
+        ),
+        nonce.clone(),
+    );
+}
+
 pub fn profile_verified(env: &Env, address: &Address, status: bool) {
     env.events().publish(
         (Symbol::new(env, "profile_verified"), address.clone()),

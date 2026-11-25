@@ -986,6 +986,10 @@ impl RegistryContract {
     /// * `RegistryError::Unauthorized` if `caller` is neither the admin nor
     ///   the verifier.
     /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    /// * `RegistryError::NonceRequired` if `verify` is `true` and the address
+    ///   has submitted a proof-of-possession challenge (#1130). Use
+    ///   [`verify_profile_with_nonce`](Self::verify_profile_with_nonce) for
+    ///   that flow; un-verification never needs a nonce.
     ///
     /// # Returns
     /// * `bool` - `true` when the profile is updated.
@@ -995,38 +999,164 @@ impl RegistryContract {
     /// client.verify_profile(&verifier, &issuer, &true);
     /// ```
     pub fn verify_profile(env: Env, caller: Address, address: Address, verify: bool) -> bool {
+        Self::apply_verification(&env, caller, address, verify, None)
+    }
+
+    /// Submits a bounded one-time proof-of-possession challenge.
+    ///
+    /// An issuer or buyer signs a fresh 32-byte nonce with an absolute expiry
+    /// ledger timestamp (#1130). A verifier can then spend that nonce to mark
+    /// the profile verified, proving the account controls the address without
+    /// giving the verifier the account's signature. Only the digest and the
+    /// timestamp are stored; after the first submission the address is locked
+    /// into the challenge flow for later verifications.
+    ///
+    /// The nonce is single-use: consumption removes the pending entry and
+    /// leaves a permanent spent marker, so the same digest cannot be submitted
+    /// or replayed again for that address. A new digest may be submitted at
+    /// any time before the old one is consumed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The registered account proving possession.
+    /// * `nonce` - 32-byte challenge digest (fixed size by type).
+    /// * `expires_at` - Absolute ledger timestamp at which the challenge
+    ///   stops being valid; must be strictly in the future.
+    ///
+    /// # Auth
+    /// * Requires `address.require_auth()` — only the account itself can
+    ///   submit its challenge.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    /// * `RegistryError::NotRegistered` if the address has no profile.
+    /// * `RegistryError::InvalidNonce` if `expires_at <= now`.
+    /// * `RegistryError::NonceAlreadyUsed` if this digest was already spent
+    ///   for the address.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the challenge is stored. Emits
+    ///   `verification_nonce_submitted`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.submit_verification_nonce(&issuer, &nonce, &expiry);
+    /// ```
+    pub fn submit_verification_nonce(
+        env: Env,
+        address: Address,
+        nonce: BytesN<32>,
+        expires_at: u64,
+    ) -> bool {
         require_not_paused(&env);
-        Self::require_admin_or_verifier(&env, &caller);
-        caller.require_auth();
-        let key = DataKey::Profile(address.clone());
-        let mut profile: Profile = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        let verified_since_key = DataKey::VerifiedSince(address.clone());
-        profile.set_verified(verify);
-        if verify {
-            profile.set_revoked(false);
-            env.storage()
-                .persistent()
-                .set(&verified_since_key, &env.ledger().timestamp());
-            env.storage().persistent().extend_ttl(
-                &verified_since_key,
-                TTL_THRESHOLD,
-                TTL_EXTEND_TO,
-            );
-        } else {
-            profile.set_revoked(true);
-            env.storage().persistent().remove(&verified_since_key);
+        Self::require_initialized(&env);
+        address.require_auth();
+        let profile_key = DataKey::Profile(address.clone());
+        if !env.storage().persistent().has(&profile_key) {
+            panic_with_error!(&env, RegistryError::NotRegistered);
         }
-        env.storage().persistent().set(&key, &profile);
+        if expires_at <= env.ledger().timestamp() {
+            panic_with_error!(&env, RegistryError::InvalidNonce);
+        }
+        let consumed_key = DataKey::ConsumedVerificationNonce(address.clone(), nonce.clone());
+        if env.storage().persistent().has(&consumed_key) {
+            panic_with_error!(&env, RegistryError::NonceAlreadyUsed);
+        }
+
+        let challenge = VerificationNonce {
+            hash: nonce.clone(),
+            expires_at,
+        };
+        let key = DataKey::VerificationNonce(address.clone());
+        env.storage().persistent().set(&key, &challenge);
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        events::profile_verified(&env, &address, verify);
+        let required_key = DataKey::VerificationNonceRequired(address.clone());
+        env.storage().persistent().set(&required_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&required_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::verification_nonce_submitted(&env, &address, &nonce, expires_at);
         Self::extend_instance_ttl(&env);
         true
+    }
+
+    /// Returns the account's pending verification challenge, if any.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The account to inspect.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Returns
+    /// * `Option<(BytesN<32>, u64)>` - `(nonce, expires_at)` while a challenge
+    ///   is pending, `None` before submission or after consumption. An
+    ///   expired challenge is still reported until a verifier rejects and
+    ///   clears it; callers must compare `expires_at` with the ledger time.
+    pub fn get_verification_nonce(env: Env, address: Address) -> Option<(BytesN<32>, u64)> {
+        let key = DataKey::VerificationNonce(address);
+        match env.storage().persistent().get::<_, VerificationNonce>(&key) {
+            Some(challenge) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some((challenge.hash, challenge.expires_at))
+            }
+            None => None,
+        }
+    }
+
+    /// Verifies a profile using the account's one-time challenge.
+    ///
+    /// The caller still needs admin or verifier rights (#732), but the
+    /// decision is only accepted when it spends a matching, unexpired nonce
+    /// submitted by `address` itself (#1130). Consumption and the profile
+    /// update are in the same invocation, so a failed or replayed call leaves
+    /// the challenge pending and the profile unchanged.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - Admin or verifier authorized to decide.
+    /// * `address` - The registered profile being verified / un-verified.
+    /// * `verify` - `true` to verify (validates and consumes the challenge),
+    ///   `false` to un-verify. Revocation needs no proof, so any supplied
+    ///   nonce is ignored in that direction.
+    /// * `nonce` - The 32-byte digest previously submitted by `address`.
+    ///
+    /// # Auth
+    /// * Requires `caller.require_auth()`, where `caller` is the admin or the
+    ///   verifier. The account's auth is not needed here: it already signed
+    ///   the submission.
+    ///
+    /// # Panics
+    /// * `RegistryError::InvalidNonce` if no challenge is pending or the
+    ///   digest does not match.
+    /// * `RegistryError::NonceExpired` if the challenge has expired.
+    /// * `RegistryError::NonceAlreadyUsed` on a replay of a spent digest.
+    /// * The other verification panics documented on
+    ///   [`verify_profile`](Self::verify_profile).
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the profile is updated. Emits
+    ///   `verification_nonce_consumed` (for `verify = true`) followed by the
+    ///   usual `profile_verified` audit event.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.verify_profile_with_nonce(&verifier, &issuer, &true, &nonce);
+    /// ```
+    pub fn verify_profile_with_nonce(
+        env: Env,
+        caller: Address,
+        address: Address,
+        verify: bool,
+        nonce: BytesN<32>,
+    ) -> bool {
+        Self::apply_verification(&env, caller, address, verify, Some(nonce))
     }
 
     /// Transfers admin ownership to a new address.
@@ -1326,5 +1456,99 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Shared verification implementation for the legacy and nonce-aware
+    /// entry points (#1130).
+    ///
+    /// Both paths apply the same auth, flag updates and `VerifiedSince`
+    /// handling. A `Some(nonce)` additionally validates and spends the
+    /// account's pending challenge before any profile write; `None` is the
+    /// legacy path, which is blocked for verification once an account has
+    /// opted into the challenge flow.
+    fn apply_verification(
+        env: &Env,
+        caller: Address,
+        address: Address,
+        verify: bool,
+        nonce: Option<BytesN<32>>,
+    ) -> bool {
+        require_not_paused(env);
+        Self::require_admin_or_verifier(env, &caller);
+        caller.require_auth();
+        let key = DataKey::Profile(address.clone());
+        let mut profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(env, RegistryError::NotFound));
+
+        if verify {
+            match nonce {
+                Some(nonce) => Self::consume_verification_nonce(env, &address, &nonce),
+                None => {
+                    let required_key = DataKey::VerificationNonceRequired(address.clone());
+                    if env.storage().persistent().has(&required_key)
+                        || env
+                            .storage()
+                            .persistent()
+                            .has(&DataKey::VerificationNonce(address.clone()))
+                    {
+                        panic_with_error!(env, RegistryError::NonceRequired);
+                    }
+                }
+            }
+        }
+
+        let verified_since_key = DataKey::VerifiedSince(address.clone());
+        profile.set_verified(verify);
+        if verify {
+            profile.set_revoked(false);
+            env.storage()
+                .persistent()
+                .set(&verified_since_key, &env.ledger().timestamp());
+            env.storage().persistent().extend_ttl(
+                &verified_since_key,
+                TTL_THRESHOLD,
+                TTL_EXTEND_TO,
+            );
+        } else {
+            profile.set_revoked(true);
+            env.storage().persistent().remove(&verified_since_key);
+        }
+        env.storage().persistent().set(&key, &profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::profile_verified(env, &address, verify);
+        Self::extend_instance_ttl(env);
+        true
+    }
+
+    /// Validates and atomically spends a pending challenge (#1130).
+    fn consume_verification_nonce(env: &Env, address: &Address, nonce: &BytesN<32>) {
+        let pending_key = DataKey::VerificationNonce(address.clone());
+        let pending: VerificationNonce = env
+            .storage()
+            .persistent()
+            .get(&pending_key)
+            .unwrap_or_else(|| panic_with_error!(env, RegistryError::InvalidNonce));
+        if pending.hash != *nonce {
+            panic_with_error!(env, RegistryError::InvalidNonce);
+        }
+        if pending.expires_at <= env.ledger().timestamp() {
+            panic_with_error!(env, RegistryError::NonceExpired);
+        }
+        let consumed_key = DataKey::ConsumedVerificationNonce(address.clone(), nonce.clone());
+        if env.storage().persistent().has(&consumed_key) {
+            panic_with_error!(env, RegistryError::NonceAlreadyUsed);
+        }
+
+        env.storage().persistent().remove(&pending_key);
+        env.storage().persistent().set(&consumed_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&consumed_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::verification_nonce_consumed(env, address, nonce);
     }
 }

@@ -22,4 +22,16 @@ pub enum RegistryError {
     /// The `caller` passed to `verify_profile` is neither the stored admin
     /// nor the stored verifier (#732).
     Unauthorized = 9,
+    /// No pending challenge exists for the address, or the supplied nonce does
+    /// not match the stored challenge (#1130).
+    InvalidNonce = 10,
+    /// The submitted/ supplied nonce is not valid at the current ledger
+    /// timestamp (#1130).
+    NonceExpired = 11,
+    /// This nonce was already consumed for the address and cannot be replayed
+    /// (#1130).
+    NonceAlreadyUsed = 12,
+    /// A verification was attempted without a nonce after the address opted
+    /// into the challenge flow (#1130).
+    NonceRequired = 13,
 }

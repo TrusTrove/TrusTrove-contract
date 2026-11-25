@@ -986,6 +986,40 @@ Emitted when a batch registration completes.
 
 ---
 
+### `verification_nonce_submitted`
+
+Emitted when a registered account submits its own one-time proof-of-possession
+challenge (#1130). The account must authorize the call; only the 32-byte digest
+and expiry are recorded.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"verification_nonce_submitted"` |
+| `topic[1]` | `Address` | Account that proved possession |
+| **Data** | `(BytesN<32>, u64)` | `(nonce, expires_at)` absolute ledger timestamp |
+
+**Emitted by:** `submit_verification_nonce()` in `contracts/registry/src/lib.rs`
+
+---
+
+### `verification_nonce_consumed`
+
+Emitted when an admin/verifier spends a matching, unexpired challenge while
+verifying a profile (#1130). The pending nonce is removed in the same
+invocation and the digest is permanently marked spent.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"verification_nonce_consumed"` |
+| `topic[1]` | `Address` | Account whose challenge was spent |
+| **Data** | `BytesN<32>` | Consumed nonce |
+
+**Emitted by:** `verify_profile_with_nonce()` in `contracts/registry/src/lib.rs`
+
+---
+
 ### `profile_verified`
 
 Emitted when a profile's verification status is checked/updated.
