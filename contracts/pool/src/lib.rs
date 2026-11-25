@@ -2266,8 +2266,6 @@ impl PoolContract {
         Self::read_lifetime_volume(&env, &DataKey::LifetimeRepaidVolume)
     }
 
-    }
-
     /// Returns the LP's position, including shares, value, yield, and deposits.
     ///
     /// # Arguments
