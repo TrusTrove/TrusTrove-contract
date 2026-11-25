@@ -1645,6 +1645,19 @@ fn test_history_page_preserves_order_and_total() {
         assert_eq!(total, full.len());
         assert_eq!(page, full.slice(offset..offset + 1));
     }
+    let (page, total) = client.get_history_page(&invoice_id, &0, &100);
+    assert_eq!(page, full);
+    assert_eq!(total, full.len());
+    let (page, total) = client.get_history_page(&invoice_id, &1, &100);
+    assert_eq!(page, full.slice(1..full.len()));
+    assert_eq!(total, full.len());
+    assert_eq!(
+        client.try_get_history_page(&invoice_id, &0, &101),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::InvalidConfig as u32,
+        )))
+    );
+
     let (page, total) = client.get_history_page(&invoice_id, &u32::MAX, &100);
     assert!(page.is_empty());
     assert_eq!(total, full.len());
@@ -2291,30 +2304,6 @@ fn test_get_history_does_not_create_missing_entry() {
     assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
     assert!(client.get_history(&invoice_id).is_empty());
     assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
-}
-
-#[test]
-fn test_get_history_page_pagination_and_total_count() {
-    let (env, client, admin, pool_contract, usdc_asset, issuer) = setup();
-    let invoice_id = generate_invoice_id(&env, 999);
-
-    client.lock(&invoice_id, &1000, &issuer);
-    client.release_to_issuer(&invoice_id, &issuer);
-
-    let (page1, total1) = client.get_history_page(&invoice_id, &0, &1);
-    assert_eq!(total1, 2);
-    assert_eq!(page1.len(), 1);
-
-    let (page2, total2) = client.get_history_page(&invoice_id, &1, &10);
-    assert_eq!(total2, 2);
-    assert_eq!(page2.len(), 1);
-
-    let (page_empty, total_empty) = client.get_history_page(&invoice_id, &10, &5);
-    assert_eq!(total_empty, 2);
-    assert_eq!(page_empty.len(), 0);
-
-    let full_history = client.get_history(&invoice_id);
-    assert_eq!(full_history.len() as u32, total1);
 }
 
 #[test]
