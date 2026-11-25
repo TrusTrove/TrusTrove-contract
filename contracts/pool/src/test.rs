@@ -20,8 +20,8 @@ use crate::{
         MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SHARE_PRICE_SCALE, SUGGESTED_DISCOUNT_CEILING_BPS,
         SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
-    DataKey, PoolContract, PoolContractClient, PoolError, DEFAULT_MIN_INITIAL_DEPOSIT,
-    DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
+    DataKey, FundingRejectionReason, PoolContract, PoolContractClient, PoolError,
+    DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -1918,6 +1918,125 @@ fn test_utilization_rate_calculates_correctly() {
     assert_eq!(
         te.pool.get_utilization_rate(),
         (DEFAULT_FUNDED_AMOUNT * 10000 / 10_000_000_000) as u32
+    );
+}
+
+#[test]
+fn test_max_fundable_amount_handles_empty_pool_and_exact_utilization_boundary() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    assert_eq!(te.pool.get_max_fundable_amount(), 0);
+
+    te.env.mock_all_auths();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let max_fundable = te.pool.get_max_fundable_amount();
+    assert_eq!(max_fundable, 85_009_999_999);
+    assert_eq!((max_fundable * 10_000 / 100_000_000_000) as u32, 8500);
+    assert_eq!(((max_fundable + 1) * 10_000 / 100_000_000_000) as u32, 8501);
+}
+
+#[test]
+fn test_funding_eligibility_reports_metrics_without_writing_pool_state() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.env.set_auths(&[]);
+
+    let eligibility = te.pool.get_funding_eligibility(&invoice_id);
+
+    assert!(eligibility.is_eligible);
+    assert_eq!(eligibility.invoice_status, 1);
+    assert!(eligibility.funding_asset_matches);
+    assert_eq!(eligibility.funded_amount, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(eligibility.available_liquidity, 100_000_000_000);
+    assert_eq!(eligibility.max_fundable_amount, 100_000_000_000);
+    assert_eq!(eligibility.utilization_rate_bps, 0);
+    assert_eq!(eligibility.max_utilization_bps, 10_000);
+    assert!(eligibility.rejection_reasons.is_empty());
+    assert_eq!(te.pool.get_stats().total_funded, 0);
+    let has_funding_record = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(invoice_id.clone()))
+    });
+    assert!(!has_funding_record);
+}
+
+#[test]
+fn test_funding_eligibility_reports_asset_capacity_and_amount_rejections() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let wrong_asset_invoice = create_and_list(&te, &te.xlm_id);
+    let wrong_asset = te.pool.get_funding_eligibility(&wrong_asset_invoice);
+    assert!(!wrong_asset.is_eligible);
+    assert!(!wrong_asset.funding_asset_matches);
+    assert_eq!(
+        wrong_asset.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::AssetMismatch
+    );
+
+    let over_capacity_invoice = create_and_list(&te, &te.usdc_id);
+    let over_capacity = te.pool.get_funding_eligibility(&over_capacity_invoice);
+    assert!(!over_capacity.is_eligible);
+    assert_eq!(over_capacity.max_fundable_amount, 8_500_999_999);
+    assert_eq!(
+        over_capacity.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::UtilizationCapExceeded
+    );
+
+    let zero_amount_invoice = BytesN::from_array(&te.env, &[7; 32]);
+    let mock_invoice_id = te.env.register(MockHugeFaceInvoice, ());
+    MockHugeFaceInvoiceClient::new(&te.env, &mock_invoice_id).configure(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &1,
+        &5000,
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_invoice_id);
+    });
+    let zero_amount = te.pool.get_funding_eligibility(&zero_amount_invoice);
+    assert!(!zero_amount.is_eligible);
+    assert_eq!(zero_amount.funded_amount, 0);
+    assert_eq!(
+        zero_amount.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::InvalidAmount
+    );
+}
+
+#[test]
+fn test_funding_eligibility_rejects_unknown_invoice() {
+    let te = setup();
+    let missing_invoice = BytesN::from_array(&te.env, &[0; 32]);
+    assert!(te
+        .pool
+        .try_get_funding_eligibility(&missing_invoice)
+        .is_err());
+}
+
+#[test]
+fn test_funding_preflight_reports_paused_pool() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.pause();
+
+    assert_eq!(te.pool.get_max_fundable_amount(), 0);
+    let eligibility = te.pool.get_funding_eligibility(&invoice_id);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(eligibility.max_fundable_amount, 0);
+    assert_eq!(
+        eligibility.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::ContractPaused
     );
 }
 
