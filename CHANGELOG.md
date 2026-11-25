@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `invoice`: `get_amount_due(invoice_id) -> u128`, the amount the buyer owes
+  now for every status: `0` for invoices that were never funded (`Created`,
+  `Listed`, `Expired`, `Cancelled`) and once `Repaid`; `remaining_balance`
+  while `Funded`, `Active` or `Confirmed`, including after partial
+  repayments; and the unpaid `remaining_balance` after `Defaulted`. Unlike
+  `get_remaining_balance`, it does not report the face value before funding.
+  Read-only, no authorization, no storage change (#1134)
+
 ### Changed
 
 - `invoice`: `list_for_financing` and `batch_list_for_financing` now require

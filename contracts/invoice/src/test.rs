@@ -8189,3 +8189,154 @@ fn test_created_at_range_index_view() {
         Err(Ok(InvoiceError::InvalidPageSize.into()))
     );
 }
+
+// ============== ISSUE #1134: REMAINING AMOUNT DUE VIEW ==============
+//
+// `get_amount_due` reports what the buyer owes now for every status, where
+// the stored `remaining_balance` starts at `face_value` even before anything
+// is funded.
+
+/// An invoice contract wired to a pool and escrow so every status can be
+/// reached, plus a listed invoice ready to fund.
+fn amount_due_fixture() -> (
+    Env,
+    InvoiceContractClient<'static>,
+    Address,
+    Address,
+    Address,
+    Address,
+    BytesN<32>,
+    u64,
+) {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
+    client.set_escrow_contract(&escrow);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    (env, client, issuer, buyer, usdc, pool, invoice_id, due_date)
+}
+
+#[test]
+fn test_amount_due_is_zero_until_the_invoice_is_funded() {
+    let (env, client, issuer, _, _, _, invoice_id, _) = amount_due_fixture();
+    // The stored balance already reads the face value; nothing is owed yet.
+    assert_eq!(
+        client.get_remaining_balance(&invoice_id),
+        DEFAULT_FACE_VALUE
+    );
+    assert_eq!(client.get_amount_due(&invoice_id), 0);
+
+    attest(&env, &client, &invoice_id);
+    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Listed);
+    assert_eq!(client.get_amount_due(&invoice_id), 0);
+
+    // An expired listing was never funded either.
+    client.set_expiry_window(&1);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 1);
+    assert!(client.expire_listing(&invoice_id, &issuer));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Expired);
+    assert_eq!(client.get_amount_due(&invoice_id), 0);
+}
+
+#[test]
+fn test_amount_due_is_zero_for_a_cancelled_invoice() {
+    let (_, client, _, _, _, _, invoice_id, _) = amount_due_fixture();
+    assert!(client.cancel(&invoice_id));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Cancelled);
+    assert_eq!(client.get_amount_due(&invoice_id), 0);
+}
+
+#[test]
+fn test_amount_due_tracks_funding_partial_repayment_and_settlement() {
+    let (env, client, issuer, buyer, usdc, pool, invoice_id, _) = amount_due_fixture();
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    // Funded at a discount: the buyer still owes the full face value.
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Funded);
+    assert_eq!(client.get_amount_due(&invoice_id), DEFAULT_FACE_VALUE);
+
+    client.mark_shipped(&invoice_id);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Active);
+    assert_eq!(client.get_amount_due(&invoice_id), DEFAULT_FACE_VALUE);
+
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+    assert_eq!(client.get_amount_due(&invoice_id), DEFAULT_FACE_VALUE);
+
+    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+    let first = 400_000_000u128;
+    assert!(client.repay_partial(&invoice_id, &first));
+    assert_eq!(
+        client.get_amount_due(&invoice_id),
+        DEFAULT_FACE_VALUE - first
+    );
+
+    // The amount due is exactly the largest installment the contract accepts.
+    let due = client.get_amount_due(&invoice_id);
+    assert_eq!(
+        client.try_repay_partial(&invoice_id, &(due + 1)),
+        Err(Ok(InvoiceError::RepaymentExceedsBalance.into()))
+    );
+    assert!(client.repay_partial(&invoice_id, &due));
+
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Repaid);
+    assert_eq!(client.get_amount_due(&invoice_id), 0);
+}
+
+#[test]
+fn test_amount_due_keeps_the_unpaid_balance_after_default() {
+    let (env, client, issuer, buyer, usdc, pool, invoice_id, due_date) = amount_due_fixture();
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    client.mark_shipped(&invoice_id);
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+
+    mint_tokens(&env, &usdc, &buyer, DEFAULT_FACE_VALUE as i128);
+    let paid = 250_000_000u128;
+    assert!(client.repay_partial(&invoice_id, &paid));
+
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
+    assert!(client.trigger_default(&invoice_id));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Defaulted);
+    // What was never repaid is still outstanding, though no longer repayable here.
+    assert_eq!(
+        client.get_amount_due(&invoice_id),
+        DEFAULT_FACE_VALUE - paid
+    );
+}
+
+#[test]
+fn test_amount_due_rejects_an_unknown_invoice() {
+    let (env, client, _, _, _, _, _, _) = amount_due_fixture();
+    let unknown = BytesN::from_array(&env, &[0xAB; 32]);
+    assert_eq!(
+        client.try_get_amount_due(&unknown),
+        Err(Ok(InvoiceError::NotFound.into()))
+    );
+}
+
+#[test]
+fn test_amount_due_needs_no_authorization_and_changes_nothing() {
+    let (env, client, _, _, usdc, pool, invoice_id, _) = amount_due_fixture();
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+
+    let before = client.get(&invoice_id);
+    env.set_auths(&[]);
+    assert_eq!(client.get_amount_due(&invoice_id), DEFAULT_FACE_VALUE);
+    assert_eq!(client.get_amount_due(&invoice_id), DEFAULT_FACE_VALUE);
+    assert!(env.auths().is_empty());
+    let after = client.get(&invoice_id);
+    assert_eq!(after.remaining_balance, before.remaining_balance);
+    assert_eq!(after.status, before.status);
+}

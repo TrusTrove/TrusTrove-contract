@@ -2604,6 +2604,59 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id).repaid_amount
     }
 
+    /// Returns the amount the buyer still owes on an invoice right now, in the
+    /// funding asset's base units (issue #1134).
+    ///
+    /// Unlike [`Self::get_remaining_balance`], which is the raw stored field
+    /// and starts at `face_value` the moment an invoice is created, this view
+    /// answers "what is outstanding" for every status, so clients do not have
+    /// to reimplement the repayment accounting:
+    ///
+    /// | Status | Amount due |
+    /// | --- | --- |
+    /// | `Created`, `Listed` (never funded) | `0` — nothing has been advanced |
+    /// | `Expired`, `Cancelled` (never funded) | `0` |
+    /// | `Funded`, `Active`, `Confirmed` | `remaining_balance`: `face_value` less every [`Self::repay_partial`] installment |
+    /// | `Repaid` | `0` |
+    /// | `Defaulted` | `remaining_balance`: the unpaid obligation at default, which no longer accepts repayment through this contract |
+    ///
+    /// The value never exceeds `face_value`, and while the invoice is
+    /// repayable it equals the largest `amount` [`Self::repay_partial`]
+    /// accepts.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotInitialized` if the contract has not been initialized.
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `u128` - The outstanding amount, or `0` when nothing is owed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let due = client.get_amount_due(&invoice_id);
+    /// ```
+    pub fn get_amount_due(env: Env, invoice_id: BytesN<32>) -> u128 {
+        let invoice = Self::get_invoice(&env, invoice_id);
+        match invoice.status {
+            InvoiceStatus::Funded
+            | InvoiceStatus::Active
+            | InvoiceStatus::Confirmed
+            | InvoiceStatus::Defaulted => invoice.remaining_balance,
+            InvoiceStatus::Created
+            | InvoiceStatus::Listed
+            | InvoiceStatus::Expired
+            | InvoiceStatus::Cancelled
+            | InvoiceStatus::Repaid => 0,
+        }
+    }
+
     /// Returns the discount basis points for an invoice.
     ///
     /// # Arguments
