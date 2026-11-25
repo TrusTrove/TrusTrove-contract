@@ -70,6 +70,11 @@ python3 scripts/deployment_manifest.py verify deployments.json
 This verifies the local build files. A resumed deployment may reuse existing
 network addresses, so this check does not establish their on-chain code hashes.
 
+Run `bash scripts/deploy.sh --dry-run` or `pwsh -File scripts/deploy.ps1 -DryRun`
+to inspect the planned deployment and wiring. Preview needs no Stellar CLI.
+It leaves `.deployed-addresses`, `.env.deployed`, and `deployments.json` intact.
+With fresh mode, it plans against an empty address list without clearing it.
+
 #### Single-Contract Hotfix Redeploys
 
 To hotfix a single contract without rerunning the full pipeline, pass
