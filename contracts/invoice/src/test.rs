@@ -8794,3 +8794,266 @@ fn test_repayment_eligibility_reports_invalid_status_and_empty_balance() {
         ]
     );
 }
+
+// ============== ISSUE #1137: ISSUER CONFIRMATION TIMESTAMP ==============
+
+/// Escrows and ships an invoice, stopping in `Active` just before either
+/// party confirms delivery.
+fn shipped_invoice() -> (
+    Env,
+    InvoiceContractClient<'static>,
+    Address,
+    Address,
+    BytesN<32>,
+) {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+    client.mark_shipped(&invoice_id);
+
+    (env, client, issuer, buyer, invoice_id)
+}
+
+#[test]
+fn test_issuer_confirmed_at_is_none_until_issuer_confirms() {
+    let (_env, client, _issuer, buyer, invoice_id) = shipped_invoice();
+
+    assert_eq!(client.get_issuer_confirmed_at(&invoice_id), None);
+
+    // A buyer confirmation does not count as the issuer's.
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(client.get_issuer_confirmed_at(&invoice_id), None);
+}
+
+#[test]
+fn test_issuer_confirmation_records_timestamp_and_keeps_transition_rules() {
+    let (env, client, issuer, buyer, invoice_id) = shipped_invoice();
+
+    let issuer_confirmed_at = env.ledger().timestamp() + 11;
+    env.ledger().set_timestamp(issuer_confirmed_at);
+    client.confirm_delivery(&invoice_id, &issuer);
+
+    assert_eq!(
+        client.get_issuer_confirmed_at(&invoice_id),
+        Some(issuer_confirmed_at)
+    );
+    // Dual-confirmation rules are unchanged: one confirmation leaves the
+    // invoice Active.
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Active);
+
+    // The buyer's later confirmation does not overwrite the issuer's timing.
+    env.ledger().set_timestamp(issuer_confirmed_at + 60);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(
+        client.get_issuer_confirmed_at(&invoice_id),
+        Some(issuer_confirmed_at)
+    );
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+}
+
+#[test]
+fn test_issuer_confirmed_at_unknown_invoice_panics() {
+    let (env, client, _issuer, _buyer, _registry, _usdc) = setup();
+    let missing = BytesN::from_array(&env, &[9u8; 32]);
+    let err = client
+        .try_get_issuer_confirmed_at(&missing)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, InvoiceError::NotFound.into());
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #10)")]
+fn test_issuer_confirmation_timestamp_is_not_overwritten_by_reconfirm() {
+    let (_env, client, issuer, _buyer, invoice_id) = shipped_invoice();
+
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &issuer);
+}
+
+// ============== ISSUE #1149: DEFAULT ELIGIBILITY VIEW ==============
+
+#[test]
+fn test_default_eligibility_reports_not_due_before_and_at_boundary() {
+    let (env, client, _buyer, invoice_id, _pool, _escrow) = setup_confirmed_invoice();
+    let due_date = client.get(&invoice_id).due_date;
+
+    // Before the due date.
+    env.ledger().set_timestamp(due_date - 1);
+    let eligibility = client.get_default_eligibility(&invoice_id);
+    assert!(!eligibility.eligible);
+    assert_eq!(
+        eligibility.reason,
+        DefaultEligibilityReason::DueDateNotPassed
+    );
+
+    // Exact boundary `due_date + grace` matches trigger_default, which only
+    // allows default when `now > due_date + grace`.
+    env.ledger().set_timestamp(due_date + DEFAULT_GRACE_SECONDS);
+    let eligibility = client.get_default_eligibility(&invoice_id);
+    assert!(!eligibility.eligible);
+    assert_eq!(
+        eligibility.reason,
+        DefaultEligibilityReason::DueDateNotPassed
+    );
+
+    // One second later the invoice becomes eligible.
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
+    let eligibility = client.get_default_eligibility(&invoice_id);
+    assert!(eligibility.eligible);
+    assert_eq!(eligibility.reason, DefaultEligibilityReason::Eligible);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #11)")]
+fn test_default_eligibility_boundary_matches_trigger_default() {
+    let (env, client, _buyer, invoice_id, _pool, _escrow) = setup_confirmed_invoice();
+    let due_date = client.get(&invoice_id).due_date;
+    env.ledger().set_timestamp(due_date + DEFAULT_GRACE_SECONDS);
+
+    // The view says not eligible at the exact boundary, and trigger_default
+    // agrees by rejecting with DueDateNotPassed.
+    assert!(!client.get_default_eligibility(&invoice_id).eligible);
+    client.trigger_default(&invoice_id);
+}
+
+#[test]
+fn test_default_eligibility_rejects_non_defaultable_status() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    // Created invoices cannot be defaulted regardless of time.
+    env.ledger()
+        .set_timestamp(due_date + DEFAULT_GRACE_SECONDS + 1);
+    let eligibility = client.get_default_eligibility(&invoice_id);
+    assert!(!eligibility.eligible);
+    assert_eq!(eligibility.reason, DefaultEligibilityReason::InvalidStatus);
+
+    // Repeated reads are idempotent and never mutate the invoice.
+    let again = client.get_default_eligibility(&invoice_id);
+    assert_eq!(again, eligibility);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
+}
+
+#[test]
+fn test_default_eligibility_honours_configured_grace_period() {
+    let (env, client, _buyer, invoice_id, _pool, _escrow) = setup_confirmed_invoice();
+    let due_date = client.get(&invoice_id).due_date;
+
+    client.set_default_grace_seconds(&3600);
+    env.ledger().set_timestamp(due_date + 3600);
+    assert_eq!(
+        client.get_default_eligibility(&invoice_id).reason,
+        DefaultEligibilityReason::DueDateNotPassed
+    );
+
+    env.ledger().set_timestamp(due_date + 3601);
+    assert!(client.get_default_eligibility(&invoice_id).eligible);
+}
+
+// ============== ISSUE #1162: PROOF-OF-DELIVERY HASH ==============
+
+#[test]
+fn test_record_delivery_evidence_by_buyer_emits_event_and_is_readable() {
+    let (env, client, _issuer, buyer, invoice_id) = shipped_invoice();
+    let evidence_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+    let contract_id = client.address.clone();
+    let recorded = client.record_delivery_evidence(&invoice_id, &buyer, &evidence_hash);
+    let events = env.events().all();
+
+    assert!(recorded);
+    assert_eq!(
+        client.get_delivery_evidence(&invoice_id),
+        Some(evidence_hash.clone())
+    );
+
+    let (event_contract, topics, data) = events.last().expect("expected evidence event");
+    assert_eq!(event_contract, contract_id);
+    assert_eq!(
+        topics,
+        (
+            Symbol::new(&env, "delivery_evidence_recorded"),
+            invoice_id.clone(),
+            buyer.clone()
+        )
+            .into_val(&env)
+    );
+    assert_eq!(
+        BytesN::<32>::try_from_val(&env, &data).unwrap(),
+        evidence_hash
+    );
+}
+
+#[test]
+fn test_record_delivery_evidence_by_issuer_after_confirmation() {
+    let (env, client, issuer, buyer, invoice_id) = shipped_invoice();
+    client.confirm_delivery(&invoice_id, &issuer);
+    client.confirm_delivery(&invoice_id, &buyer);
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Confirmed);
+
+    // The invoice has been shipped, so evidence is still accepted after both
+    // parties confirmed delivery.
+    let evidence_hash = BytesN::from_array(&env, &[3u8; 32]);
+    assert!(client.record_delivery_evidence(&invoice_id, &issuer, &evidence_hash));
+    assert_eq!(
+        client.get_delivery_evidence(&invoice_id),
+        Some(evidence_hash)
+    );
+}
+
+#[test]
+fn test_get_delivery_evidence_is_none_before_attachment() {
+    let (_env, client, _issuer, _buyer, invoice_id) = shipped_invoice();
+    assert_eq!(client.get_delivery_evidence(&invoice_id), None);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_record_delivery_evidence_rejects_stranger() {
+    let (env, client, _issuer, _buyer, invoice_id) = shipped_invoice();
+    let stranger = Address::generate(&env);
+    client.record_delivery_evidence(
+        &invoice_id,
+        &stranger,
+        &BytesN::from_array(&env, &[1u8; 32]),
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #8)")]
+fn test_record_delivery_evidence_rejects_before_shipment() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    let pool = mock_pool_with_asset(&env, &usdc);
+    client.set_pool_contract(&pool);
+    client.mark_funded(&invoice_id, &pool, &usdc, &DEFAULT_FUNDED_AMOUNT);
+
+    client.record_delivery_evidence(&invoice_id, &issuer, &BytesN::from_array(&env, &[1u8; 32]));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #33)")]
+fn test_record_delivery_evidence_rejects_zero_hash() {
+    let (env, client, issuer, _buyer, invoice_id) = shipped_invoice();
+    client.record_delivery_evidence(&invoice_id, &issuer, &BytesN::from_array(&env, &[0u8; 32]));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #34)")]
+fn test_record_delivery_evidence_is_write_once() {
+    let (env, client, issuer, _buyer, invoice_id) = shipped_invoice();
+    client.record_delivery_evidence(&invoice_id, &issuer, &BytesN::from_array(&env, &[1u8; 32]));
+    client.record_delivery_evidence(&invoice_id, &issuer, &BytesN::from_array(&env, &[2u8; 32]));
+}
