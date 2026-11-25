@@ -1087,6 +1087,19 @@ impl EscrowContract {
     /// ```ignore
     /// let history = client.get_history(&invoice_id);
     /// ```
+    pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
+        let key = DataKey::History(invoice_id);
+        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
+            Some(history) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                history
+            }
+            None => Vec::new(&env),
+        }
+    }
+
     /// Returns a paginated slice of the history events for an invoice, along with the total count.
     pub fn get_history_page(
         env: Env,
@@ -1109,47 +1122,6 @@ impl EscrowContract {
         }
         (page, total)
     }
-
-    pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
-        let key = DataKey::History(invoice_id);
-        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
-            Some(history) => {
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                history
-            }
-            None => Vec::new(&env),
-        }
-    }
-
-/// Returns a paginated slice of the escrow event history for the given invoice ID,
-    /// along with the total count of events in the history vector.
-    /// Reads up to 100 escrow events in append order, starting at `offset`.
-    /// Validates that `limit` is between 1 and 100.
-    pub fn get_history_page(
-        env: Env,
-        invoice_id: BytesN<32>,
-        offset: u32,
-        limit: u32,
-    ) -> (Vec<EscrowEvent>, u32) {
-        if limit == 0 || limit > 100 {
-            panic_with_error!(&env, EscrowError::InvalidConfig);
-        }
-        let history = Self::get_history(env.clone(), invoice_id);
-        let total = history.len();
-        let mut page = Vec::new(&env);
-        let mut i = offset;
-        let end = core::cmp::min(offset.saturating_add(limit), total);
-        while i < end {
-            if let Some(event) = history.get(i) {
-                page.push_back(event);
-            }
-            i += 1;
-        }
-        (page, total)
-    }
-
     fn append_history(
         env: &Env,
         invoice_id: &BytesN<32>,
