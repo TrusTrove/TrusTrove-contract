@@ -4460,3 +4460,156 @@ fn test_get_metadata_key_count_not_found_panics() {
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());
 }
+
+// ============== ISSUE #1129: ROLE TRANSITION EVENT ==============
+
+/// Decoded `(previous_role, new_role, version)` payloads of `role_changed`
+/// events for `address`, in emission order.
+fn role_changed_payloads(
+    env: &Env,
+    events: &Vec<(Address, Vec<Val>, Val)>,
+    address: &Address,
+) -> std::vec::Vec<(Role, Role, u32)> {
+    let mut out = std::vec::Vec::new();
+    for event in events.iter() {
+        let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
+            Ok(t) => t,
+            Err(_) => continue,
+        };
+        if topics.len() != 2 {
+            continue;
+        }
+        let name: Symbol = match topics.get(0).unwrap().try_into_val(env) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let who: Address = match topics.get(1).unwrap().try_into_val(env) {
+            Ok(a) => a,
+            Err(_) => continue,
+        };
+        if name == Symbol::new(env, "role_changed") && who == *address {
+            out.push(
+                event
+                    .2
+                    .clone()
+                    .try_into_val(env)
+                    .expect("(Role, Role, u32) payload"),
+            );
+        }
+    }
+    out
+}
+
+#[test]
+fn test_change_role_emits_previous_new_and_version() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    let before = client.get_profile(&issuer);
+
+    assert!(client.change_role(&issuer, &Role::Buyer));
+    let events = env.events().all();
+
+    assert_eq!(client.get_role(&issuer), Some(Role::Buyer));
+    assert_eq!(client.get_role_version(&issuer), 1);
+    assert_eq!(
+        role_changed_payloads(&env, &events, &issuer),
+        [(Role::Issuer, Role::Buyer, 1)]
+    );
+
+    // Only the role bit changes: verification and metadata are preserved.
+    let after = client.get_profile(&issuer);
+    assert_eq!(after.registered_at, before.registered_at);
+    assert_eq!(after.metadata, before.metadata);
+    assert_eq!(after.packed_flags, before.packed_flags | 1);
+    assert!(after.verified());
+    assert!(!after.revoked());
+
+    // Enumeration follows the decoded role, not the old registration slot.
+    assert_eq!(client.get_profile_count(&Role::Issuer), 0);
+    assert_eq!(client.get_profile_count(&Role::Buyer), 1);
+    assert_eq!(client.list_profiles(&Role::Issuer, &0, &50), vec![&env]);
+    assert_eq!(
+        client.list_profiles(&Role::Buyer, &0, &50),
+        vec![&env, issuer]
+    );
+}
+
+#[test]
+fn test_change_role_idempotent_call_emits_no_event() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    assert!(client.change_role(&issuer, &Role::Buyer));
+    let first_events = env.events().all();
+    assert!(client.change_role(&issuer, &Role::Buyer));
+    let second_events = env.events().all();
+
+    assert_eq!(
+        role_changed_payloads(&env, &first_events, &issuer),
+        [(Role::Issuer, Role::Buyer, 1)]
+    );
+    assert!(role_changed_payloads(&env, &second_events, &issuer).is_empty());
+    assert_eq!(client.get_role_version(&issuer), 1);
+    assert_eq!(client.get_profile_count(&Role::Issuer), 0);
+    assert_eq!(client.get_profile_count(&Role::Buyer), 1);
+}
+
+#[test]
+fn test_repeated_role_changes_increment_version_and_keep_index_consistent() {
+    let (env, _admin, client) = setup();
+    let first = Address::generate(&env);
+    let second = Address::generate(&env);
+    client.register_issuer(&first, &map![&env]);
+    client.register_issuer(&second, &map![&env]);
+
+    client.change_role(&first, &Role::Buyer);
+    let first_events = env.events().all();
+    client.change_role(&first, &Role::Issuer);
+    let second_events = env.events().all();
+
+    assert_eq!(
+        role_changed_payloads(&env, &first_events, &first),
+        [(Role::Issuer, Role::Buyer, 1)]
+    );
+    assert_eq!(
+        role_changed_payloads(&env, &second_events, &first),
+        [(Role::Buyer, Role::Issuer, 2)]
+    );
+    assert_eq!(client.get_role_version(&first), 2);
+    assert_eq!(client.get_role_version(&second), 0);
+    assert_eq!(client.get_profile_count(&Role::Issuer), 2);
+    assert_eq!(client.get_profile_count(&Role::Buyer), 0);
+    // The moved address is appended to its new role, so the original issuer
+    // slot order becomes [second, first] after the round trip.
+    assert_eq!(
+        client.list_profiles(&Role::Issuer, &0, &50),
+        vec![&env, second, first]
+    );
+    assert_eq!(client.list_profiles(&Role::Buyer, &0, &50), vec![&env]);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_change_role_requires_admin_auth() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    env.set_auths(&[]);
+    client.change_role(&issuer, &Role::Buyer);
+}
+
+#[test]
+fn test_change_role_unregistered_panics() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let err = client
+        .try_change_role(&unknown, &Role::Buyer)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+    assert_eq!(client.get_role_version(&unknown), 0);
+}

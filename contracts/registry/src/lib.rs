@@ -697,6 +697,119 @@ impl RegistryContract {
         }
     }
 
+    /// Changes a registered profile's role in a single audited transition.
+    ///
+    /// A profile's role is otherwise fixed at registration. This admin-only
+    /// entry point exists for the rare correction where an account was placed
+    /// in the wrong role (#1129). It flips only bit 0 of the existing packed
+    /// flags: verification, revocation, registration time and metadata are
+    /// preserved, and no storage key is re-decoded.
+    ///
+    /// An actual transition increments the address's `RoleVersion` and emits
+    /// one `role_changed` event with the previous role, the new role and that
+    /// version. Calling with the role the profile already has is idempotent:
+    /// it returns `true` without writing storage or emitting an event. The
+    /// per-role enumeration index is migrated so `get_profile_count` and
+    /// `list_profiles` continue to agree with the decoded role.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The registered profile whose role changes.
+    /// * `new_role` - `Role::Issuer` or `Role::Buyer`.
+    ///
+    /// # Auth
+    /// * Requires the stored admin's `require_auth()`; verifiers and profile
+    ///   owners cannot change roles.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if no admin is stored.
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` for both a completed transition and an idempotent
+    ///   no-op.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.change_role(&issuer, &Role::Buyer);
+    /// ```
+    pub fn change_role(env: Env, address: Address, new_role: Role) -> bool {
+        require_not_paused(&env);
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+
+        let key = DataKey::Profile(address.clone());
+        let mut profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        let previous_role = profile.role();
+        if previous_role == new_role {
+            // Idempotent call: no write, no event, no version bump. Extend TTLs
+            // so repeated administrative reads cannot age the entry out.
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            let version_key = DataKey::RoleVersion(address);
+            if env.storage().persistent().has(&version_key) {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&version_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+            }
+            Self::extend_instance_ttl(&env);
+            return true;
+        }
+
+        let version_key = DataKey::RoleVersion(address.clone());
+        let version: u32 = env.storage().persistent().get(&version_key).unwrap_or(0);
+        let next_version = version.saturating_add(1);
+
+        profile.set_role(new_role.clone());
+        env.storage().persistent().set(&key, &profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.storage().persistent().set(&version_key, &next_version);
+        env.storage()
+            .persistent()
+            .extend_ttl(&version_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        Self::migrate_profile_index(&env, &address, &previous_role, &new_role);
+        events::role_changed(&env, &address, &previous_role, &new_role, next_version);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns how many role transitions an address has accepted.
+    ///
+    /// The counter is incremented only by actual changes in
+    /// [`change_role`](Self::change_role), never by idempotent calls. An
+    /// address with no recorded transition (including an unknown address)
+    /// reports `0`, matching the initial value used by the event.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The address to inspect.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Returns
+    /// * `u32` - The latest `version` emitted in a `role_changed` event.
+    pub fn get_role_version(env: Env, address: Address) -> u32 {
+        let key = DataKey::RoleVersion(address);
+        match env.storage().persistent().get::<_, u32>(&key) {
+            Some(version) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                version
+            }
+            None => 0,
+        }
+    }
+
     /// Returns how many profiles are registered for `role`.
     ///
     /// This is the O(1) companion to the other registry views: it answers
@@ -1326,5 +1439,60 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Moves `address` from the old role's dense enumeration index to the new
+    /// one, keeping both `ProfileCount` values consistent with the decoded
+    /// roles (#1129).
+    ///
+    /// Index slots are append-only by design and the registry has no
+    /// deregistration path, so the only way to remove the stale slot without
+    /// leaving a hole below the count is to compact the tail. A missing slot
+    /// (which `list_profiles` already tolerates) is treated as an empty slot
+    /// and removed from the destination during the shift.
+    fn migrate_profile_index(env: &Env, address: &Address, from: &Role, to: &Role) {
+        let old_count_key = DataKey::ProfileCount(from.clone());
+        let old_count: u32 = env.storage().persistent().get(&old_count_key).unwrap_or(0);
+        let mut found = None;
+        for index in 0..old_count {
+            let index_key = DataKey::ProfileIndex(from.clone(), index);
+            if let Some(indexed) = env.storage().persistent().get::<_, Address>(&index_key) {
+                if indexed == *address {
+                    found = Some(index);
+                    break;
+                }
+            }
+        }
+
+        if let Some(index) = found {
+            let mut cursor = index;
+            while cursor < old_count.saturating_sub(1) {
+                let dest_key = DataKey::ProfileIndex(from.clone(), cursor);
+                let source_key = DataKey::ProfileIndex(from.clone(), cursor + 1);
+                match env.storage().persistent().get::<_, Address>(&source_key) {
+                    Some(indexed) => {
+                        env.storage().persistent().set(&dest_key, &indexed);
+                        env.storage().persistent().extend_ttl(
+                            &dest_key,
+                            TTL_THRESHOLD,
+                            TTL_EXTEND_TO,
+                        );
+                    }
+                    None => env.storage().persistent().remove(&dest_key),
+                }
+                cursor += 1;
+            }
+            env.storage()
+                .persistent()
+                .remove(&DataKey::ProfileIndex(from.clone(), old_count - 1));
+            env.storage()
+                .persistent()
+                .set(&old_count_key, &(old_count - 1));
+            env.storage()
+                .persistent()
+                .extend_ttl(&old_count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+
+        Self::index_profile(env, to, address);
     }
 }

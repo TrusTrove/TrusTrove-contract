@@ -60,6 +60,16 @@ impl Profile {
         }
     }
 
+    /// Changes only the role bit, leaving verification/revocation flags and
+    /// registration time untouched (#1129).
+    pub fn set_role(&mut self, role: Role) {
+        if role == Role::Buyer {
+            self.packed_flags |= 1;
+        } else {
+            self.packed_flags &= !1;
+        }
+    }
+
     pub fn verified(&self) -> bool {
         (self.packed_flags & 2) != 0
     }
@@ -113,4 +123,8 @@ pub enum DataKey {
     /// Ledger timestamp when the address most recently became verified. Cleared
     /// on revocation and set again on reinstatement or verification.
     VerifiedSince(Address),
+    /// Number of accepted role transitions for this address (#1129). Starts at
+    /// `0` (no transitions yet) and is incremented on every actual change, so
+    /// the `role_changed` event can be ordered unambiguously.
+    RoleVersion(Address),
 }

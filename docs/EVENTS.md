@@ -986,6 +986,23 @@ Emitted when a batch registration completes.
 
 ---
 
+### `role_changed`
+
+Emitted only for an actual role transition by `change_role()` (#1129). An
+idempotent call with the current role emits nothing. The version is a
+per-address counter starting at 1 for the first transition.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"role_changed"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `(Role, Role, u32)` | `(previous_role, new_role, version)` |
+
+**Emitted by:** `change_role()` in `contracts/registry/src/lib.rs` — stored admin authorization required.
+
+---
+
 ### `profile_verified`
 
 Emitted when a profile's verification status is checked/updated.

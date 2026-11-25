@@ -32,6 +32,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `registry`: admin-only `change_role(address, new_role)` for correcting a
+  profile's registration role. It preserves packed verification flags and
+  metadata, migrates the per-role index/counters, and bumps a per-address
+  `RoleVersion` exposed by `get_role_version()`. An actual transition emits
+  `role_changed(address, previous_role, new_role, version)`; an idempotent
+  call emits no event (#1129)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
