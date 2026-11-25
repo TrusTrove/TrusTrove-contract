@@ -299,8 +299,8 @@ Cancelled = 8   // issuer cancelled before listing
 | `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
 | `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
 | `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
-| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
-| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`) |
+| `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
+| `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
 | `StatusCount(u32)` | `u64` | Count of invoices in each status | On write (`increment_status_count` / `decrement_status_count`, issue #830) |
 
 #### Indexing Notes
@@ -309,6 +309,13 @@ Cancelled = 8   // issuer cancelled before listing
   maintain a count key and an ordered list of entries.
 - Index entries are appended — no compaction on status transitions (entries
   are added to the new status but not removed from the old).
+- `get_invoice_ids_by_status()` walks one status index backwards from its
+  end, `page_size` rows per call (`1..=MAX_PAGE_SIZE`), returning IDs plus a
+  `next` cursor. It checks each row against its `StatusMembership` marker
+  instead of decoding the `Invoice`, falling back to the invoice record only
+  for rows without a matching marker (pre-#831 data). The backward walk
+  keeps it from skipping invoices when `remove_from_status_index` swaps the
+  last row into a removed slot between calls (#1152).
 - `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
   (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
   `page_size` index entries, so cost is bounded regardless of index size.

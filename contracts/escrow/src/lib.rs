@@ -1,10 +1,10 @@
 #![no_std]
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Symbol, Vec,
 };
-use soroban_sdk::xdr::ToXdr;
-use trusttrove_pause::{require_not_paused, set_paused};
+use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -17,6 +17,7 @@ pub use errors::*;
 pub use types::*;
 
 const DEFAULT_MIN_LOCK_SECONDS: u64 = 60;
+const MAX_HISTORY_PAGE_SIZE: u32 = 100;
 /// Default `release_after_timeout` window (30 days) used until the admin sets one.
 pub const DEFAULT_TIMEOUT_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Upper bound accepted by `set_timeout_window` (365 days), matching invoice's expiry cap.
@@ -85,6 +86,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::UsdcAsset, &usdc_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockSeconds, &DEFAULT_MIN_LOCK_SECONDS);
         Self::extend_instance_ttl(&env);
         // #867: every other contract announces initialization; escrow must
         // too, so an indexer sees admin/pool/asset without reading storage.
@@ -671,7 +675,7 @@ impl EscrowContract {
     /// * `NotAuthorized` if the record has not been locked long enough to satisfy the grace period.
     ///
     /// # Coupling with `invoice.trigger_default`
-    /// This grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from
+    /// This grace period (measured from
     /// [`EscrowRecord::locked_at`]) is independent of, and not known to,
     /// `invoice.trigger_default`'s own due-date gate (`now >= due_date`).
     /// Since issue #819 the funding path releases the principal to the issuer
@@ -718,7 +722,7 @@ impl EscrowContract {
         // A timestamp rollback (or a malformed record seeded with a future
         // `locked_at`) must fail the grace-period check as a typed
         // authorization error, not underflow `now - locked_at`.
-        if now < record.locked_at || now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
+        if now < record.locked_at || now - record.locked_at < Self::min_lock_seconds(&env) {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
@@ -960,6 +964,39 @@ impl EscrowContract {
         }
     }
 
+    /// Returns whether an escrow lock record exists for an invoice.
+    ///
+    /// This checks the persistent record itself, not its amount. It therefore
+    /// distinguishes a missing lock from a malformed record whose amount is zero.
+    /// Missing keys are not created by this read-only view.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `bool` - `true` if a lock record exists, even if its stored amount is zero.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let exists = client.has_lock(&invoice_id);
+    /// ```
+    pub fn has_lock(env: Env, invoice_id: BytesN<32>) -> bool {
+        let key = DataKey::Locked(invoice_id);
+        if !env.storage().persistent().has(&key) {
+            return false;
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        true
+    }
     /// Returns the amount of USDC currently locked against an invoice.
     ///
     /// # Arguments
@@ -1022,6 +1059,28 @@ impl EscrowContract {
             }
             None => 0,
         }
+    }
+
+    fn min_lock_seconds(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinLockSeconds)
+            .unwrap_or(DEFAULT_MIN_LOCK_SECONDS)
+    }
+
+    /// Returns the first timestamp at which the minimum lock no longer blocks
+    /// default handling. Returns `None` when there is no active escrow.
+    /// Fails with `MathOverflow` if the expiration cannot fit in a `u64`.
+    pub fn get_lock_expiration(env: Env, invoice_id: BytesN<32>) -> Option<u64> {
+        let key = DataKey::Locked(invoice_id);
+        let storage = env.storage().persistent();
+        let record: EscrowRecord = storage.get(&key)?;
+        let expiration = record
+            .locked_at
+            .checked_add(Self::min_lock_seconds(&env))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
+        storage.extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Some(expiration)
     }
 
     /// Returns the ledger sequence when the escrow was locked for an invoice.
@@ -1188,6 +1247,7 @@ impl EscrowContract {
 
     /// Reads up to 100 escrow events in append order, starting at `offset`.
     /// Returns the matching events and the total number of stored events.
+    /// An offset at or beyond the end returns an empty page with the same total.
     /// A limit outside 1–100 fails with `InvalidConfig`.
     pub fn get_history_page(
         env: Env,
@@ -1195,15 +1255,15 @@ impl EscrowContract {
         offset: u32,
         limit: u32,
     ) -> (Vec<EscrowEvent>, u32) {
-        if !(1..=100).contains(&limit) {
+        if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) {
             panic_with_error!(&env, EscrowError::InvalidConfig);
         }
 
         let history = Self::get_history(env, invoice_id);
         let total = history.len();
         let start = offset.min(total);
-        let end = start.saturating_add(limit).min(total);
-        (history.slice(start..end), total)
+        let page_len = limit.min(total - start);
+        (history.slice(start..start + page_len), total)
     }
 
     fn append_history(
@@ -1232,6 +1292,72 @@ impl EscrowContract {
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
+    /// Reports which escrow write entry points `caller` may invoke under the
+    /// current configuration, so an operator can check before submitting a
+    /// transaction (issue #1198).
+    ///
+    /// Caller rules mirrored from the write paths:
+    /// * `lock`, `release_to_issuer`: the configured pool contract.
+    /// * `release_to_pool`: the invoice contract the pool's
+    ///   `get_invoice_contract` view reports, which must also equal the
+    ///   reference pinned with [`Self::set_invoice_contract`] when one is set,
+    ///   exactly as `release_to_pool` resolves it. If the pool cannot answer,
+    ///   or the pin disagrees with it, no address may call it and the flag is
+    ///   `false`.
+    /// * `handle_default`: the stored admin or the configured pool contract.
+    /// * `release_after_timeout`: anyone.
+    ///
+    /// While the contract is paused every one of these reverts with
+    /// `ContractPaused`, so all action flags are `false` and `paused` is
+    /// `true`.
+    ///
+    /// Per-invoice conditions are not evaluated (lock or issuer-release marker
+    /// present, recorded issuer, default grace period, timeout deadline). The
+    /// result is a preview only and never substitutes for authorization: each
+    /// write keeps its own `require_auth` and checks.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address to check.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Storage
+    /// Read-only: nothing is written and no TTL is extended. The only external
+    /// call is the pool's read-only `get_invoice_contract` view, made when the
+    /// contract is not paused.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the admin or pool contract address is unset.
+    ///
+    /// # Returns
+    /// * `ReleaseAuthorization` - One flag per action, plus the pause state.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let allowed = client.get_release_authorization(&operator);
+    /// if allowed.handle_default {
+    ///     client.handle_default(&invoice_id, &operator);
+    /// }
+    /// ```
+    pub fn get_release_authorization(env: Env, caller: Address) -> ReleaseAuthorization {
+        let admin = Self::require_admin(&env);
+        let pool = Self::get_pool_contract(env.clone());
+        let paused = is_paused(&env);
+        let live = !paused;
+        let is_pool = caller == pool;
+
+        ReleaseAuthorization {
+            paused,
+            lock: live && is_pool,
+            release_to_issuer: live && is_pool,
+            release_to_pool: live && Self::is_release_to_pool_caller(&env, &pool, &caller),
+            handle_default: live && (is_pool || caller == admin),
+            release_after_timeout: live,
+        }
+    }
+
     fn extend_instance_ttl(env: &Env) {
         env.storage()
             .instance()
@@ -1246,6 +1372,32 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized));
         pool.require_auth();
         pool
+    }
+
+    /// Whether `caller` is the principal `release_to_pool` would authorize:
+    /// the invoice contract the pool reports, provided it matches the pinned
+    /// reference when one is stored. Read-only counterpart of the resolution
+    /// at the top of [`Self::release_to_pool`]; a pool that cannot answer
+    /// means nobody can currently call it.
+    fn is_release_to_pool_caller(env: &Env, pool: &Address, caller: &Address) -> bool {
+        let resolved = env.try_invoke_contract::<Address, soroban_sdk::Error>(
+            pool,
+            &Symbol::new(env, "get_invoice_contract"),
+            Vec::new(env),
+        );
+        let Ok(Ok(resolved)) = resolved else {
+            return false;
+        };
+        if let Some(pinned) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if pinned != resolved {
+                return false;
+            }
+        }
+        *caller == resolved
     }
 
     fn require_admin(env: &Env) -> Address {

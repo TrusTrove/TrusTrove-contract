@@ -134,6 +134,7 @@ trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status, page, page_size) → Vec<Invoice>
+get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
 get_by_buyer(address, page, page_size) → Vec<Invoice>
 get_invoice_count_by_issuer(address) → u32
@@ -145,10 +146,37 @@ set_agent_registry_contract(agent_registry_contract) → bool
 
 #### `list_for_financing(invoice_id, discount_bps) → bool`
 - Marks a `Created` invoice as available for financing (`Listed` status).
-- `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
+- `discount_bps`: Annualized discount rate in basis points (valid range: `1..=5000`, where 5,000 = 50% max). `0` panics with `InvalidDiscount` and values above 5,000 panic with `DiscountTooHigh`.
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
 - Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
+
+#### `get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage`
+- Cursor-driven, ID-only view of one status for indexers (#1152). Each call reads at most `page_size` status-index rows and their membership markers, and never decodes an `Invoice` record.
+- Returns `InvoiceIdPage { ids: Vec<BytesN<32>>, next: Option<u32> }`. Pass `cursor = None` for the first page, then each `next` back as `cursor`. `next` is `None` once the walk is complete, including after an exactly full last page.
+- `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- The walk runs from the end of the status index to its start, newest rows first. A cursor above the current count is clamped (the index shrinks as invoices leave the status), and `Some(0)` returns an empty page with `next: None`.
+- Every returned ID exists and has `status` when its page is read.
+- **While invoices change status between calls:** an invoice that stays in the status for the whole iteration is never skipped. An invoice can be returned twice, so de-duplicate by ID. Invoices that leave before their position is read are not returned, and new entrants may be missed. With no transitions, every ID is returned exactly once. The status index removes entries by swap-and-pop, which is why it walks backwards: forward offsets could silently skip invoices that never changed status.
+- A page can hold fewer than `page_size` IDs (even none) while `next` is still `Some`, when stale rows from the pre-#831 append-only index are filtered out. Keep going until `next` is `None`.
+- No authorization is required.
+
+An indexer walking one status:
+
+```rust
+let mut cursor = None;
+let mut seen = Map::<BytesN<32>, ()>::new(&env);
+loop {
+    let page = client.get_invoice_ids_by_status(&InvoiceStatus::Listed, &cursor, &MAX_PAGE_SIZE);
+    for id in page.ids.iter() {
+        seen.set(id, ()); // de-duplicates
+    }
+    match page.next {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+```
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -158,7 +186,7 @@ set_agent_registry_contract(agent_registry_contract) → bool
 
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
-- **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
+- **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
 
 ### escrow_contract
@@ -173,13 +201,17 @@ handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 get_lock_record(invoice_id) → Option<EscrowRecord>
+get_lock_expiration(invoice_id) → Option<u64>
+get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
-Read-only views (`get_locked`) stay callable.
+Read-only views (`get_locked`, `get_lock_record`, `get_lock_expiration`, `has_lock`) stay callable.
 
 ### pool_contract
+
+When upgrading a pool that predates the lifetime funding counter, the admin must call `backfill_cumulative_funded` once with the sum of successful `invoice_funded` event amounts before relying on the realized-loss ratio. Fresh pools initialize the counter automatically.
 
 USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
@@ -261,6 +293,11 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
 | Invoice | `get_supported_asset_count` | `get_supported_asset_count() -> u32` |
+| Invoice | `get_supported_assets` | `get_supported_assets() -> Vec<Address>` |
+| Invoice | `get_supported_asset_ids` | `get_supported_asset_ids() -> Vec<Address>` |
+| Invoice | `get_supported_assets_page` | `get_supported_assets_page(page: u32, page_size: u32) -> Vec<Address>` |
+| Invoice | `set_asset_metadata` | `set_asset_metadata(asset: Address, code: Option<String>, decimals: Option<u32>) -> ()` |
+| Invoice | `get_asset_metadata` | `get_asset_metadata(asset: Address) -> Option<AssetMetadata>` |
 | Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
 | Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
 | Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
@@ -279,6 +316,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
+| Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
+| Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
 | Invoice | `expire_listing` | `expire_listing(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Invoice | `get_status` | `get_status(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `has_status_membership` | `has_status_membership(status: InvoiceStatus, invoice_id: BytesN<32>) -> bool` |
@@ -292,6 +331,9 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
@@ -321,14 +363,17 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
 | Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
+| Escrow | `has_lock` | `has_lock(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_lock_expiration` | `get_lock_expiration(invoice_id: BytesN<32>) -> Option<u64>` |
 | Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_custody_balance` | `get_custody_balance() -> i128` |
 | Escrow | `get_lock_checksum` | `get_lock_checksum(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
 | Escrow | `get_history_page` | `get_history_page(invoice_id: BytesN<32>, offset: u32, limit: u32) -> (Vec<EscrowEvent>, u32)` |
+| Escrow | `get_release_authorization` | `get_release_authorization(caller: Address) -> ReleaseAuthorization` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
 | Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
 | Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
@@ -362,6 +407,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_realized_loss_ratio_bps` | `get_realized_loss_ratio_bps() -> u32` |
+| Pool | `backfill_cumulative_funded` | `backfill_cumulative_funded(total_funded: u128) -> ()` |
 | Pool | `get_share_price` | `get_share_price() -> u128` |
 | Pool | `get_lifetime_deposited_volume` | `get_lifetime_deposited_volume() -> u128` |
 | Pool | `get_lifetime_withdrawn_volume` | `get_lifetime_withdrawn_volume() -> u128` |
@@ -386,7 +433,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 164 public entry points across five deployable contracts.**
+**Total: 179 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -442,7 +489,7 @@ Pool ──[shares]──► LP
 ```
 
 #### Step 2 — Create & List (no funds move)
-The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 1 and 5,000, representing 0.01% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. A zero discount fails with `InvoiceError::InvalidDiscount`, and `discount_bps > 5000` fails with `InvoiceError::DiscountTooHigh`.
 
 
 Before listing, an Underwrite agent must sign an `AttestationPayload` (v2 layout: `domain_separator`, `invoice_id`, `contract_address`, `network_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`) off-chain with a secp256k1 key. `contract_address` and `network_id` bind the signature to one deployed invoice contract on one network, so attestations cannot replay across testnet/mainnet or redeploys (issue #822); `valid_until` (seconds, ledger timestamp) bounds how long the assessment unlocks listing (issue #823). Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice, and with `AttestationExpired` once the stored attestation's `valid_until` has passed. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
@@ -815,7 +862,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
 | 10 | `AlreadyConfirmed` | Caller has already confirmed delivery |
 | 11 | `DueDateNotPassed` | Invoice due date has not passed yet |
-| 12 | `InvalidDiscount` | Discount computation resulted in an invalid state |
+| 12 | `InvalidDiscount` | `discount_bps` is 0 (listing requires at least 1 bp), or a discount computation resulted in an invalid state |
 | 13 | `UnsupportedAsset` | Token asset is not registered as supported |
 | 14 | `ListingNotExpired` | Invoice listing has not reached expiry |
 | 15 | `MathOverflow` | Arithmetic operation overflowed or underflowed |
@@ -830,7 +877,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |
