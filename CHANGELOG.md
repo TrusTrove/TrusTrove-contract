@@ -59,6 +59,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PoolError::MaturityTooLong` (#30); an invoice exactly at the maximum is
   accepted. The default `0` means unrestricted and skips the extra
   `get_due_date` read, and already-funded invoices are never re-checked (#1184)
+- `pool`: admin-settable minimum time to maturity for newly funded invoices.
+  `set_min_time_to_maturity(min_seconds)` (stored admin only, emits
+  `min_maturity_updated(old, new)`) and `get_min_time_to_maturity()`, stored
+  as `DataKey::MinTimeToMaturity`. `fund_invoice` and `batch_fund_invoice`
+  reject an invoice whose `due_date - now` falls below the minimum — including
+  one that has already matured — with the new `PoolError::MaturityTooShort`
+  (#31); an invoice exactly at the minimum is accepted. The check runs before
+  any pool state is written, so a rejected funding leaves existing positions
+  unaltered. The default `0` means disabled and skips the extra `get_due_date`
+  read, and already-funded invoices are never re-checked (#1183)
 - `registry`: `get_profile_count(role)` view, returning how many profiles are
   registered for `Role::Issuer` / `Role::Buyer` in O(1) from a single stored
   counter (#841)

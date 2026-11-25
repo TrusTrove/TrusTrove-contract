@@ -62,4 +62,11 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
+    /// The invoice's remaining time to maturity (`due_date - now`) is shorter
+    /// than the admin-configured minimum (`DataKey::MinTimeToMaturity`, set
+    /// via `set_min_time_to_maturity`), or the invoice has already matured
+    /// (`due_date <= now`, which reads back as `0` remaining seconds). Only
+    /// checked when an invoice is newly funded, and never while the minimum
+    /// is at its default of `0` (disabled) (issue #1183).
+    MaturityTooShort = 31,
 }

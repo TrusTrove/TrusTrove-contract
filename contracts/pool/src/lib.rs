@@ -1277,6 +1277,8 @@ impl PoolContract {
     /// 4. Funding would not cause pool utilization to exceed the `max_utilization_bps` cap
     /// 5. Invoice `discount_bps` must meet the admin-configured minimum
     ///    discount floor (`set_min_discount`, default `0` = disabled, #829)
+    /// 6. Invoice remaining time to maturity must meet the admin-configured
+    ///    minimum (`set_min_time_to_maturity`, default `0` = disabled, #1183)
     ///
     /// See README §"Known Centralization Risks & Roadmap" for the longer-term
     /// governance design that will let LPs signal approval on funding decisions.
@@ -1317,6 +1319,14 @@ impl PoolContract {
     ///   An invoice exactly at the maximum is accepted. The maximum defaults
     ///   to 0 (unrestricted), where the check and its extra invoice read are
     ///   skipped (issue #1184).
+    /// * `MaturityTooShort` if the invoice's remaining time to maturity
+    ///   (`due_date - now`) is below the admin-configured minimum
+    ///   (`DataKey::MinTimeToMaturity`, set via `set_min_time_to_maturity`),
+    ///   or the invoice has already matured (`due_date <= now`). An invoice
+    ///   exactly at the minimum is accepted. The minimum defaults to 0
+    ///   (disabled), where the check and its extra invoice read are skipped
+    ///   (issue #1183). The check runs before any pool state is written, so
+    ///   a rejected funding leaves existing positions unaltered.
     ///
     /// # Returns
     /// * `bool` - `true` when the invoice is funded.
@@ -1448,6 +1458,33 @@ impl PoolContract {
                 panic_with_error!(&env, PoolError::MaturityTooLong);
             }
         }
+        // Admin-set minimum time to maturity (issue #1183), the mirror of the
+        // maximum above: an eligibility rule that panics in single and batch
+        // mode alike, checked only when an invoice is newly funded so
+        // invoices the pool already funded are never re-checked. It runs
+        // after every other eligibility check and before any pool state is
+        // written or any cross-contract mutation happens, so a rejected
+        // invoice leaves existing positions and totals untouched. At the
+        // default of 0 (disabled) the extra `get_due_date` read is skipped,
+        // exactly like the maximum. An already-matured invoice
+        // (`due_date <= now`) reads back as 0 remaining seconds and is
+        // therefore rejected by the same comparison whenever the minimum is
+        // non-zero.
+        let min_time_to_maturity: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinTimeToMaturity)
+            .unwrap_or(0u64);
+        if min_time_to_maturity > 0 {
+            let mut args = Vec::new(&env);
+            args.push_back(invoice_id.clone().into_val(&env));
+            let due_date: u64 =
+                env.invoke_contract(&invoice_contract, &Symbol::new(&env, "get_due_date"), args);
+            let remaining = due_date.saturating_sub(env.ledger().timestamp());
+            if remaining < min_time_to_maturity {
+                panic_with_error!(&env, PoolError::MaturityTooShort);
+            }
+        }
         let funded_amount = face_value
             .checked_mul(10000 - discount_bps as u128)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))
@@ -1568,7 +1605,8 @@ impl PoolContract {
     ///
     /// Entries that fail an *eligibility* check (not listed, already funded by
     /// this pool, unverified issuer/buyer, asset mismatch, a discount below
-    /// the floor, a maturity beyond the maximum) instead revert the
+    /// the floor, a maturity beyond the maximum or short of the minimum)
+    /// instead revert the
     /// whole call with the same typed error `fund_invoice` would raise. The
     /// distinction matters: a capacity stop is a normal, expected outcome for
     /// an LP filling the pool, whereas an ineligible entry is a caller mistake
@@ -2599,6 +2637,69 @@ impl PoolContract {
         env.storage()
             .instance()
             .get(&DataKey::MaxTimeToMaturity)
+            .unwrap_or(0u64)
+    }
+
+    /// Sets the minimum remaining time to maturity, in seconds, that an
+    /// invoice must have when `fund_invoice` or `batch_fund_invoice` funds it
+    /// (issue #1183).
+    ///
+    /// Authorization mirrors `set_max_time_to_maturity`: the *stored* admin
+    /// must sign. `0` (the default, and the state of every instance predating
+    /// this feature) disables the rule. The rule applies only when an invoice
+    /// is newly funded: invoices the pool already funded are never
+    /// re-checked, so raising the minimum cannot block their repayment or
+    /// default handling. An invoice whose remaining time equals the minimum
+    /// is accepted; an invoice that has already matured (`due_date <= now`)
+    /// is rejected. The check runs inside `fund_one` before any pool state
+    /// is written, so a rejected funding leaves existing positions and
+    /// totals unchanged.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `min_seconds` - The new minimum `due_date - now`, in seconds. `0`
+    ///   removes the rule.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the minimum is updated. Emits
+    ///   `min_maturity_updated` with `(old_min_seconds, new_min_seconds)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Only fund invoices still due at least 7 days out.
+    /// client.set_min_time_to_maturity(&(7 * 24 * 60 * 60));
+    /// ```
+    pub fn set_min_time_to_maturity(env: Env, min_seconds: u64) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        let old_min_seconds = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinTimeToMaturity)
+            .unwrap_or(0u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinTimeToMaturity, &min_seconds);
+        events::min_maturity_updated(&env, old_min_seconds, min_seconds);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the minimum remaining time to maturity, in seconds, required
+    /// for newly funded invoices. Defaults to `0` (disabled) when never set,
+    /// so instances predating issue #1183 keep their behavior.
+    pub fn get_min_time_to_maturity(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinTimeToMaturity)
             .unwrap_or(0u64)
     }
 

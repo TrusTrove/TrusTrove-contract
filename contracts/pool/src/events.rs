@@ -202,3 +202,15 @@ pub fn max_maturity_updated(env: &Env, old_max_seconds: u64, new_max_seconds: u6
         (old_max_seconds, new_max_seconds),
     );
 }
+
+/// Emitted by `set_min_time_to_maturity` when the admin changes the minimum
+/// remaining time to maturity required for newly funded invoices (issue
+/// #1183). Like `min_discount_updated` and `max_maturity_updated`, it carries
+/// the old value as well as the new one; `0` means disabled. A rejected
+/// change emits nothing.
+pub fn min_maturity_updated(env: &Env, old_min_seconds: u64, new_min_seconds: u64) {
+    env.events().publish(
+        (Symbol::new(env, "min_maturity_updated"),),
+        (old_min_seconds, new_min_seconds),
+    );
+}

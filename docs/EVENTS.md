@@ -642,6 +642,25 @@ nothing.
 
 ---
 
+### `min_maturity_updated`
+
+Emitted when the admin changes the minimum remaining time to maturity that
+`fund_invoice` accepts for newly funded invoices, via
+`set_min_time_to_maturity` (issue #1183). Like `max_maturity_updated`, the old
+value is included. `0` means disabled. A rejected call (non-admin) emits
+nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_maturity_updated"` |
+| **Data** | `(u64, u64)` | `(old_min_seconds, new_min_seconds)` |
+
+**Emitted by:** `set_min_time_to_maturity()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:211`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.

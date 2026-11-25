@@ -155,6 +155,11 @@ pub enum DataKey {
     /// calls, before any buyer refund is netted out. Stored in persistent
     /// storage (#1174).
     LifetimeRepaidVolume,
+    /// Admin-configured minimum remaining time to maturity, in seconds, that
+    /// an invoice must have when `fund_invoice` funds it (issue #1183).
+    /// `0` (the default when never set) means disabled. Appended after
+    /// `LifetimeRepaidVolume` to keep existing discriminants stable.
+    MinTimeToMaturity,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,
