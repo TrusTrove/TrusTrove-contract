@@ -81,7 +81,38 @@ get_profile(address) → Profile
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
+get_profile_version(address) → u64               ← per-profile update sequence number
+propose_admin(new_admin, delay) → u64            ← delayed admin change, delay ≥ 1 day
+accept_admin() / cancel_admin_transfer(caller)
+set_guardian(guardian) / freeze_admin() / unfreeze_admin()
+set_metadata_key_policy(policy)                  ← Unrestricted (default) | AllowlistV1
 ```
+
+**Admin safety controls.**
+
+- **Delayed admin change (#1124).** `propose_admin(new_admin, delay)` records
+  the proposed admin and an activation time at least `MIN_ADMIN_TRANSFER_DELAY`
+  (1 day) away. The current admin stays active until `new_admin` calls
+  `accept_admin()` at or after that time. The admin or the guardian can
+  cancel it. The immediate `transfer_ownership` / `transfer_admin` paths still
+  exist and clear any pending proposal.
+- **Emergency freeze (#1125).** A preconfigured guardian key (`set_guardian`)
+  can `freeze_admin()` after a suspected admin key compromise. While frozen,
+  every admin-only write reverts with `AdminFrozen`: upgrade, batch
+  registration, verify/revoke/reinstate, admin transfers, role changes, the
+  key policy, and pause/unpause. Existing verification results, all reads and
+  users' own registration and profile updates are unaffected. Only the
+  guardian can `unfreeze_admin()`.
+- **Profile sequence numbers (#1128).** `get_profile_version(address)` starts
+  at `1` on registration and increases by one per actual profile change, with
+  a matching `profile_version` event, so consumers can detect missed updates.
+- **Metadata key policy (#1120).** `set_metadata_key_policy(AllowlistV1)`
+  restricts registration and update metadata to the documented keys `name`,
+  `legal_name`, `email`, `phone`, `website`, `country`, `jurisdiction`,
+  `registration_number`, `tax_id`, `industry`, `description` and `logo_url`.
+  Unknown keys are rejected with `UnknownMetadataKey`. The default,
+  `Unrestricted`, keeps the previous behaviour, and stored metadata is never
+  rewritten. `get_allowed_metadata_keys()` returns the active list.
 
 **The registry is enumerable without replaying events.** Every registration
 path — single and batch, issuer and buyer — appends the new address to a
@@ -325,6 +356,20 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `get_verifier` | `get_verifier() -> Option<Address>` |
 | Registry | `pause` | `pause() -> ()` |
 | Registry | `unpause` | `unpause() -> ()` |
+| Registry | `propose_admin` | `propose_admin(new_admin: Address, delay: u64) -> u64` |
+| Registry | `accept_admin` | `accept_admin() -> ()` |
+| Registry | `cancel_admin_transfer` | `cancel_admin_transfer(caller: Address) -> ()` |
+| Registry | `get_pending_admin_transfer` | `get_pending_admin_transfer() -> Option<PendingAdminTransfer>` |
+| Registry | `set_guardian` | `set_guardian(guardian: Address) -> ()` |
+| Registry | `remove_guardian` | `remove_guardian() -> ()` |
+| Registry | `get_guardian` | `get_guardian() -> Option<Address>` |
+| Registry | `freeze_admin` | `freeze_admin() -> ()` |
+| Registry | `unfreeze_admin` | `unfreeze_admin() -> ()` |
+| Registry | `is_admin_frozen` | `is_admin_frozen() -> bool` |
+| Registry | `set_metadata_key_policy` | `set_metadata_key_policy(policy: MetadataKeyPolicy) -> ()` |
+| Registry | `get_metadata_key_policy` | `get_metadata_key_policy() -> MetadataKeyPolicy` |
+| Registry | `get_allowed_metadata_keys` | `get_allowed_metadata_keys() -> Option<Vec<String>>` |
+| Registry | `get_profile_version` | `get_profile_version(address: Address) -> u64` |
 | Registry | `get_admin` | `get_admin() -> Address` |
 | Invoice | `__constructor` | `__constructor(admin: Address, registry_contract: Address) -> ()` |
 | Invoice | `get_admin` | `get_admin() -> Option<Address>` |
@@ -492,7 +537,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 193 public entry points across five deployable contracts.**
+**Total: 207 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->

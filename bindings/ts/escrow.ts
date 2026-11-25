@@ -52,21 +52,35 @@ export interface EscrowRecord {
   locked_at: u64;
 }
 
+export interface ReleaseAuthorization {
+  handle_default: boolean;
+  lock: boolean;
+  paused: boolean;
+  release_after_timeout: boolean;
+  release_to_issuer: boolean;
+  release_to_pool: boolean;
+}
+
 export interface EscrowClient {
   __constructor(args: { admin: Address; pool_contract: Address; usdc_asset: Address }): Promise<void>;
   get_admin(): Promise<Address>;
+  get_custody_balance(): Promise<i128>;
   get_history(args: { invoice_id: BytesN<32> }): Promise<Array<EscrowEvent>>;
   get_history_page(args: { invoice_id: BytesN<32>; offset: u32; limit: u32 }): Promise<readonly [Array<EscrowEvent>, u32]>;
   get_invoice_contract(): Promise<Address>;
+  get_lock_checksum(args: { invoice_id: BytesN<32> }): Promise<Option<BytesN<32>>>;
+  get_lock_expiration(args: { invoice_id: BytesN<32> }): Promise<Option<u64>>;
   get_lock_record(args: { invoice_id: BytesN<32> }): Promise<Option<EscrowRecord>>;
   get_locked(args: { invoice_id: BytesN<32> }): Promise<u128>;
   get_locked_at(args: { invoice_id: BytesN<32> }): Promise<u64>;
   get_locked_ledger(args: { invoice_id: BytesN<32> }): Promise<u64>;
   get_pool_contract(): Promise<Address>;
+  get_release_authorization(args: { caller: Address }): Promise<ReleaseAuthorization>;
   get_timeout_window(): Promise<u64>;
   get_total_returned_to_pool(args: { invoice_id: BytesN<32> }): Promise<u128>;
   get_usdc_asset(): Promise<Address>;
   handle_default(args: { invoice_id: BytesN<32>; caller: Address }): Promise<boolean>;
+  has_lock(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   lock(args: { invoice_id: BytesN<32>; amount: u128; issuer: Address }): Promise<boolean>;
   pause(): Promise<void>;
   release_after_timeout(args: { invoice_id: BytesN<32> }): Promise<boolean>;
@@ -79,4 +93,4 @@ export interface EscrowClient {
   was_released_to_issuer(args: { invoice_id: BytesN<32> }): Promise<boolean>;
 }
 
-export const ESCROW_METHODS = ["__constructor", "get_admin", "get_history", "get_history_page", "get_invoice_contract", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_pool_contract", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "lock", "pause", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;
+export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_history", "get_history_page", "get_invoice_contract", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_pool_contract", "get_release_authorization", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;

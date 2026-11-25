@@ -47,6 +47,32 @@ export enum PoolError {
   MaturityTooLong = 30,
 }
 
+export type FundingRejectionReason =
+  | { tag: "AlreadyFunded"; values?: void }
+  | { tag: "AssetMismatch"; values?: void }
+  | { tag: "BuyerNotVerified"; values?: void }
+  | { tag: "ContractPaused"; values?: void }
+  | { tag: "DiscountBelowMinimum"; values?: void }
+  | { tag: "InsufficientLiquidity"; values?: void }
+  | { tag: "InvalidAmount"; values?: void }
+  | { tag: "InvoiceNotListed"; values?: void }
+  | { tag: "IssuerNotVerified"; values?: void }
+  | { tag: "MaturityTooLong"; values?: void }
+  | { tag: "Overflow"; values?: void }
+  | { tag: "UtilizationCapExceeded"; values?: void };
+
+export interface FundingEligibility {
+  available_liquidity: u128;
+  funded_amount: u128;
+  funding_asset_matches: boolean;
+  invoice_status: u32;
+  is_eligible: boolean;
+  max_fundable_amount: u128;
+  max_utilization_bps: u32;
+  rejection_reasons: Array<FundingRejectionReason>;
+  utilization_rate_bps: u32;
+}
+
 export interface LPPosition {
   deposit_count: u32;
   shares: u128;
@@ -84,6 +110,7 @@ export interface PoolClient {
   __constructor(args: { admin: Address; invoice_contract: Address; escrow_contract: Address; funding_asset: Address; registry_contract: Address; treasury: Address; min_initial_deposit: u128; share_name: string; share_symbol: string; share_decimals: u32 }): Promise<void>;
   allowance(args: { from: Address; spender: Address }): Promise<i128>;
   approve(args: { from: Address; spender: Address; amount: i128; expiration_ledger: u32 }): Promise<void>;
+  backfill_cumulative_funded(args: { total_funded: u128 }): Promise<void>;
   backfill_funded_invoice_buyer(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   balance(args: { id: Address }): Promise<i128>;
   batch_fund_invoice(args: { invoice_ids: Array<BytesN<32>> }): Promise<Array<BytesN<32>>>;
@@ -95,15 +122,18 @@ export interface PoolClient {
   get_fee_bps(): Promise<u32>;
   get_funded_amount(args: { invoice_id: BytesN<32> }): Promise<Option<u128>>;
   get_funding_asset(): Promise<Address>;
+  get_funding_eligibility(args: { invoice_id: BytesN<32> }): Promise<FundingEligibility>;
   get_invoice_contract(): Promise<Address>;
   get_lifetime_deposited_volume(): Promise<u128>;
   get_lifetime_repaid_volume(): Promise<u128>;
   get_lifetime_withdrawn_volume(): Promise<u128>;
   get_lp_position(args: { lp: Address }): Promise<LPPosition>;
+  get_max_fundable_amount(): Promise<u128>;
   get_max_time_to_maturity(): Promise<u64>;
   get_min_discount_bps(): Promise<u32>;
   get_pool_config(): Promise<PoolConfig>;
   get_protocol_fee_bps(): Promise<u32>;
+  get_realized_loss_ratio_bps(): Promise<u32>;
   get_share_price(): Promise<u128>;
   get_stats(): Promise<PoolStats>;
   get_suggested_discount_bps(): Promise<u32>;
@@ -133,4 +163,4 @@ export interface PoolClient {
   withdraw(args: { lp: Address; shares: u128 }): Promise<u128>;
 }
 
-export const POOL_METHODS = ["__constructor", "allowance", "approve", "backfill_funded_invoice_buyer", "balance", "batch_fund_invoice", "decimals", "deposit", "fund_invoice", "get_admin", "get_escrow_contract", "get_fee_bps", "get_funded_amount", "get_funding_asset", "get_invoice_contract", "get_lifetime_deposited_volume", "get_lifetime_repaid_volume", "get_lifetime_withdrawn_volume", "get_lp_position", "get_max_time_to_maturity", "get_min_discount_bps", "get_pool_config", "get_protocol_fee_bps", "get_share_price", "get_stats", "get_suggested_discount_bps", "get_treasury", "get_treasury_address", "get_usdc_asset", "get_utilization_rate", "handle_default", "name", "pause", "preview_deposit", "preview_withdraw", "receive_repayment", "receive_repayment_with_refund", "set_max_time_to_maturity", "set_max_utilization", "set_min_discount", "set_protocol_fee", "symbol", "total_supply", "transfer", "transfer_from", "transfer_ownership", "transfer_shares", "unpause", "upgrade", "withdraw"] as const;
+export const POOL_METHODS = ["__constructor", "allowance", "approve", "backfill_cumulative_funded", "backfill_funded_invoice_buyer", "balance", "batch_fund_invoice", "decimals", "deposit", "fund_invoice", "get_admin", "get_escrow_contract", "get_fee_bps", "get_funded_amount", "get_funding_asset", "get_funding_eligibility", "get_invoice_contract", "get_lifetime_deposited_volume", "get_lifetime_repaid_volume", "get_lifetime_withdrawn_volume", "get_lp_position", "get_max_fundable_amount", "get_max_time_to_maturity", "get_min_discount_bps", "get_pool_config", "get_protocol_fee_bps", "get_realized_loss_ratio_bps", "get_share_price", "get_stats", "get_suggested_discount_bps", "get_treasury", "get_treasury_address", "get_usdc_asset", "get_utilization_rate", "handle_default", "name", "pause", "preview_deposit", "preview_withdraw", "receive_repayment", "receive_repayment_with_refund", "set_max_time_to_maturity", "set_max_utilization", "set_min_discount", "set_protocol_fee", "symbol", "total_supply", "transfer", "transfer_from", "transfer_ownership", "transfer_shares", "unpause", "upgrade", "withdraw"] as const;

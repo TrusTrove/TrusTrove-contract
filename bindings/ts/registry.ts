@@ -26,7 +26,18 @@ export enum RegistryError {
   NotRegistered = 7,
   PageSizeExceeded = 8,
   Unauthorized = 9,
+  AdminFrozen = 10,
+  GuardianNotSet = 11,
+  InvalidGuardian = 12,
+  NoPendingAdminTransfer = 13,
+  AdminTransferNotReady = 14,
+  InvalidAdminTransfer = 15,
+  UnknownMetadataKey = 16,
 }
+
+export type MetadataKeyPolicy =
+  | { tag: "AllowlistV1"; values?: void }
+  | { tag: "Unrestricted"; values?: void };
 
 export type Role =
   | { tag: "Buyer"; values?: void }
@@ -38,6 +49,11 @@ export type VerificationStatus =
   | { tag: "Unregistered"; values?: void }
   | { tag: "Verified"; values?: void };
 
+export interface PendingAdminTransfer {
+  activates_at: u64;
+  new_admin: Address;
+}
+
 export interface Profile {
   metadata: Map<string, string>;
   packed_flags: u32;
@@ -46,25 +62,42 @@ export interface Profile {
 
 export interface RegistryClient {
   __constructor(args: { admin: Address }): Promise<void>;
+  accept_admin(): Promise<void>;
   batch_register_buyers(args: { entries: Array<readonly [Address, Map<string, string>]> }): Promise<Array<Address>>;
   batch_register_issuers(args: { entries: Array<readonly [Address, Map<string, string>]> }): Promise<Array<Address>>;
+  cancel_admin_transfer(args: { caller: Address }): Promise<void>;
+  freeze_admin(): Promise<void>;
   get_admin(): Promise<Address>;
+  get_allowed_metadata_keys(): Promise<Option<Array<string>>>;
+  get_guardian(): Promise<Option<Address>>;
+  get_metadata_key_count(args: { address: Address }): Promise<u32>;
+  get_metadata_key_policy(): Promise<MetadataKeyPolicy>;
+  get_pending_admin_transfer(): Promise<Option<PendingAdminTransfer>>;
   get_profile(args: { address: Address }): Promise<Profile>;
   get_profile_count(args: { role: Role }): Promise<u32>;
+  get_profile_version(args: { address: Address }): Promise<u64>;
   get_role(args: { address: Address }): Promise<Option<Role>>;
   get_verification_status(args: { address: Address }): Promise<VerificationStatus>;
+  get_verified_since(args: { address: Address }): Promise<Option<u64>>;
   get_verifier(): Promise<Option<Address>>;
+  is_admin_frozen(): Promise<boolean>;
   is_verified(args: { address: Address }): Promise<boolean>;
   list_profiles(args: { role: Role; start: u32; limit: u32 }): Promise<Array<Address>>;
   pause(): Promise<void>;
+  propose_admin(args: { new_admin: Address; delay: u64 }): Promise<u64>;
   register_buyer(args: { address: Address; metadata: Map<string, string> }): Promise<boolean>;
   register_issuer(args: { address: Address; metadata: Map<string, string> }): Promise<boolean>;
   reinstate(args: { address: Address }): Promise<boolean>;
+  remove_guardian(): Promise<void>;
+  remove_metadata_key(args: { address: Address; metadata_key: string }): Promise<boolean>;
   remove_verifier(): Promise<void>;
   revoke(args: { address: Address }): Promise<boolean>;
+  set_guardian(args: { guardian: Address }): Promise<void>;
+  set_metadata_key_policy(args: { policy: MetadataKeyPolicy }): Promise<void>;
   set_verifier(args: { verifier: Address }): Promise<void>;
   transfer_admin(args: { new_admin: Address }): Promise<void>;
   transfer_ownership(args: { new_admin: Address }): Promise<void>;
+  unfreeze_admin(): Promise<void>;
   unpause(): Promise<void>;
   update_metadata(args: { address: Address; metadata: Map<string, string> }): Promise<boolean>;
   update_profile(args: { address: Address; metadata: Map<string, string> }): Promise<boolean>;
@@ -72,4 +105,4 @@ export interface RegistryClient {
   verify_profile(args: { caller: Address; address: Address; verify: boolean }): Promise<boolean>;
 }
 
-export const REGISTRY_METHODS = ["__constructor", "batch_register_buyers", "batch_register_issuers", "get_admin", "get_profile", "get_profile_count", "get_role", "get_verification_status", "get_verifier", "is_verified", "list_profiles", "pause", "register_buyer", "register_issuer", "reinstate", "remove_verifier", "revoke", "set_verifier", "transfer_admin", "transfer_ownership", "unpause", "update_metadata", "update_profile", "upgrade", "verify_profile"] as const;
+export const REGISTRY_METHODS = ["__constructor", "accept_admin", "batch_register_buyers", "batch_register_issuers", "cancel_admin_transfer", "freeze_admin", "get_admin", "get_allowed_metadata_keys", "get_guardian", "get_metadata_key_count", "get_metadata_key_policy", "get_pending_admin_transfer", "get_profile", "get_profile_count", "get_profile_version", "get_role", "get_verification_status", "get_verified_since", "get_verifier", "is_admin_frozen", "is_verified", "list_profiles", "pause", "propose_admin", "register_buyer", "register_issuer", "reinstate", "remove_guardian", "remove_metadata_key", "remove_verifier", "revoke", "set_guardian", "set_metadata_key_policy", "set_verifier", "transfer_admin", "transfer_ownership", "unfreeze_admin", "unpause", "update_metadata", "update_profile", "upgrade", "verify_profile"] as const;
