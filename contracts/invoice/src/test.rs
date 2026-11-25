@@ -15,8 +15,8 @@ use soroban_sdk::{
 
 use crate::{
     InvoiceContract, InvoiceContractClient, InvoiceError, InvoiceIdPage, InvoiceStatus,
-    DEFAULT_GRACE_SECONDS, MAX_BATCH_SIZE, MAX_FACE_VALUE, MAX_PAGE_SIZE, MIN_FACE_VALUE,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    DEFAULT_GRACE_SECONDS, MAX_BATCH_SIZE, MAX_FACE_VALUE, MAX_INVOICE_LIFETIME_SECONDS,
+    MAX_PAGE_SIZE, MAX_SUPPORTED_ASSETS, MIN_FACE_VALUE, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 // Default invoice parameters used across tests.
@@ -7863,5 +7863,226 @@ fn test_remove_supported_asset_twice_decrements_count_once() {
         client.get_supported_asset_count(),
         before - 1,
         "removing the same asset twice must decrement the counter only once"
+    );
+}
+
+#[test]
+fn test_supported_assets_list_and_pagination() {
+    let (env, client, _, _, _, usdc) = setup();
+    let initial_list = client.get_supported_assets();
+    assert_eq!(initial_list.len(), 1);
+    assert_eq!(initial_list.get(0).unwrap(), usdc);
+    assert_eq!(client.get_supported_asset_ids(), initial_list);
+
+    let asset2 = Address::generate(&env);
+    let asset3 = Address::generate(&env);
+    client.add_supported_asset(&asset2);
+    client.add_supported_asset(&asset3);
+
+    let assets = client.get_supported_assets();
+    assert_eq!(assets.len(), 3);
+    assert_eq!(assets.get(0).unwrap(), usdc);
+    assert_eq!(assets.get(1).unwrap(), asset2);
+    assert_eq!(assets.get(2).unwrap(), asset3);
+
+    // Idempotency: adding asset2 again does not duplicate
+    client.add_supported_asset(&asset2);
+    assert_eq!(client.get_supported_assets().len(), 3);
+
+    // Pagination
+    let page0 = client.get_supported_assets_page(&0, &2);
+    assert_eq!(page0.len(), 2);
+    assert_eq!(page0.get(0).unwrap(), usdc);
+    assert_eq!(page0.get(1).unwrap(), asset2);
+
+    let page1 = client.get_supported_assets_page(&1, &2);
+    assert_eq!(page1.len(), 1);
+    assert_eq!(page1.get(0).unwrap(), asset3);
+
+    // Invalid page size rejection
+    assert_eq!(
+        client.try_get_supported_assets_page(&0, &(MAX_PAGE_SIZE + 1)),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+
+    // Remove asset
+    client.remove_supported_asset(&asset2);
+    let after_remove = client.get_supported_assets();
+    assert_eq!(after_remove.len(), 2);
+    assert_eq!(after_remove.get(0).unwrap(), usdc);
+    assert_eq!(after_remove.get(1).unwrap(), asset3);
+
+    // Removing again is idempotent
+    client.remove_supported_asset(&asset2);
+    assert_eq!(client.get_supported_assets().len(), 2);
+
+    // Max capacity boundary check
+    for _ in 0..(MAX_SUPPORTED_ASSETS - 2) {
+        let a = Address::generate(&env);
+        client.add_supported_asset(&a);
+    }
+    assert_eq!(client.get_supported_asset_count(), MAX_SUPPORTED_ASSETS);
+    let overflow_asset = Address::generate(&env);
+    assert_eq!(
+        client.try_add_supported_asset(&overflow_asset),
+        Err(Ok(InvoiceError::InvalidConfiguration.into()))
+    );
+}
+
+#[test]
+fn test_supported_asset_metadata_management() {
+    let (env, client, _, _, _, usdc) = setup();
+
+    // Initially no metadata
+    assert_eq!(client.get_asset_metadata(&usdc), None);
+
+    // Admin sets metadata
+    let code = String::from_str(&env, "USDC");
+    client.set_asset_metadata(&usdc, &Some(code.clone()), &Some(7));
+
+    let metadata = client.get_asset_metadata(&usdc).expect("expected metadata");
+    assert_eq!(metadata.code, Some(code));
+    assert_eq!(metadata.decimals, Some(7));
+
+    // Update metadata (idempotency/modification)
+    client.set_asset_metadata(&usdc, &None, &Some(6));
+    let updated = client.get_asset_metadata(&usdc).unwrap();
+    assert_eq!(updated.code, None);
+    assert_eq!(updated.decimals, Some(6));
+
+    // Rejection: Unsupported asset
+    let fake_asset = Address::generate(&env);
+    assert_eq!(
+        client.try_set_asset_metadata(&fake_asset, &None, &Some(6)),
+        Err(Ok(InvoiceError::UnsupportedAsset.into()))
+    );
+
+    // Rejection: Empty code string
+    let empty_code = String::from_str(&env, "");
+    assert_eq!(
+        client.try_set_asset_metadata(&usdc, &Some(empty_code), &Some(6)),
+        Err(Ok(InvoiceError::InvalidConfiguration.into()))
+    );
+
+    // Rejection: Decimals > 18
+    assert_eq!(
+        client.try_set_asset_metadata(&usdc, &None, &Some(19)),
+        Err(Ok(InvoiceError::InvalidConfiguration.into()))
+    );
+
+    // Existing support check remains functional
+    assert!(client.is_supported_asset(&usdc));
+
+    // Removing asset removes metadata
+    client.remove_supported_asset(&usdc);
+    assert_eq!(client.get_asset_metadata(&usdc), None);
+    assert!(!client.is_supported_asset(&usdc));
+}
+
+#[test]
+fn test_max_invoice_lifetime_view_and_boundary() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+
+    // Default max lifetime matches constant (documented in seconds)
+    assert_eq!(
+        client.get_max_invoice_lifetime(),
+        MAX_INVOICE_LIFETIME_SECONDS
+    );
+
+    // Custom lifetime configuration
+    let custom_lifetime = 100_000u64;
+    client.set_max_invoice_lifetime(&custom_lifetime);
+    assert_eq!(client.get_max_invoice_lifetime(), custom_lifetime);
+
+    // Rejection: lifetime == 0
+    assert_eq!(
+        client.try_set_max_invoice_lifetime(&0),
+        Err(Ok(InvoiceError::InvalidConfiguration.into()))
+    );
+
+    // Rejection: lifetime > MAX_INVOICE_LIFETIME_SECONDS
+    assert_eq!(
+        client.try_set_max_invoice_lifetime(&(MAX_INVOICE_LIFETIME_SECONDS + 1)),
+        Err(Ok(InvoiceError::InvalidConfiguration.into()))
+    );
+
+    // Create boundary checks with custom lifetime
+    let now = env.ledger().timestamp();
+    let exact_boundary_due = now + custom_lifetime;
+    let inv1 = client.create(&issuer, &buyer, &1_000_000, &exact_boundary_due, &usdc);
+    assert_eq!(client.get_due_date(&inv1), exact_boundary_due);
+
+    // Exceeding lifetime by 1 second fails
+    let past_boundary_due = now + custom_lifetime + 1;
+    assert_eq!(
+        client.try_create(&issuer, &buyer, &1_000_000, &past_boundary_due, &usdc),
+        Err(Ok(InvoiceError::InvalidDueDate.into()))
+    );
+}
+
+#[test]
+fn test_created_at_range_index_view() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+
+    let t100 = 1000u64;
+    env.ledger().set_timestamp(t100);
+    let inv1 = client.create(&issuer, &buyer, &1_000_000, &(t100 + 1000), &usdc);
+    let inv2 = client.create(&issuer, &buyer, &1_000_000, &(t100 + 2000), &usdc);
+
+    let t200 = 2000u64;
+    env.ledger().set_timestamp(t200);
+    let inv3 = client.create(&issuer, &buyer, &1_000_000, &(t200 + 1000), &usdc);
+
+    // Range matching all
+    let all = client.get_ids_by_created_at_range(&1000, &2000, &None, &50);
+    assert_eq!(all.ids.len(), 3);
+    // Deterministic tie-breaking at t100: inv1 then inv2
+    assert_eq!(all.ids.get(0).unwrap(), inv1);
+    assert_eq!(all.ids.get(1).unwrap(), inv2);
+    assert_eq!(all.ids.get(2).unwrap(), inv3);
+    assert_eq!(all.next, None);
+
+    // Alias matches
+    let alias_res = client.get_created_at_range(&1000, &2000, &None, &50);
+    assert_eq!(alias_res, all);
+
+    // Pagination
+    let page1 = client.get_ids_by_created_at_range(&1000, &2000, &None, &2);
+    assert_eq!(page1.ids.len(), 2);
+    assert_eq!(page1.ids.get(0).unwrap(), inv1);
+    assert_eq!(page1.ids.get(1).unwrap(), inv2);
+    assert_eq!(page1.next, Some(2));
+
+    let page2 = client.get_ids_by_created_at_range(&1000, &2000, &page1.next, &2);
+    assert_eq!(page2.ids.len(), 1);
+    assert_eq!(page2.ids.get(0).unwrap(), inv3);
+    assert_eq!(page2.next, None);
+
+    // Sub-range
+    let only_t100 = client.get_ids_by_created_at_range(&1000, &1500, &None, &50);
+    assert_eq!(only_t100.ids.len(), 2);
+    assert_eq!(only_t100.ids.get(0).unwrap(), inv1);
+    assert_eq!(only_t100.ids.get(1).unwrap(), inv2);
+
+    let empty = client.get_ids_by_created_at_range(&3000, &4000, &None, &50);
+    assert_eq!(empty.ids.len(), 0);
+    assert_eq!(empty.next, None);
+
+    // Rejection: start_time > end_time
+    assert_eq!(
+        client.try_get_ids_by_created_at_range(&2000, &1000, &None, &10),
+        Err(Ok(InvoiceError::InvalidConfiguration.into()))
+    );
+
+    // Rejection: page_size == 0
+    assert_eq!(
+        client.try_get_ids_by_created_at_range(&1000, &2000, &None, &0),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
+    );
+
+    // Rejection: page_size > MAX_PAGE_SIZE
+    assert_eq!(
+        client.try_get_ids_by_created_at_range(&1000, &2000, &None, &(MAX_PAGE_SIZE + 1)),
+        Err(Ok(InvoiceError::InvalidPageSize.into()))
     );
 }

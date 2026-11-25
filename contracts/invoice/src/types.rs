@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, BytesN, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, BytesN, String, Symbol, Vec};
 
 #[contracttype]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -130,6 +130,18 @@ pub enum DataKey {
     // variants so already-deployed key discriminants stay stable.
     BuyerMembership(Address, u64),
     DefaultGraceSeconds,
+    SupportedAssetList,
+    AssetMetadata(Address),
+    MaxInvoiceLifetime,
+    CreatedAtIndexEntry(u32),
+}
+
+/// Metadata describing a supported asset (optional asset code and decimals).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AssetMetadata {
+    pub code: Option<String>,
+    pub decimals: Option<u32>,
 }
 
 /// A risk attestation recorded against an invoice by a registered
