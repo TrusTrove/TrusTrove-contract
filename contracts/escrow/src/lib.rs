@@ -748,7 +748,8 @@ impl EscrowContract {
             .persistent()
             .remove(&DataKey::LockedLedger(invoice_id.clone()));
         Self::extend_instance_ttl(&env);
-        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount);
+        let lock_age = now.saturating_sub(record.locked_at);
+        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount, lock_age);
         true
     }
 

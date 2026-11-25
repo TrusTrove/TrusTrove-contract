@@ -291,21 +291,23 @@ fn assert_last_event_three<T1, T2>(
     assert_eq!(actual_data, expected_data);
 }
 
-fn assert_last_event_four<T1, T2, T3>(
+fn assert_last_event_four<T1, T2, T3, D>(
     env: &Env,
     events: &CapturedEvents,
     expected_name: &str,
     expected_topic1: T1,
     expected_topic2: T2,
     expected_topic3: T3,
-    expected_data: u128,
+    expected_data: D,
 ) where
     T1: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
     T2: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
     T3: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
+    D: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
     <T1 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
     <T2 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
     <T3 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
+    <D as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
 {
     let (_, topics, data) = events.last().expect("expected at least one event");
 
@@ -313,7 +315,7 @@ fn assert_last_event_four<T1, T2, T3>(
     let topic1: T1 = T1::try_from_val(env, &topics.get(1).unwrap()).unwrap();
     let topic2: T2 = T2::try_from_val(env, &topics.get(2).unwrap()).unwrap();
     let topic3: T3 = T3::try_from_val(env, &topics.get(3).unwrap()).unwrap();
-    let actual_data: u128 = u128::try_from_val(env, &data).unwrap();
+    let actual_data: D = D::try_from_val(env, &data).unwrap();
 
     assert_eq!(topic0, Symbol::new(env, expected_name));
     assert_eq!(topic1, expected_topic1);
@@ -1537,7 +1539,7 @@ fn test_handle_default_invoked_by_admin_succeeds() {
         invoice_id.clone(),
         _pool,
         admin,
-        amount,
+        (amount, 60u64),
     );
 }
 
@@ -1564,7 +1566,7 @@ fn test_handle_default_admin_can_trigger() {
         invoice_id.clone(),
         pool,
         admin,
-        amount,
+        (amount, 60u64),
     );
 }
 
@@ -1769,7 +1771,7 @@ fn test_handle_default_second_call_returns_false_without_side_effects() {
         invoice_id.clone(),
         pool.clone(),
         pool.clone(),
-        amount,
+        (amount, 60u64),
     );
 
     // Second call: should return false with no side effects
@@ -1894,7 +1896,7 @@ fn test_handle_default_event_includes_caller() {
     assert!(result);
 
     let events = env.events().all();
-    let (_, topics, _) = events.last().expect("expected at least one event");
+    let (_, topics, data) = events.last().expect("expected at least one event");
 
     let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     let topic1: BytesN<32> = BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
@@ -1905,6 +1907,9 @@ fn test_handle_default_event_includes_caller() {
     assert_eq!(topic1, invoice_id);
     assert_eq!(topic2, pool);
     assert_eq!(topic3, admin);
+    let (emitted_amount, lock_age): (u128, u64) = <(u128, u64)>::try_from_val(&env, &data).unwrap();
+    assert_eq!(emitted_amount, amount);
+    assert_eq!(lock_age, 60);
 
     // Verify caller is also recorded in history
     let history = client.get_history(&invoice_id);
@@ -3773,4 +3778,82 @@ fn test_get_history_count_authorization_and_idempotency() {
     assert_eq!(client2.get_history_count(&invoice_id2), 1);
     client2.unpause();
     assert_eq!(client2.get_history_count(&invoice_id2), 1);
+}
+
+// ============================================================================
+// Lock age on default resolution (issue #1193)
+// ============================================================================
+
+#[test]
+fn test_default_resolved_emits_elapsed_lock_age() {
+    let (env, client, admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1193);
+    let amount: u128 = 2_500_000_000;
+
+    env.ledger().set_timestamp(1_000_000);
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // Advance by 3600 seconds
+    env.ledger().set_timestamp(1_003_600);
+    assert!(client.handle_default(&invoice_id, &admin));
+
+    let events = env.events().all();
+    assert_last_event_four(
+        &env,
+        &events,
+        "default_resolved",
+        invoice_id.clone(),
+        pool.clone(),
+        admin.clone(),
+        (amount, 3600u64),
+    );
+}
+
+#[test]
+fn test_default_resolved_failed_attempts_produce_no_event() {
+    let (env, client, admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1194);
+    let amount: u128 = 1_000_000_000;
+
+    // 1. Missing lock record -> returns false, no event emitted
+    assert!(!client.handle_default(&invoice_id, &admin));
+    assert!(env.events().all().is_empty());
+
+    // Lock funds at t = 100
+    env.ledger().set_timestamp(100);
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // 2. Unauthorized caller (not admin or pool) -> panics, no event committed
+    let stranger = Address::generate(&env);
+    env.ledger().set_timestamp(200);
+    assert!(client.try_handle_default(&invoice_id, &stranger).is_err());
+    assert!(env.events().all().is_empty());
+
+    // 3. Before grace period (less than 60s) -> panics, no event committed
+    env.ledger().set_timestamp(159);
+    assert!(client.try_handle_default(&invoice_id, &admin).is_err());
+    assert!(env.events().all().is_empty());
+
+    // 4. Future locked_at / timestamp rollback -> panics, no event committed
+    env.ledger().set_timestamp(50);
+    assert!(client.try_handle_default(&invoice_id, &admin).is_err());
+    assert!(env.events().all().is_empty());
+
+    // 5. Successful default at boundary (exactly 60s) -> succeeds and emits lock age = 60
+    env.ledger().set_timestamp(160);
+    assert!(client.handle_default(&invoice_id, &pool));
+    let events_after_success = env.events().all();
+    assert_last_event_four(
+        &env,
+        &events_after_success,
+        "default_resolved",
+        invoice_id.clone(),
+        pool.clone(),
+        pool.clone(),
+        (amount, 60u64),
+    );
+
+    // 6. Idempotent second call on now-consumed record -> returns false, produces no event
+    assert!(!client.handle_default(&invoice_id, &pool));
+    assert!(env.events().all().is_empty());
 }
