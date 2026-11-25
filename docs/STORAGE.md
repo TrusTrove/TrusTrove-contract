@@ -59,6 +59,11 @@ All contracts follow a consistent TTL extension pattern:
 | DataKey | Type | Description | Set During |
 |---------|------|-------------|------------|
 | `Admin` | `Address` | Contract admin address | `initialize()` |
+| `Verifier` | `Address` | Optional verifier role | `set_verifier()` |
+| `Guardian` | `Address` | Optional emergency guardian (#1125) | `set_guardian()` |
+| `AdminFrozen` | `bool` | `true` while the guardian has frozen admin-only writes | `freeze_admin()` / `unfreeze_admin()` |
+| `PendingAdmin` | `PendingAdminTransfer { new_admin: Address, activates_at: u64 }` | Pending delayed admin transfer (#1124); removed on accept, cancel or any immediate transfer | `propose_admin()` |
+| `MetadataKeyPolicy` | `MetadataKeyPolicy` | Active metadata key policy (#1120); absent = `Unrestricted` | `set_metadata_key_policy()` |
 
 ### Persistent Storage
 
@@ -76,6 +81,18 @@ stores the fixed-size digest plus an absolute expiry timestamp. Verification
 with `verify_profile_with_nonce` validates and consumes the challenge in the
 same invocation; a failed or replayed attempt leaves the pending entry and
 profile untouched. Un-verification never needs a nonce.
+
+#### Profile Update Sequence Number (#1128)
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `ProfileVersion(Address)` | `u64` | Per-profile update counter, read with `get_profile_version(address)` |
+
+- Stored beside `Profile(Address)`, not inside it, so existing `Profile`
+  entries decode unchanged after the upgrade.
+- Set to `1` on registration and incremented only when a write changes the
+  stored profile. Profiles registered before #1128 have no entry and report
+  `0` until their first change.
 
 #### Profile Enumeration Index
 
@@ -218,8 +235,9 @@ let status = if !profile_exists {
 
 ### Storage Key Count
 
-**Approximately 2 keys per registered address** — one `Profile` record and one
-`ProfileIndex(role, n)` slot — **plus 2 constant `ProfileCount(role)` keys**
+**Approximately 3 keys per registered address** — one `Profile` record, one
+`ProfileIndex(role, n)` slot and one `ProfileVersion(address)` counter —
+**plus 2 constant `ProfileCount(role)` keys**
 (one per role) that exist once the first profile of that role is registered.
 
 ---
