@@ -188,7 +188,7 @@ function Deploy-Contract {
     }
     $output = & $stellar @deployArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Deploy failed for $key:"
+        Write-Host "ERROR: Deploy failed for ${key}:"
         Write-Host "  $output"
         Write-Host "  Fix the error above and rerun — already-deployed contracts will be skipped."
         throw "Deploy failed for $key"
@@ -274,7 +274,7 @@ function Invoke-Init {
     Write-Host "  Invoking $label ($contractId) ..."
     $output = & $stellar contract invoke --id $contractId --source $env:DEPLOYER_ACCOUNT --network testnet @initArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Invocation failed for $label:"
+        Write-Host "ERROR: Invocation failed for ${label}:"
         Write-Host "  $output"
         Write-Host "  The contract is deployed but this wiring step did not complete."
         Write-Host "  Fix the error and rerun — this step will be retried automatically."
