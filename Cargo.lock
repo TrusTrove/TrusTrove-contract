@@ -1893,6 +1893,7 @@ version = "0.1.0"
 dependencies = [
  "k256",
  "soroban-sdk",
+ "tempfile",
  "trusttrove-escrow",
  "trusttrove-invoice",
  "trusttrove-pool",
