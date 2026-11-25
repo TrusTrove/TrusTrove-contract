@@ -431,7 +431,6 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
 **Total: 176 public entry points across five deployable contracts.**
-**Total: 174 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
