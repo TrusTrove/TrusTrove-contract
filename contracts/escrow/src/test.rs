@@ -1895,13 +1895,9 @@ fn test_has_lock_returns_false_without_materializing_missing_key() {
     let invoice_id = generate_invoice_id(&env, 8);
     let key = DataKey::Locked(invoice_id.clone());
 
-    assert!(!env.as_contract(&client.address, || {
-        env.storage().persistent().has(&key)
-    }));
+    assert!(!env.as_contract(&client.address, || { env.storage().persistent().has(&key) }));
     assert!(!client.has_lock(&invoice_id));
-    assert!(!env.as_contract(&client.address, || {
-        env.storage().persistent().has(&key)
-    }));
+    assert!(!env.as_contract(&client.address, || { env.storage().persistent().has(&key) }));
 }
 
 #[test]
@@ -1925,7 +1921,9 @@ fn test_has_lock_returns_true_for_zero_amount_record() {
         issuer,
     };
     let key = DataKey::Locked(invoice_id.clone());
-    env.as_contract(&client.address, || env.storage().persistent().set(&key, &record));
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&key, &record)
+    });
 
     assert_eq!(client.get_locked(&invoice_id), 0);
     assert!(client.has_lock(&invoice_id));
