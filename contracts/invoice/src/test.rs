@@ -8266,3 +8266,203 @@ fn test_get_settlement_summary_not_found() {
         .unwrap();
     assert_eq!(err, InvoiceError::NotFound.into());
 }
+
+#[test]
+fn test_get_attestation_evidence_hash_returns_exact_hash_and_renews_ttl() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let missing = BytesN::from_array(&env, &[0u8; 32]);
+    assert!(client.get_attestation_evidence_hash(&missing).is_none());
+
+    attest(&env, &client, &invoice_id);
+    let expected_hash = BytesN::from_array(&env, &[9u8; 32]);
+    assert_eq!(
+        client.get_attestation_evidence_hash(&invoice_id),
+        Some(expected_hash.clone())
+    );
+
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + TTL_EXTEND_TO - 100_000);
+    let key = crate::DataKey::Attestation(invoice_id.clone());
+    let ttl_before = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    assert!(ttl_before < TTL_THRESHOLD);
+
+    assert_eq!(
+        client.get_attestation_evidence_hash(&invoice_id),
+        Some(expected_hash)
+    );
+    let ttl_after = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after >= TTL_THRESHOLD,
+        "reading the evidence hash should renew the attestation TTL"
+    );
+}
+
+#[test]
+fn test_listing_expiry_preview_matches_expire_listing_boundary() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+    client.set_expiry_window(&100);
+
+    let expiry_timestamp = env.ledger().timestamp() + 100;
+    env.ledger().set_timestamp(expiry_timestamp - 1);
+    let preview = client.get_listing_expiry_preview(&invoice_id);
+    assert_eq!(preview.expiry_timestamp, expiry_timestamp);
+    assert!(!preview.is_expired);
+
+    env.ledger().set_timestamp(expiry_timestamp);
+    let preview = client.get_listing_expiry_preview(&invoice_id);
+    assert_eq!(preview.expiry_timestamp, expiry_timestamp);
+    assert!(preview.is_expired);
+    assert!(client.expire_listing(&invoice_id, &issuer));
+}
+
+#[test]
+fn test_listing_expiry_preview_rejects_non_listed_invoice() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let error = client
+        .try_get_listing_expiry_preview(&invoice_id)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(error, InvoiceError::InvalidStatusTransition.into());
+}
+
+#[test]
+fn test_invoice_funding_eligibility_reports_checks_and_expiry() {
+    let (env, client, issuer, buyer, registry, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let eligibility = client.get_funding_eligibility(&invoice_id);
+    assert_eq!(eligibility.invoice_status, InvoiceStatus::Listed);
+    assert!(eligibility.listing_expiry_timestamp.is_some());
+    assert_eq!(eligibility.attestation_valid_until, Some(u64::MAX));
+    assert!(eligibility.issuer_verified);
+    assert!(eligibility.buyer_verified);
+    assert!(eligibility.asset_supported);
+    assert!(eligibility.discount_bps_valid);
+    assert!(eligibility.is_eligible);
+    assert!(eligibility.rejection_reasons.is_empty());
+
+    client.set_expiry_window(&100);
+    registry.revoke(&buyer);
+    client.remove_supported_asset(&usdc);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+    let eligibility = client.get_funding_eligibility(&invoice_id);
+    assert!(!eligibility.is_eligible);
+    assert!(!eligibility.buyer_verified);
+    assert!(!eligibility.asset_supported);
+    assert_eq!(
+        eligibility.rejection_reasons,
+        vec![
+            &env,
+            crate::InvoiceFundingRejectionReason::ListingExpired,
+            crate::InvoiceFundingRejectionReason::BuyerNotVerified,
+            crate::InvoiceFundingRejectionReason::UnsupportedAsset,
+        ]
+    );
+}
+
+#[test]
+fn test_invoice_funding_eligibility_uses_attestation_expiry_boundary() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    register_test_agent(&env, &client);
+    let valid_until = env.ledger().timestamp() + 5;
+    let (payload, signature) = sign_attestation(&env, &client.address, &invoice_id, valid_until);
+    client.submit_attestation(&invoice_id, &payload, &signature);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    env.ledger().set_timestamp(valid_until);
+    let eligibility = client.get_funding_eligibility(&invoice_id);
+    assert!(eligibility.is_eligible);
+    assert_eq!(eligibility.attestation_valid_until, Some(valid_until));
+
+    env.ledger().set_timestamp(valid_until + 1);
+    let eligibility = client.get_funding_eligibility(&invoice_id);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(
+        eligibility.rejection_reasons,
+        vec![
+            &env,
+            crate::InvoiceFundingRejectionReason::AttestationExpired,
+        ]
+    );
+}
+
+#[test]
+fn test_invoice_funding_eligibility_reports_missing_attestation_and_invalid_status() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let eligibility = client.get_funding_eligibility(&invoice_id);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(
+        eligibility.rejection_reasons,
+        vec![
+            &env,
+            crate::InvoiceFundingRejectionReason::InvoiceNotListed,
+            crate::InvoiceFundingRejectionReason::AttestationMissing,
+            crate::InvoiceFundingRejectionReason::InvalidDiscount,
+        ]
+    );
+}
+
+#[test]
+fn test_repayment_eligibility_checks_buyer_status_and_does_not_transfer_tokens() {
+    let (env, client, buyer, invoice_id, _, _) = setup_confirmed_invoice();
+    let asset = client.get_funding_asset(&invoice_id);
+    let token_client = token::Client::new(&env, &asset);
+    let balance_before = token_client.balance(&buyer);
+
+    let eligibility = client.get_repayment_eligibility(&invoice_id, &buyer);
+    assert!(eligibility.is_eligible);
+    assert_eq!(eligibility.amount_due, DEFAULT_FACE_VALUE);
+    assert_eq!(eligibility.action, crate::RepaymentAction::Repay);
+    assert!(eligibility.rejection_reasons.is_empty());
+    assert_eq!(token_client.balance(&buyer), balance_before);
+
+    let stranger = Address::generate(&env);
+    let eligibility = client.get_repayment_eligibility(&invoice_id, &stranger);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(eligibility.action, crate::RepaymentAction::Unavailable);
+    assert_eq!(
+        eligibility.rejection_reasons,
+        vec![&env, crate::RepaymentRejectionReason::CallerNotBuyer]
+    );
+    assert_eq!(token_client.balance(&buyer), balance_before);
+}
+
+#[test]
+fn test_repayment_eligibility_reports_invalid_status_and_empty_balance() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    env.as_contract(&client.address, || {
+        let key = crate::DataKey::Invoice(invoice_id.clone());
+        let mut invoice: crate::Invoice = env.storage().persistent().get(&key).unwrap();
+        invoice.remaining_balance = 0;
+        env.storage().persistent().set(&key, &invoice);
+    });
+    let eligibility = client.get_repayment_eligibility(&invoice_id, &buyer);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(
+        eligibility.rejection_reasons,
+        vec![
+            &env,
+            crate::RepaymentRejectionReason::InvalidStatus,
+            crate::RepaymentRejectionReason::NoAmountDue,
+            crate::RepaymentRejectionReason::SettlementNotConfigured,
+        ]
+    );
+}
