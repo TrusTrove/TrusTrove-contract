@@ -81,7 +81,38 @@ get_profile(address) → Profile
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
+get_profile_version(address) → u64               ← per-profile update sequence number
+propose_admin(new_admin, delay) → u64            ← delayed admin change, delay ≥ 1 day
+accept_admin() / cancel_admin_transfer(caller)
+set_guardian(guardian) / freeze_admin() / unfreeze_admin()
+set_metadata_key_policy(policy)                  ← Unrestricted (default) | AllowlistV1
 ```
+
+**Admin safety controls.**
+
+- **Delayed admin change (#1124).** `propose_admin(new_admin, delay)` records
+  the proposed admin and an activation time at least `MIN_ADMIN_TRANSFER_DELAY`
+  (1 day) away. The current admin stays active until `new_admin` calls
+  `accept_admin()` at or after that time. The admin or the guardian can
+  cancel it. The immediate `transfer_ownership` / `transfer_admin` paths still
+  exist and clear any pending proposal.
+- **Emergency freeze (#1125).** A preconfigured guardian key (`set_guardian`)
+  can `freeze_admin()` after a suspected admin key compromise. While frozen,
+  every admin-only write reverts with `AdminFrozen`: upgrade, batch
+  registration, verify/revoke/reinstate, admin transfers, role changes, the
+  key policy, and pause/unpause. Existing verification results, all reads and
+  users' own registration and profile updates are unaffected. Only the
+  guardian can `unfreeze_admin()`.
+- **Profile sequence numbers (#1128).** `get_profile_version(address)` starts
+  at `1` on registration and increases by one per actual profile change, with
+  a matching `profile_version` event, so consumers can detect missed updates.
+- **Metadata key policy (#1120).** `set_metadata_key_policy(AllowlistV1)`
+  restricts registration and update metadata to the documented keys `name`,
+  `legal_name`, `email`, `phone`, `website`, `country`, `jurisdiction`,
+  `registration_number`, `tax_id`, `industry`, `description` and `logo_url`.
+  Unknown keys are rejected with `UnknownMetadataKey`. The default,
+  `Unrestricted`, keeps the previous behaviour, and stored metadata is never
+  rewritten. `get_allowed_metadata_keys()` returns the active list.
 
 **The registry is enumerable without replaying events.** Every registration
 path — single and batch, issuer and buyer — appends the new address to a
@@ -133,6 +164,7 @@ repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
+get_attestation_age(invoice_id) → Option<AttestationAge>
 get_by_status(status, page, page_size) → Vec<Invoice>
 get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
@@ -141,6 +173,9 @@ get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
+get_financing_terms(invoice_id) → FinancingTerms
+get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
+get_seconds_to_maturity(invoice_id) → i128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
 
@@ -177,6 +212,40 @@ loop {
     }
 }
 ```
+
+#### `get_attestation_age` / `get_lifecycle_timestamps` / `get_financing_terms` / `get_seconds_to_maturity`
+
+Read-only companion views for clients that would otherwise stitch several calls
+together. None of them writes storage, bumps a TTL, or changes listing
+eligibility.
+
+- `get_attestation_age(invoice_id) → Option<AttestationAge>` returns
+  `AttestationAge { submitted_at, age_seconds }`, where `age_seconds` is the
+  current ledger timestamp minus the recorded submission time (saturating at
+  `0`). Returns `None` when the invoice has no attestation, including for an
+  unknown invoice ID.
+- `get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps` returns the
+  optional `created_at`, `listed_at`, `funded_at`, `shipped_at`, `repaid_at`,
+  `first_confirmation_at` and `second_confirmation_at`. Each field is `None`
+  until the contract records that transition: creation is always present;
+  listing, funding, shipping and repayment appear when those calls succeed
+  (`repaid_at` stays `None` for defaulted, cancelled or expired invoices).
+  `first_confirmation_at`/`second_confirmation_at` order the issuer's and
+  buyer's `confirm_delivery` timestamps by time: the first is `None` until one
+  party confirms, the second until both (equal when both confirm in the same
+  ledger). Invoices confirmed before #1160 only carry the boolean flags, so
+  both report `None`.
+- `get_financing_terms(invoice_id) → FinancingTerms` returns
+  `FinancingTerms { face_value, discount_bps, funding_asset, due_date, issuer,
+  buyer, status }` in one storage read, alongside the older single-field views
+  and the `get_funding_terms` tuple.
+- `get_seconds_to_maturity(invoice_id) → i128` returns `due_date - now` at the
+  current ledger timestamp: positive while time remains, `0` exactly at
+  `due_date`, negative once overdue. Whole days are `seconds / 86_400`. The
+  signed subtraction cannot overflow at the `u64` bounds.
+
+All four require no authorization. Except for the age view (`None`), they panic
+with `NotFound` (`#2`) for an unknown invoice.
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -287,6 +356,20 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `get_verifier` | `get_verifier() -> Option<Address>` |
 | Registry | `pause` | `pause() -> ()` |
 | Registry | `unpause` | `unpause() -> ()` |
+| Registry | `propose_admin` | `propose_admin(new_admin: Address, delay: u64) -> u64` |
+| Registry | `accept_admin` | `accept_admin() -> ()` |
+| Registry | `cancel_admin_transfer` | `cancel_admin_transfer(caller: Address) -> ()` |
+| Registry | `get_pending_admin_transfer` | `get_pending_admin_transfer() -> Option<PendingAdminTransfer>` |
+| Registry | `set_guardian` | `set_guardian(guardian: Address) -> ()` |
+| Registry | `remove_guardian` | `remove_guardian() -> ()` |
+| Registry | `get_guardian` | `get_guardian() -> Option<Address>` |
+| Registry | `freeze_admin` | `freeze_admin() -> ()` |
+| Registry | `unfreeze_admin` | `unfreeze_admin() -> ()` |
+| Registry | `is_admin_frozen` | `is_admin_frozen() -> bool` |
+| Registry | `set_metadata_key_policy` | `set_metadata_key_policy(policy: MetadataKeyPolicy) -> ()` |
+| Registry | `get_metadata_key_policy` | `get_metadata_key_policy() -> MetadataKeyPolicy` |
+| Registry | `get_allowed_metadata_keys` | `get_allowed_metadata_keys() -> Option<Vec<String>>` |
+| Registry | `get_profile_version` | `get_profile_version(address: Address) -> u64` |
 | Registry | `get_admin` | `get_admin() -> Address` |
 | Invoice | `__constructor` | `__constructor(admin: Address, registry_contract: Address) -> ()` |
 | Invoice | `get_admin` | `get_admin() -> Option<Address>` |
@@ -299,6 +382,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
 | Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
 | Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `get_attestation_age` | `get_attestation_age(invoice_id: BytesN<32>) -> Option<AttestationAge>` |
+| Invoice | `get_attestation_evidence_hash` | `get_attestation_evidence_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
@@ -329,6 +414,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_default_grace_seconds` | `get_default_grace_seconds() -> u64` |
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
+| Invoice | `get_listing_expiry_preview` | `get_listing_expiry_preview(invoice_id: BytesN<32>) -> ListingExpiryPreview` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
 | Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
 | Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
@@ -341,7 +427,12 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
+| Invoice | `get_financing_terms` | `get_financing_terms(invoice_id: BytesN<32>) -> FinancingTerms` |
+| Invoice | `get_lifecycle_timestamps` | `get_lifecycle_timestamps(invoice_id: BytesN<32>) -> LifecycleTimestamps` |
+| Invoice | `get_seconds_to_maturity` | `get_seconds_to_maturity(invoice_id: BytesN<32>) -> i128` |
 | Invoice | `get_settlement_summary` | `get_settlement_summary(invoice_id: BytesN<32>) -> SettlementSummary` |
+| Invoice | `get_funding_eligibility` | `get_funding_eligibility(invoice_id: BytesN<32>) -> InvoiceFundingEligibility` |
+| Invoice | `get_repayment_eligibility` | `get_repayment_eligibility(invoice_id: BytesN<32>, caller: Address) -> RepaymentEligibility` |
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
@@ -450,7 +541,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 189 public entry points across five deployable contracts.**
+**Total: 207 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
