@@ -141,3 +141,36 @@ pub enum DataKey {
     /// Minimum seconds before default handling. Instance key with a u64 value.
     MinLockSeconds,
 }
+
+/// Which escrow write entry points an address may call under the current
+/// configuration, returned by
+/// [`EscrowContract::get_release_authorization`](crate::EscrowContract::get_release_authorization)
+/// (issue #1198).
+///
+/// Each action flag is `true` only when the address passes that entry
+/// point's caller rule **and** the contract is not paused. Conditions that
+/// depend on a particular invoice rather than on the caller are not
+/// evaluated: whether a lock or issuer-release marker exists, the recorded
+/// issuer, the default grace period and the timeout deadline.
+///
+/// This is a preview only. It never replaces authorization: every write still
+/// runs its own `require_auth` and checks, whatever this struct reported.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseAuthorization {
+    /// `true` while the emergency pause is engaged. Every action below then
+    /// reverts with `ContractPaused`, so all action flags are `false`.
+    pub paused: bool,
+    /// `lock`: the configured pool contract.
+    pub lock: bool,
+    /// `release_to_issuer`: the configured pool contract.
+    pub release_to_issuer: bool,
+    /// `release_to_pool`: the invoice contract reported by the pool's
+    /// `get_invoice_contract`, which must also equal the reference pinned with
+    /// `set_invoice_contract` when one is set.
+    pub release_to_pool: bool,
+    /// `handle_default`: the stored admin or the configured pool contract.
+    pub handle_default: bool,
+    /// `release_after_timeout`: permissionless, so any address.
+    pub release_after_timeout: bool,
+}

@@ -3,7 +3,7 @@
 use soroban_sdk::{
     contract, contractimpl, panic_with_error, token, Address, BytesN, Env, Symbol, Vec,
 };
-use trusttrove_pause::{require_not_paused, set_paused};
+use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
 mod constants;
 mod errors;
@@ -1209,6 +1209,72 @@ impl EscrowContract {
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
+    /// Reports which escrow write entry points `caller` may invoke under the
+    /// current configuration, so an operator can check before submitting a
+    /// transaction (issue #1198).
+    ///
+    /// Caller rules mirrored from the write paths:
+    /// * `lock`, `release_to_issuer`: the configured pool contract.
+    /// * `release_to_pool`: the invoice contract the pool's
+    ///   `get_invoice_contract` view reports, which must also equal the
+    ///   reference pinned with [`Self::set_invoice_contract`] when one is set,
+    ///   exactly as `release_to_pool` resolves it. If the pool cannot answer,
+    ///   or the pin disagrees with it, no address may call it and the flag is
+    ///   `false`.
+    /// * `handle_default`: the stored admin or the configured pool contract.
+    /// * `release_after_timeout`: anyone.
+    ///
+    /// While the contract is paused every one of these reverts with
+    /// `ContractPaused`, so all action flags are `false` and `paused` is
+    /// `true`.
+    ///
+    /// Per-invoice conditions are not evaluated (lock or issuer-release marker
+    /// present, recorded issuer, default grace period, timeout deadline). The
+    /// result is a preview only and never substitutes for authorization: each
+    /// write keeps its own `require_auth` and checks.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - The address to check.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Storage
+    /// Read-only: nothing is written and no TTL is extended. The only external
+    /// call is the pool's read-only `get_invoice_contract` view, made when the
+    /// contract is not paused.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the admin or pool contract address is unset.
+    ///
+    /// # Returns
+    /// * `ReleaseAuthorization` - One flag per action, plus the pause state.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let allowed = client.get_release_authorization(&operator);
+    /// if allowed.handle_default {
+    ///     client.handle_default(&invoice_id, &operator);
+    /// }
+    /// ```
+    pub fn get_release_authorization(env: Env, caller: Address) -> ReleaseAuthorization {
+        let admin = Self::require_admin(&env);
+        let pool = Self::get_pool_contract(env.clone());
+        let paused = is_paused(&env);
+        let live = !paused;
+        let is_pool = caller == pool;
+
+        ReleaseAuthorization {
+            paused,
+            lock: live && is_pool,
+            release_to_issuer: live && is_pool,
+            release_to_pool: live && Self::is_release_to_pool_caller(&env, &pool, &caller),
+            handle_default: live && (is_pool || caller == admin),
+            release_after_timeout: live,
+        }
+    }
+
     fn extend_instance_ttl(env: &Env) {
         env.storage()
             .instance()
@@ -1223,6 +1289,32 @@ impl EscrowContract {
             .unwrap_or_else(|| panic_with_error!(env, EscrowError::NotInitialized));
         pool.require_auth();
         pool
+    }
+
+    /// Whether `caller` is the principal `release_to_pool` would authorize:
+    /// the invoice contract the pool reports, provided it matches the pinned
+    /// reference when one is stored. Read-only counterpart of the resolution
+    /// at the top of [`Self::release_to_pool`]; a pool that cannot answer
+    /// means nobody can currently call it.
+    fn is_release_to_pool_caller(env: &Env, pool: &Address, caller: &Address) -> bool {
+        let resolved = env.try_invoke_contract::<Address, soroban_sdk::Error>(
+            pool,
+            &Symbol::new(env, "get_invoice_contract"),
+            Vec::new(env),
+        );
+        let Ok(Ok(resolved)) = resolved else {
+            return false;
+        };
+        if let Some(pinned) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::InvoiceContract)
+        {
+            if pinned != resolved {
+                return false;
+            }
+        }
+        *caller == resolved
     }
 
     fn require_admin(env: &Env) -> Address {

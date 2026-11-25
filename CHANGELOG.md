@@ -15,6 +15,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `escrow`: `get_release_authorization(caller)` view, returning a
+  `ReleaseAuthorization` that reports which escrow write entry points
+  (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
+  `release_after_timeout`) the address may call under the current
+  configuration, including the pinned invoice reference and the pause state.
+  Read-only, needs no auth, and never replaces the write paths' own
+  `require_auth` checks (#1198)
 - `pool`: `share_price_updated` event emitted on successful yield-bearing
   repayments with the invoice ID and the old/new 18-decimal fixed-point share
   prices, plus the `get_share_price()` view using the same encoding. Failed and
