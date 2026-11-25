@@ -258,8 +258,8 @@ asset match, current utilization, and any applicable rejection reasons.
 <!-- BEGIN GENERATED CONTRACT API -->
 ### Canonical public contract API
 
-Generated from current contractimpl declarations by python3 scripts/generate_contract_api.py --write.
-These are client-facing signatures: the framework-provided env: Env parameter is omitted; all other argument names/types and return types are taken from the Rust declarations. Methods without an explicit return type are shown as returning ().
+Generated from current `contractimpl` declarations by `python3 scripts/generate_contract_api.py --write`.
+These are client-facing signatures: the framework-provided `env: Env` parameter is omitted; all other argument names/types and return types are taken from the Rust declarations. Methods without an explicit return type are shown as returning `()`.
 
 | Contract | Public function | Client-facing signature |
 |---|---|---|
@@ -446,7 +446,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 182 public entry points across five deployable contracts.**
+Total public entry points across 5 deployed contracts: **182**.
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
