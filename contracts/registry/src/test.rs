@@ -4349,11 +4349,83 @@ fn test_verified_since_reset_on_reinstate() {
 }
 
 #[test]
+fn test_verification_changed_at_tracks_transitions_not_registration_edits_or_noops() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert_eq!(client.get_verification_changed_at(&issuer), None);
+
+    env.ledger().with_mut(|l| l.timestamp = 1_000);
+    assert!(client.verify_profile(&admin, &issuer, &true));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(1_000));
+
+    // Same-state verify calls still emit the existing audit event, but are
+    // not status transitions and must not move this timestamp.
+    env.ledger().with_mut(|l| l.timestamp = 1_500);
+    assert!(client.verify_profile(&admin, &issuer, &true));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(1_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 1_750);
+    assert!(client.update_metadata(&issuer, &map![&env]));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(1_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 2_000);
+    assert!(client.verify_profile(&admin, &issuer, &false));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(2_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 2_500);
+    assert!(client.verify_profile(&admin, &issuer, &false));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(2_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 3_000);
+    assert!(client.verify_profile(&admin, &issuer, &true));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(3_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 4_000);
+    assert!(client.revoke(&issuer));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(4_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 4_500);
+    assert!(client.revoke(&issuer));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(4_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 5_000);
+    assert!(client.reinstate(&issuer));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(5_000));
+
+    env.ledger().with_mut(|l| l.timestamp = 5_500);
+    assert!(client.update_profile(&issuer, &map![&env]));
+    assert_eq!(client.get_verification_changed_at(&issuer), Some(5_000));
+}
+
+#[test]
+fn test_verification_changed_at_records_pending_to_revoked_transition() {
+    let (env, _admin, client) = setup();
+    let buyer = Address::generate(&env);
+    client.register_buyer(&buyer, &map![&env]);
+
+    env.ledger().with_mut(|l| l.timestamp = 2_500);
+    assert!(client.revoke(&buyer));
+    assert_eq!(client.get_verification_changed_at(&buyer), Some(2_500));
+}
+
+#[test]
 fn test_verified_since_not_found_panics() {
     let (env, _admin, client) = setup();
     let unknown = Address::generate(&env);
     let err = client
         .try_get_verified_since(&unknown)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+}
+
+#[test]
+fn test_verification_changed_at_unregistered_returns_not_found() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let err = client
+        .try_get_verification_changed_at(&unknown)
         .unwrap_err()
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());

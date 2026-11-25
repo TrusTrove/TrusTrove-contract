@@ -113,4 +113,7 @@ pub enum DataKey {
     /// Ledger timestamp when the address most recently became verified. Cleared
     /// on revocation and set again on reinstatement or verification.
     VerifiedSince(Address),
+    /// Ledger timestamp of the most recent verification-status transition.
+    /// This is retained across revocation and reinstatement.
+    VerificationChangedAt(Address),
 }
