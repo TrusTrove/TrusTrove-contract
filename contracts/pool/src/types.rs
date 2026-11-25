@@ -202,6 +202,37 @@ pub struct PoolConfig {
     pub max_batch_size: u32,
 }
 
+/// Canonical XDR payload hashed by `get_pool_state_hash`.
+///
+/// The snapshot includes the public aggregate statistics and configuration,
+/// plus counters and immutable token metadata not currently represented in
+/// those views. Its field order is part of the hash format; append new
+/// fields rather than reordering existing ones.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct PoolStateSnapshot {
+    /// Aggregate pool statistics.
+    pub stats: PoolStats,
+    /// Contract references and funding policy.
+    pub config: PoolConfig,
+    /// Maximum remaining invoice maturity accepted for funding.
+    pub max_time_to_maturity: u64,
+    /// SEP-41 share token name.
+    pub share_name: soroban_sdk::String,
+    /// SEP-41 share token symbol.
+    pub share_symbol: soroban_sdk::String,
+    /// SEP-41 share token decimal precision.
+    pub share_decimals: u32,
+    /// Lifetime principal funded, including principal already repaid/defaulted.
+    pub cumulative_funded: u128,
+    /// Lifetime gross LP deposits.
+    pub lifetime_deposited_volume: u128,
+    /// Lifetime gross LP withdrawals.
+    pub lifetime_withdrawn_volume: u128,
+    /// Lifetime gross repayments.
+    pub lifetime_repaid_volume: u128,
+}
+
 /// Why a listed invoice would currently be rejected by `fund_invoice`.
 #[contracttype]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

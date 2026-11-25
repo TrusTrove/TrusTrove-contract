@@ -134,6 +134,11 @@ pub enum DataKey {
     AssetMetadata(Address),
     MaxInvoiceLifetime,
     CreatedAtIndexEntry(u32),
+    // Per-invoice status revision and optional pre-listing buyer acknowledgement.
+    // Appended to preserve the discriminants of all existing storage keys.
+    StatusRevision(BytesN<32>),
+    BuyerListingAcknowledgement(BytesN<32>),
+    BuyerAcknowledgementRequired,
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).

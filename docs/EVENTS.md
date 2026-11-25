@@ -46,6 +46,54 @@ Emitted when an invoice is listed for financing.
 
 ---
 
+### `invoice_status_changed`
+
+Emitted after every successful invoice lifecycle status transition. The
+revision is incremented once for each transition and is also readable through
+`get_status_revision(invoice_id)`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"invoice_status_changed"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `(InvoiceStatus, InvoiceStatus, u64)` | Previous status, new status, and per-invoice revision |
+
+Failed transitions and operations that leave status unchanged do not increment
+the revision or emit this event. Existing invoice records without revision
+metadata read as revision `0`.
+
+---
+
+### `buyer_listing_acknowledged`
+
+Emitted after the invoice buyer authorizes acknowledgement while the invoice is
+still in `Created` status. Repeated acknowledgement is idempotent and does not
+emit another event.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"buyer_listing_acknowledged"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Buyer |
+| **Data** | `()` | None |
+
+---
+
+### `buyer_ack_set`
+
+Emitted when the admin enables or disables the optional buyer acknowledgement
+gate. The gate defaults to disabled, preserving existing listing behavior.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"buyer_ack_set"` |
+| **Data** | `bool` | Whether acknowledgement is required before listing |
+
+---
+
 ### `invoice_funded`
 
 Emitted when an invoice is funded by the pool.

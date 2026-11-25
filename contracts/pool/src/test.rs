@@ -10407,6 +10407,95 @@ fn test_get_pool_config_is_read_only_and_needs_no_auth() {
 }
 
 // ---------------------------------------------------------------------------
+// Canonical aggregate state hash (issue #1170)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_pool_state_hash_is_deterministic_read_only_and_permissionless() {
+    let te = setup();
+    te.env.set_auths(&[]);
+
+    let first = te.pool.get_pool_state_hash();
+    let second = te.pool.get_pool_state_hash();
+
+    assert_eq!(first, second);
+    assert!(te.env.auths().is_empty());
+}
+
+#[test]
+fn test_pool_state_hash_tracks_aggregate_operations() {
+    let te = setup();
+    let mut previous = te.pool.get_pool_state_hash();
+
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let after_deposit = te.pool.get_pool_state_hash();
+    assert_ne!(after_deposit, previous);
+    assert_eq!(after_deposit, te.pool.get_pool_state_hash());
+    previous = after_deposit;
+
+    te.pool.withdraw(&te.lp, &1_000_000_000);
+    let after_withdrawal = te.pool.get_pool_state_hash();
+    assert_ne!(after_withdrawal, previous);
+    previous = after_withdrawal;
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    let after_funding = te.pool.get_pool_state_hash();
+    assert_ne!(after_funding, previous);
+    previous = after_funding;
+
+    te.pool
+        .receive_repayment(&invoice_id, &DEFAULT_FUNDED_AMOUNT);
+    let after_repayment = te.pool.get_pool_state_hash();
+    assert_ne!(after_repayment, previous);
+
+    let defaulted_invoice = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&defaulted_invoice);
+    previous = te.pool.get_pool_state_hash();
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86_401);
+    assert!(te.pool.handle_default(&defaulted_invoice));
+    let after_default = te.pool.get_pool_state_hash();
+    assert_ne!(after_default, previous);
+}
+
+#[test]
+fn test_pool_state_hash_tracks_configuration_and_rejected_calls_are_unchanged() {
+    let te = setup();
+    let before = te.pool.get_pool_state_hash();
+
+    assert!(te.pool.try_deposit(&te.lp, &0).is_err());
+    assert_eq!(te.pool.get_pool_state_hash(), before);
+
+    // The constructor configured the cap to 100%; writing the same value is
+    // idempotent and leaves the canonical snapshot unchanged.
+    assert!(te.pool.set_max_utilization(&te.admin, &10_000));
+    assert_eq!(te.pool.get_pool_state_hash(), before);
+    assert!(te.pool.try_set_max_utilization(&te.admin, &10_001).is_err());
+    assert_eq!(te.pool.get_pool_state_hash(), before);
+
+    te.pool.set_min_discount(&300);
+    assert_ne!(te.pool.get_pool_state_hash(), before);
+}
+
+#[test]
+fn test_pool_state_hash_does_not_require_auth_and_uninitialized_pool_rejects_it() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    let before = te.pool.get_pool_state_hash();
+
+    assert!(te
+        .pool
+        .try_deposit(&te.lp, &DEFAULT_MIN_INITIAL_DEPOSIT)
+        .is_err());
+    assert_eq!(te.pool.get_pool_state_hash(), before);
+
+    let (_env, uninitialized) = uninitialized_pool();
+    assert!(uninitialized.try_get_pool_state_hash().is_err());
+}
+
+// ---------------------------------------------------------------------------
 // ISSUES #1171-#1174: SHARE-PRICE EVENT AND LIFETIME VOLUME COUNTERS
 // ---------------------------------------------------------------------------
 

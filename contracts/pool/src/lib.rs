@@ -7,6 +7,7 @@
 // live at the crate root.
 #![allow(clippy::too_many_arguments)]
 
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contractimpl, contracttype, panic_with_error, token, Address, BytesN, Env, IntoVal,
     String, Symbol, Vec,
@@ -2095,6 +2096,52 @@ impl PoolContract {
             total_shares: totals.shares,
             max_utilization_bps: totals.max_utilization_bps,
         }
+    }
+
+    /// Returns the canonical SHA-256 hash of this pool's aggregate state.
+    ///
+    /// The digest is computed from the XDR encoding of [`PoolStateSnapshot`],
+    /// covering `get_stats`, `get_pool_config`, the maximum time-to-maturity
+    /// policy, SEP-41 share metadata, cumulative funded principal, and all
+    /// lifetime deposit/withdrawal/repayment counters. The encoding is
+    /// deterministic for an unchanged snapshot; changes to accounting
+    /// operations (deposit, withdrawal, funding, repayment, or default) or
+    /// configuration produce a new digest. Per-LP positions and individual
+    /// funded-invoice records are intentionally excluded.
+    ///
+    /// This is a read-only, permissionless view. It reads legacy and optional
+    /// storage using the same fallbacks as existing views and does not add or
+    /// reinterpret any storage keys.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if required pool configuration is missing.
+    /// * `Overflow` if the underlying aggregate statistics cannot be formed.
+    ///
+    /// # Returns
+    /// * `BytesN<32>` - SHA-256 of the canonical XDR snapshot.
+    pub fn get_pool_state_hash(env: Env) -> BytesN<32> {
+        let snapshot = PoolStateSnapshot {
+            stats: Self::get_stats(env.clone()),
+            config: Self::get_pool_config(env.clone()),
+            max_time_to_maturity: Self::get_max_time_to_maturity(env.clone()),
+            share_name: Self::name(env.clone()),
+            share_symbol: Self::symbol(env.clone()),
+            share_decimals: Self::decimals(env.clone()),
+            cumulative_funded: Self::totals(&env).cumulative_funded,
+            lifetime_deposited_volume: Self::read_lifetime_volume(
+                &env,
+                &DataKey::LifetimeDepositedVolume,
+            ),
+            lifetime_withdrawn_volume: Self::read_lifetime_volume(
+                &env,
+                &DataKey::LifetimeWithdrawnVolume,
+            ),
+            lifetime_repaid_volume: Self::read_lifetime_volume(
+                &env,
+                &DataKey::LifetimeRepaidVolume,
+            ),
+        };
+        env.crypto().sha256(&snapshot.to_xdr(&env)).into()
     }
 
     /// Returns cumulative realized principal loss as a percentage of all principal

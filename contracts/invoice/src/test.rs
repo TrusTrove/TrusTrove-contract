@@ -1173,6 +1173,127 @@ fn test_list_for_financing_boundary_second_accepted() {
     assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Listed);
 }
 
+#[test]
+fn test_buyer_acknowledgement_gate_and_status_revision_happy_path() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+
+    assert!(!client.get_buyer_acknowledgement());
+    assert!(!client.get_buyer_listing_acknowledged(&invoice_id));
+    assert_eq!(client.get_status_revision(&invoice_id), 0);
+
+    client.set_buyer_acknowledgement(&true);
+    assert!(client
+        .try_list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS)
+        .is_err());
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
+    assert_eq!(client.get_status_revision(&invoice_id), 0);
+
+    assert!(client.acknowledge_listing(&invoice_id));
+    assert!(client.get_buyer_listing_acknowledged(&invoice_id));
+
+    let event_count_after_ack = env.events().all().len();
+    assert!(client.acknowledge_listing(&invoice_id));
+    assert_eq!(env.events().all().len(), event_count_after_ack);
+    assert_eq!(client.get_status_revision(&invoice_id), 0);
+
+    assert!(client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Listed);
+    assert_eq!(client.get_status_revision(&invoice_id), 1);
+    assert_eq!(client.get_status_revision(&invoice_id), 1);
+
+    let events_before_invalid_retry = env.events().all().len();
+    assert!(client
+        .try_list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS)
+        .is_err());
+    assert_eq!(client.get_status_revision(&invoice_id), 1);
+    assert_eq!(env.events().all().len(), events_before_invalid_retry);
+    assert!(client.try_acknowledge_listing(&invoice_id).is_err());
+}
+
+#[test]
+fn test_buyer_acknowledgement_requires_buyer_auth_and_admin_config_auth() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    let admin = client.get_admin().unwrap();
+    let non_admin = Address::generate(&env);
+
+    env.mock_auths(&[]);
+    assert!(client.try_set_buyer_acknowledgement(&true).is_err());
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_buyer_acknowledgement",
+            args: (true,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_set_buyer_acknowledgement(&true).is_err());
+    assert!(!client.get_buyer_acknowledgement());
+
+    env.mock_auths(&[]);
+    assert!(client.try_acknowledge_listing(&invoice_id).is_err());
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "acknowledge_listing",
+            args: (invoice_id.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_acknowledge_listing(&invoice_id).is_err());
+    assert!(!client.get_buyer_listing_acknowledged(&invoice_id));
+    assert_eq!(client.get_status_revision(&invoice_id), 0);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "set_buyer_acknowledgement",
+            args: (true,).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    client.set_buyer_acknowledgement(&true);
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &buyer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "acknowledge_listing",
+            args: (invoice_id.clone(),).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.acknowledge_listing(&invoice_id));
+    assert!(client.get_buyer_listing_acknowledged(&invoice_id));
+}
+
+#[test]
+fn test_status_revision_overflow_reverts_transition() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    let revision_key = crate::DataKey::StatusRevision(invoice_id.clone());
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&revision_key, &u64::MAX);
+    });
+
+    let events_before = env.events().all().len();
+    assert!(client
+        .try_list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS)
+        .is_err());
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
+    assert_eq!(client.get_status_revision(&invoice_id), u64::MAX);
+    assert_eq!(env.events().all().len(), events_before);
+}
+
 /// Issue #823 on the tolerant batch path: an expired attestation must be a
 /// failed entry, never a listing and never a panic.
 #[test]

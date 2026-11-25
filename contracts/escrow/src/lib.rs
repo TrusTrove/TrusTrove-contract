@@ -2,7 +2,8 @@
 
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Symbol, Vec,
+    contract, contractimpl, panic_with_error, token, Address, Bytes, BytesN, Env, Map, Symbol,
+    TryFromVal, Val, Vec,
 };
 use trusttrove_pause::{is_paused, require_not_paused, set_paused};
 
@@ -11,6 +12,8 @@ mod errors;
 mod events;
 mod test;
 mod types;
+
+use types::LegacyEscrowEvent;
 
 pub use constants::*;
 pub use errors::*;
@@ -362,7 +365,12 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .extend_ttl(&ledger_key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        Self::append_history(&env, &invoice_id, EscrowAction::Locked, amount, None);
+        let sequence_key = DataKey::ReleaseSequence(invoice_id.clone());
+        env.storage().persistent().set(&sequence_key, &0u64);
+        env.storage()
+            .persistent()
+            .extend_ttl(&sequence_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::append_history(&env, &invoice_id, EscrowAction::Locked, amount, None, 0);
         Self::extend_instance_ttl(&env);
         events::funds_locked(&env, &invoice_id, &issuer, amount);
 
@@ -440,16 +448,19 @@ impl EscrowContract {
         // invalid token amount.
         let amount = i128::try_from(record.amount)
             .unwrap_or_else(|_| panic_with_error!(&env, EscrowError::InvalidAmount));
+        let sequence = Self::next_release_sequence(&env, &invoice_id);
         // Pay from the locked invoice record, never from the caller-supplied
         // address after it has merely passed validation.
         usdc.transfer(&env.current_contract_address(), &recorded_issuer, &amount);
 
+        Self::store_release_sequence(&env, &invoice_id, sequence);
         Self::append_history(
             &env,
             &invoice_id,
             EscrowAction::ReleasedToIssuer,
             record.amount,
             None,
+            sequence,
         );
         env.storage().persistent().remove(&key);
         env.storage()
@@ -468,7 +479,7 @@ impl EscrowContract {
             .persistent()
             .extend_ttl(&released_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
-        events::released_to_issuer(&env, &invoice_id, &recorded_issuer, record.amount);
+        events::released_to_issuer(&env, &invoice_id, &recorded_issuer, record.amount, sequence);
         true
     }
 
@@ -584,6 +595,7 @@ impl EscrowContract {
             panic_with_error!(&env, EscrowError::NotFound);
         }
 
+        let sequence = Self::next_release_sequence(&env, &invoice_id);
         let usdc = Self::usdc_client(&env);
         usdc.transfer(
             &env.current_contract_address(),
@@ -591,12 +603,14 @@ impl EscrowContract {
             &(repayment_amount as i128),
         );
 
+        Self::store_release_sequence(&env, &invoice_id, sequence);
         Self::append_history(
             &env,
             &invoice_id,
             EscrowAction::ReleasedToPool,
             repayment_amount,
             None,
+            sequence,
         );
         if let Some(mut record) = record.take() {
             if repayment_amount < record.amount {
@@ -618,7 +632,7 @@ impl EscrowContract {
                 .remove(&DataKey::LockedLedger(invoice_id.clone()));
         }
         Self::extend_instance_ttl(&env);
-        events::released_to_pool(&env, &invoice_id, &pool, repayment_amount);
+        events::released_to_pool(&env, &invoice_id, &pool, repayment_amount, sequence);
         true
     }
 
@@ -730,25 +744,28 @@ impl EscrowContract {
         if record.amount > i128::MAX as u128 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
+        let sequence = Self::next_release_sequence(&env, &invoice_id);
         usdc.transfer(
             &env.current_contract_address(),
             &pool,
             &(record.amount as i128),
         );
 
+        Self::store_release_sequence(&env, &invoice_id, sequence);
         Self::append_history(
             &env,
             &invoice_id,
             EscrowAction::DefaultHandled,
             record.amount,
             Some(caller.clone()),
+            sequence,
         );
         env.storage().persistent().remove(&key);
         env.storage()
             .persistent()
             .remove(&DataKey::LockedLedger(invoice_id.clone()));
         Self::extend_instance_ttl(&env);
-        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount);
+        events::default_resolved(&env, &invoice_id, &pool, &caller, record.amount, sequence);
         true
     }
 
@@ -844,25 +861,28 @@ impl EscrowContract {
         if record.amount > i128::MAX as u128 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
         }
+        let sequence = Self::next_release_sequence(&env, &invoice_id);
         Self::usdc_client(&env).transfer(
             &env.current_contract_address(),
             &pool,
             &(record.amount as i128),
         );
 
+        Self::store_release_sequence(&env, &invoice_id, sequence);
         Self::append_history(
             &env,
             &invoice_id,
             EscrowAction::TimeoutReleased,
             record.amount,
             None,
+            sequence,
         );
         env.storage().persistent().remove(&key);
         env.storage()
             .persistent()
             .remove(&DataKey::LockedLedger(invoice_id.clone()));
         Self::extend_instance_ttl(&env);
-        events::timeout_released(&env, &invoice_id, &pool, record.amount);
+        events::timeout_released(&env, &invoice_id, &pool, record.amount, sequence);
         true
     }
 
@@ -1124,6 +1144,25 @@ impl EscrowContract {
         }
     }
 
+    /// Returns the one-based sequence of successful releases for the current
+    /// or most recent lock. A new lock resets the sequence to zero; missing
+    /// sequence data from older deployments is treated as zero.
+    ///
+    /// # Auth
+    /// None. This is a read-only view.
+    pub fn get_release_sequence(env: Env, invoice_id: BytesN<32>) -> u64 {
+        let key = DataKey::ReleaseSequence(invoice_id);
+        match env.storage().persistent().get::<_, u64>(&key) {
+            Some(sequence) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                sequence
+            }
+            None => 0,
+        }
+    }
+
     /// Returns the cumulative amount returned to the pool for an invoice.
     ///
     /// Sums successful [`EscrowAction::ReleasedToPool`] and
@@ -1234,12 +1273,12 @@ impl EscrowContract {
     /// ```
     pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
         let key = DataKey::History(invoice_id);
-        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
-            Some(history) => {
+        match env.storage().persistent().get::<_, Val>(&key) {
+            Some(value) => {
                 env.storage()
                     .persistent()
                     .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                history
+                Self::decode_history(&env, &value)
             }
             None => Vec::new(&env),
         }
@@ -1272,12 +1311,14 @@ impl EscrowContract {
         action: EscrowAction,
         amount: u128,
         caller: Option<Address>,
+        sequence: u64,
     ) {
         let key = DataKey::History(invoice_id.clone());
-        let mut history: Vec<EscrowEvent> = env
+        let mut history = env
             .storage()
             .persistent()
-            .get(&key)
+            .get::<_, Val>(&key)
+            .map(|value| Self::decode_history(env, &value))
             .unwrap_or(Vec::new(env));
         history.push_back(EscrowEvent {
             invoice_id: invoice_id.clone(),
@@ -1285,8 +1326,58 @@ impl EscrowContract {
             amount,
             timestamp: env.ledger().timestamp(),
             caller,
+            sequence,
         });
         env.storage().persistent().set(&key, &history);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    fn decode_history(env: &Env, value: &Val) -> Vec<EscrowEvent> {
+        let raw_history = Vec::<Val>::try_from_val(env, value)
+            .unwrap_or_else(|_| panic_with_error!(env, EscrowError::InvalidConfig));
+        let mut history = Vec::new(env);
+
+        for raw_event in raw_history.iter() {
+            if let Ok(map) = Map::<Val, Val>::try_from_val(env, &raw_event) {
+                if map.len() == 5 {
+                    if let Ok(event) = LegacyEscrowEvent::try_from_val(env, &raw_event) {
+                        history.push_back(EscrowEvent {
+                            invoice_id: event.invoice_id,
+                            action: event.action,
+                            amount: event.amount,
+                            timestamp: event.timestamp,
+                            caller: event.caller,
+                            sequence: 0,
+                        });
+                        continue;
+                    }
+                }
+            }
+
+            if let Ok(event) = EscrowEvent::try_from_val(env, &raw_event) {
+                history.push_back(event);
+            } else {
+                panic_with_error!(env, EscrowError::InvalidConfig);
+            }
+        }
+
+        history
+    }
+
+    fn next_release_sequence(env: &Env, invoice_id: &BytesN<32>) -> u64 {
+        env.storage()
+            .persistent()
+            .get::<_, u64>(&DataKey::ReleaseSequence(invoice_id.clone()))
+            .unwrap_or(0)
+            .checked_add(1)
+            .unwrap_or_else(|| panic_with_error!(env, EscrowError::MathOverflow))
+    }
+
+    fn store_release_sequence(env: &Env, invoice_id: &BytesN<32>, sequence: u64) {
+        let key = DataKey::ReleaseSequence(invoice_id.clone());
+        env.storage().persistent().set(&key, &sequence);
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);

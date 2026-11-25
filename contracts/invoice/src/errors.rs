@@ -56,4 +56,6 @@ pub enum InvoiceError {
     InvalidRiskScore = 31,
     /// The signature recovery byte is outside Soroban's supported range.
     InvalidRecoveryId = 32,
+    /// Listing is disabled until the buyer acknowledges it.
+    BuyerAcknowledgementRequired = 33,
 }
