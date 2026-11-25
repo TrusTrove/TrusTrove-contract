@@ -205,7 +205,10 @@ export interface InvoiceClient {
   batch_list_for_financing(args: { entries: Array<readonly [BytesN<32>, u32]> }): Promise<Array<BytesN<32>>>;
   cancel(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   confirm_delivery(args: { invoice_id: BytesN<32>; confirmer: Address }): Promise<boolean>;
+  correct_invoice(args: { invoice_id: BytesN<32>; buyer: Address; face_value: u128; due_date: u64; funding_asset: Address }): Promise<boolean>;
   create(args: { issuer: Address; buyer: Address; face_value: u128; due_date: u64; funding_asset: Address }): Promise<BytesN<32>>;
+  create_with_purchase_order_hash(args: { issuer: Address; buyer: Address; face_value: u128; due_date: u64; funding_asset: Address; purchase_order_hash: Option<BytesN<32>> }): Promise<BytesN<32>>;
+  delist(args: { invoice_id: BytesN<32>; cancel_invoice: boolean }): Promise<boolean>;
   expire_listing(args: { invoice_id: BytesN<32>; caller: Address }): Promise<boolean>;
   get(args: { invoice_id: BytesN<32> }): Promise<Invoice>;
   get_admin(): Promise<Option<Address>>;
@@ -241,6 +244,7 @@ export interface InvoiceClient {
   get_listing_expiry_preview(args: { invoice_id: BytesN<32> }): Promise<ListingExpiryPreview>;
   get_max_invoice_lifetime(): Promise<u64>;
   get_pool_contract(): Promise<Option<Address>>;
+  get_purchase_order_hash(args: { invoice_id: BytesN<32> }): Promise<Option<BytesN<32>>>;
   get_registry_contract(): Promise<Option<Address>>;
   get_remaining_balance(args: { invoice_id: BytesN<32> }): Promise<u128>;
   get_repaid_amount(args: { invoice_id: BytesN<32> }): Promise<u128>;
@@ -274,7 +278,8 @@ export interface InvoiceClient {
   transfer_ownership(args: { new_admin: Address }): Promise<void>;
   trigger_default(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   unpause(): Promise<void>;
+  update_listing_terms(args: { invoice_id: BytesN<32>; discount_bps: u32 }): Promise<boolean>;
   upgrade(args: { new_wasm_hash: BytesN<32> }): Promise<void>;
 }
 
-export const INVOICE_METHODS = ["__constructor", "add_supported_asset", "batch_create", "batch_list_for_financing", "cancel", "confirm_delivery", "create", "expire_listing", "get", "get_admin", "get_agent_registry_contract", "get_asset_metadata", "get_attestation", "get_attestation_age", "get_attestation_evidence_hash", "get_buyer", "get_by_buyer", "get_by_issuer", "get_by_status", "get_counts", "get_created_at_range", "get_default_grace_seconds", "get_discount_bps", "get_due_date", "get_escrow_contract", "get_expiry_window", "get_face_value", "get_financing_terms", "get_funded_amount", "get_funding_asset", "get_funding_context", "get_funding_eligibility", "get_funding_terms", "get_ids_by_created_at_range", "get_invoice_count_by_buyer", "get_invoice_count_by_issuer", "get_invoice_ids_by_status", "get_issuer", "get_lifecycle_timestamps", "get_listing_expiry_preview", "get_max_invoice_lifetime", "get_pool_contract", "get_registry_contract", "get_remaining_balance", "get_repaid_amount", "get_repayment_eligibility", "get_seconds_to_maturity", "get_settlement_summary", "get_status", "get_supported_asset_count", "get_supported_asset_ids", "get_supported_assets", "get_supported_assets_page", "has_status_membership", "is_supported_asset", "list_for_financing", "mark_defaulted", "mark_funded", "mark_shipped", "pause", "remove_supported_asset", "repay", "repay_early", "repay_partial", "set_agent_registry_contract", "set_asset_metadata", "set_default_grace_seconds", "set_escrow_contract", "set_expiry_window", "set_max_invoice_lifetime", "set_pool_contract", "submit_attestation", "transfer_ownership", "trigger_default", "unpause", "upgrade"] as const;
+export const INVOICE_METHODS = ["__constructor", "add_supported_asset", "batch_create", "batch_list_for_financing", "cancel", "confirm_delivery", "correct_invoice", "create", "create_with_purchase_order_hash", "delist", "expire_listing", "get", "get_admin", "get_agent_registry_contract", "get_asset_metadata", "get_attestation", "get_attestation_age", "get_attestation_evidence_hash", "get_buyer", "get_by_buyer", "get_by_issuer", "get_by_status", "get_counts", "get_created_at_range", "get_default_grace_seconds", "get_discount_bps", "get_due_date", "get_escrow_contract", "get_expiry_window", "get_face_value", "get_financing_terms", "get_funded_amount", "get_funding_asset", "get_funding_context", "get_funding_eligibility", "get_funding_terms", "get_ids_by_created_at_range", "get_invoice_count_by_buyer", "get_invoice_count_by_issuer", "get_invoice_ids_by_status", "get_issuer", "get_lifecycle_timestamps", "get_listing_expiry_preview", "get_max_invoice_lifetime", "get_pool_contract", "get_purchase_order_hash", "get_registry_contract", "get_remaining_balance", "get_repaid_amount", "get_repayment_eligibility", "get_seconds_to_maturity", "get_settlement_summary", "get_status", "get_supported_asset_count", "get_supported_asset_ids", "get_supported_assets", "get_supported_assets_page", "has_status_membership", "is_supported_asset", "list_for_financing", "mark_defaulted", "mark_funded", "mark_shipped", "pause", "remove_supported_asset", "repay", "repay_early", "repay_partial", "set_agent_registry_contract", "set_asset_metadata", "set_default_grace_seconds", "set_escrow_contract", "set_expiry_window", "set_max_invoice_lifetime", "set_pool_contract", "submit_attestation", "transfer_ownership", "trigger_default", "unpause", "update_listing_terms", "upgrade"] as const;

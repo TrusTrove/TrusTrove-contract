@@ -6,6 +6,8 @@
 #![allow(deprecated)]
 use soroban_sdk::{Address, BytesN, Env, String, Symbol};
 
+use crate::InvoiceStatus;
+
 pub fn invoice_created(
     env: &Env,
     invoice_id: &BytesN<32>,
@@ -26,6 +28,27 @@ pub fn invoice_created(
     );
 }
 
+pub fn invoice_created_with_purchase_order_hash(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    issuer: &Address,
+    buyer: &Address,
+    face_value: u128,
+    funding_asset: &Address,
+    purchase_order_hash: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "invoice_created_with_purchase_order_hash"),
+            invoice_id.clone(),
+            issuer.clone(),
+            buyer.clone(),
+            funding_asset.clone(),
+        ),
+        (face_value, purchase_order_hash.clone()),
+    );
+}
+
 pub fn invoice_listed(env: &Env, invoice_id: &BytesN<32>, discount_bps: u32) {
     env.events().publish(
         (Symbol::new(env, "invoice_listed"), invoice_id.clone()),
@@ -37,6 +60,40 @@ pub fn invoice_cancelled(env: &Env, invoice_id: &BytesN<32>) {
     env.events().publish(
         (Symbol::new(env, "invoice_cancelled"), invoice_id.clone()),
         (),
+    );
+}
+
+pub fn invoice_terms_corrected(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    old_digest: &BytesN<32>,
+    new_digest: &BytesN<32>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_terms_corrected"), invoice_id.clone()),
+        (old_digest.clone(), new_digest.clone()),
+    );
+}
+
+pub fn invoice_listing_terms_updated(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    old_discount_bps: u32,
+    new_discount_bps: u32,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "invoice_listing_terms_updated"),
+            invoice_id.clone(),
+        ),
+        (old_discount_bps, new_discount_bps),
+    );
+}
+
+pub fn invoice_delisted(env: &Env, invoice_id: &BytesN<32>, new_status: InvoiceStatus) {
+    env.events().publish(
+        (Symbol::new(env, "invoice_delisted"), invoice_id.clone()),
+        new_status,
     );
 }
 

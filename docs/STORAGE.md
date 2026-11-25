@@ -295,6 +295,18 @@ Invoice {
 }
 ```
 
+`Invoice` is intentionally unchanged for storage compatibility. Optional
+purchase-order hashes are stored separately and remain readable for legacy
+invoices (which return `None`):
+
+| DataKey | Type | Description | Set by |
+|---------|------|-------------|--------|
+| `PurchaseOrderHash(BytesN<32>)` | `BytesN<32>` | Buyer-consented purchase-order hash for the invoice | `create_with_purchase_order_hash()` |
+
+Use `get_purchase_order_hash(invoice_id)` to read the optional value. Supplying
+a hash requires authorization from both issuer and buyer. Correcting the buyer
+removes the previous buyer's hash and invalidates any existing attestation.
+
 #### InvoiceStatus Enum (u32 repr)
 
 ```rust
@@ -317,6 +329,7 @@ Cancelled = 8   // issuer cancelled before listing
 | `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
 | `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
 | `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
+| `BuyerIndexPosition(Address, u64)` | `u32` | O(1) position of the invoice in a buyer index | On write, compacted on buyer correction |
 | `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
 | `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
 | `StatusCount(u32)` | `u64` | Count of invoices in each status | On write (`increment_status_count` / `decrement_status_count`, issue #830) |
@@ -325,8 +338,10 @@ Cancelled = 8   // issuer cancelled before listing
 
 - Three index families (`IssuerIndex`, `BuyerIndex`, `StatusIndex`) each
   maintain a count key and an ordered list of entries.
-- Index entries are appended — no compaction on status transitions (entries
-  are added to the new status but not removed from the old).
+- Buyer indexes are compacted with swap-and-pop when a `Created` invoice's
+  buyer is corrected; the moved invoice's position marker is updated.
+- Issuer indexes are append-only. Buyer indexes compact on buyer correction,
+  and status indexes compact with swap-and-pop on lifecycle transitions.
 - `get_invoice_ids_by_status()` walks one status index backwards from its
   end, `page_size` rows per call (`1..=MAX_PAGE_SIZE`), returning IDs plus a
   `next` cursor. It checks each row against its `StatusMembership` marker
@@ -349,6 +364,9 @@ Cancelled = 8   // issuer cancelled before listing
 - 1 issuer index entry (+1 for count if first)
 - 1 buyer index entry (+1 for count if first)
 - 1 status index entry (+1 for each status transition)
+
+Each invoice also has a buyer-index position marker; invoices created with a
+purchase-order hash have one additional persistent metadata entry.
 
 ---
 

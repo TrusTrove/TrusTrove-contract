@@ -394,10 +394,14 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_asset_metadata` | `set_asset_metadata(asset: Address, code: Option<String>, decimals: Option<u32>) -> ()` |
 | Invoice | `get_asset_metadata` | `get_asset_metadata(asset: Address) -> Option<AssetMetadata>` |
 | Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
+| Invoice | `create_with_purchase_order_hash` | `create_with_purchase_order_hash(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address, purchase_order_hash: Option<BytesN<32>>) -> BytesN<32>` |
 | Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
 | Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
+| Invoice | `update_listing_terms` | `update_listing_terms(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
 | Invoice | `batch_list_for_financing` | `batch_list_for_financing(entries: Vec<(BytesN<32>, u32)>) -> Vec<BytesN<32>>` |
 | Invoice | `cancel` | `cancel(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `correct_invoice` | `correct_invoice(invoice_id: BytesN<32>, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> bool` |
+| Invoice | `delist` | `delist(invoice_id: BytesN<32>, cancel_invoice: bool) -> bool` |
 | Invoice | `submit_attestation` | `submit_attestation(invoice_id: BytesN<32>, payload: Bytes, signature: BytesN<65>) -> ()` |
 | Invoice | `mark_funded` | `mark_funded(invoice_id: BytesN<32>, pool_address: Address, asset_address: Address, funded_amount: u128) -> bool` |
 | Invoice | `mark_shipped` | `mark_shipped(invoice_id: BytesN<32>) -> bool` |
@@ -432,6 +436,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
+| Invoice | `get_purchase_order_hash` | `get_purchase_order_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
@@ -537,7 +542,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 207 public entry points across five deployable contracts.**
+**Total: 212 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
