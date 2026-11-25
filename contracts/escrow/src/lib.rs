@@ -1023,7 +1023,9 @@ impl EscrowContract {
         }
     }
 
-    /// Returns the ledger sequence when the escrow was locked for an invoice.
+/// Returns the expiration timestamp when minimum-lock default handling
+    /// becomes allowed (`locked_at + DEFAULT_MIN_LOCK_SECONDS`), or panics
+    /// with `MathOverflow` on checked addition overflow. Returns 0 if not locked.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1033,79 +1035,25 @@ impl EscrowContract {
     /// None. This is a read-only view.
     ///
     /// # Panics
-    /// Does not panic.
+    /// * `MathOverflow` if `locked_at + DEFAULT_MIN_LOCK_SECONDS` overflows `u64`.
     ///
     /// # Returns
-    /// * `u64` - The lock-creation ledger sequence, or `0` when the record is
-    ///   absent or was created before ledger tracking existed (unknown).
+    /// * `u64` - The lock expiration timestamp, or 0 if no escrow record exists.
     ///
     /// # Example
     /// ```ignore
-    /// let ledger = client.get_locked_ledger(&invoice_id);
+    /// let expiry = client.get_lock_expiration_timestamp(&invoice_id);
     /// ```
-    pub fn get_locked_ledger(env: Env, invoice_id: BytesN<32>) -> u64 {
-        let key = DataKey::Locked(invoice_id.clone());
-        if !env.storage().persistent().has(&key) {
-            return 0;
-        }
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        let ledger_key = DataKey::LockedLedger(invoice_id);
-        match env.storage().persistent().get::<_, u64>(&ledger_key) {
-            Some(ledger) => {
+    pub fn get_lock_expiration_timestamp(env: Env, invoice_id: BytesN<32>) -> u64 {
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(r) => {
                 env.storage()
                     .persistent()
-                    .extend_ttl(&ledger_key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                ledger
-            }
-            // Legacy records created before #1196 have no ledger key.
-            None => 0,
-        }
-    }
-
-    /// Returns the cumulative amount returned to the pool for an invoice.
-    ///
-    /// Sums successful [`EscrowAction::ReleasedToPool`] and
-    /// [`EscrowAction::DefaultHandled`] history entries with checked
-    /// arithmetic. Releases to the issuer and timeout releases are excluded:
-    /// they are not repayments reconciled against the invoice.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `invoice_id` - The invoice to query.
-    ///
-    /// # Auth
-    /// None. This is a read-only view.
-    ///
-    /// # Panics
-    /// Panics with [`EscrowError::MathOverflow`] if the total cannot fit in
-    /// `u128`.
-    ///
-    /// # Returns
-    /// * `u128` - The cumulative returned amount, or `0` when no matching
-    ///   history exists.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let total = client.get_total_returned_to_pool(&invoice_id);
-    /// ```
-    pub fn get_total_returned_to_pool(env: Env, invoice_id: BytesN<32>) -> u128 {
-        let history = Self::get_history(env.clone(), invoice_id);
-        let mut total: u128 = 0;
-        for event in history.iter() {
-            match &event.action {
-                EscrowAction::ReleasedToPool | EscrowAction::DefaultHandled => {
-                    total = total
-                        .checked_add(event.amount)
-                        .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
-                }
-                _ => {}
-            }
-        }
-        total
-    }
-
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                r.locked_at
+                    .checked_add(DEFAULT_MIN_LOCK_SECONDS)
+                    .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow))
     /// Returns the history of escrow events for an invoice.
     ///
     /// # Arguments

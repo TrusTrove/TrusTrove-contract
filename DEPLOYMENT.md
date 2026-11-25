@@ -291,6 +291,20 @@ will work with `--network public` by updating `.env`.
 
 ## Contract Verification
 
+## Deployment Manifest and Checksums
+
+To ensure release artifacts have traceable WASM binaries, network passphrases, contract IDs, and source commits, the repository provides automated manifest generation and verification scripts:
+
+- **Generate Manifest:** `bash scripts/generate-manifest.sh [output-path]`
+  Records the SHA-256 hashes of compiled WASMs (`target/wasm32v1-none/release/*.wasm`), network passphrase, deployed contract IDs from `.deployed-addresses`, and the current Git commit hash into a JSON deployment manifest (default: `deployment-manifest.json`).
+
+- **Verify Manifest:** `bash scripts/verify-manifest.sh [output-path]`
+  Recomputes SHA-256 hashes for each WASM binary referenced in the manifest and validates them against the recorded values, failing with an error if any mismatch or missing file is detected.
+
+CI automatically runs both scripts during every build pipeline to guarantee artifact integrity.
+
+## Contract Verification
+
 After deployment, verify all contracts are live:
 
 ```bash

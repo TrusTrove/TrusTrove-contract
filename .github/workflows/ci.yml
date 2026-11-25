@@ -77,6 +77,11 @@ jobs:
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
 
+      - name: Generate and verify deployment manifest
+        run: |
+          bash scripts/generate-manifest.sh deployment-manifest.json
+          bash scripts/verify-manifest.sh deployment-manifest.json
+
       - name: Test (default features)
         run: cargo test --workspace
 
