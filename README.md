@@ -134,6 +134,7 @@ trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
 get_by_status(status, page, page_size) → Vec<Invoice>
+get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
 get_by_buyer(address, page, page_size) → Vec<Invoice>
 get_invoice_count_by_issuer(address) → u32
@@ -149,6 +150,33 @@ set_agent_registry_contract(agent_registry_contract) → bool
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
 - Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
+
+#### `get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage`
+- Cursor-driven, ID-only view of one status for indexers (#1152). Each call reads at most `page_size` status-index rows and their membership markers, and never decodes an `Invoice` record.
+- Returns `InvoiceIdPage { ids: Vec<BytesN<32>>, next: Option<u32> }`. Pass `cursor = None` for the first page, then each `next` back as `cursor`. `next` is `None` once the walk is complete, including after an exactly full last page.
+- `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- The walk runs from the end of the status index to its start, newest rows first. A cursor above the current count is clamped (the index shrinks as invoices leave the status), and `Some(0)` returns an empty page with `next: None`.
+- Every returned ID exists and has `status` when its page is read.
+- **While invoices change status between calls:** an invoice that stays in the status for the whole iteration is never skipped. An invoice can be returned twice, so de-duplicate by ID. Invoices that leave before their position is read are not returned, and new entrants may be missed. With no transitions, every ID is returned exactly once. The status index removes entries by swap-and-pop, which is why it walks backwards: forward offsets could silently skip invoices that never changed status.
+- A page can hold fewer than `page_size` IDs (even none) while `next` is still `Some`, when stale rows from the pre-#831 append-only index are filtered out. Keep going until `next` is `None`.
+- No authorization is required.
+
+An indexer walking one status:
+
+```rust
+let mut cursor = None;
+let mut seen = Map::<BytesN<32>, ()>::new(&env);
+loop {
+    let page = client.get_invoice_ids_by_status(&InvoiceStatus::Listed, &cursor, &MAX_PAGE_SIZE);
+    for id in page.ids.iter() {
+        seen.set(id, ()); // de-duplicates
+    }
+    match page.next {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+```
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -172,6 +200,8 @@ release_to_pool(invoice_id, repayment_amount) → bool
 handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
+get_lock_record(invoice_id) → Option<EscrowRecord>
+get_lock_expiration(invoice_id) → Option<u64>
 get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
 
@@ -261,6 +291,11 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
 | Invoice | `get_supported_asset_count` | `get_supported_asset_count() -> u32` |
+| Invoice | `get_supported_assets` | `get_supported_assets() -> Vec<Address>` |
+| Invoice | `get_supported_asset_ids` | `get_supported_asset_ids() -> Vec<Address>` |
+| Invoice | `get_supported_assets_page` | `get_supported_assets_page(page: u32, page_size: u32) -> Vec<Address>` |
+| Invoice | `set_asset_metadata` | `set_asset_metadata(asset: Address, code: Option<String>, decimals: Option<u32>) -> ()` |
+| Invoice | `get_asset_metadata` | `get_asset_metadata(asset: Address) -> Option<AssetMetadata>` |
 | Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
 | Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
 | Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
@@ -279,6 +314,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
+| Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
+| Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
 | Invoice | `expire_listing` | `expire_listing(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Invoice | `get_status` | `get_status(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `has_status_membership` | `has_status_membership(status: InvoiceStatus, invoice_id: BytesN<32>) -> bool` |
@@ -292,6 +329,9 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
@@ -320,9 +360,14 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
+| Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_lock_expiration` | `get_lock_expiration(invoice_id: BytesN<32>) -> Option<u64>` |
+| Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
+| Escrow | `get_history_page` | `get_history_page(invoice_id: BytesN<32>, offset: u32, limit: u32) -> (Vec<EscrowEvent>, u32)` |
 | Escrow | `get_release_authorization` | `get_release_authorization(caller: Address) -> ReleaseAuthorization` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
 | Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
@@ -357,6 +402,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_share_price` | `get_share_price() -> u128` |
+| Pool | `get_lifetime_deposited_volume` | `get_lifetime_deposited_volume() -> u128` |
+| Pool | `get_lifetime_withdrawn_volume` | `get_lifetime_withdrawn_volume() -> u128` |
+| Pool | `get_lifetime_repaid_volume` | `get_lifetime_repaid_volume() -> u128` |
 | Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
 | Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
 | Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |
@@ -377,7 +426,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 155 public entry points across five deployable contracts.**
+**Total: 174 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -643,6 +692,21 @@ rustup run 1.85.0 stellar contract build
 cargo test --workspace
 ```
 
+#### Reproducing randomized (proptest) failures
+
+`scripts/proptest_seed.py` runs `cargo test --workspace` with a printed
+`PROPTEST_RNG_SEED` and saves the seed plus each minimal failing case to
+`target/proptest-report/report.json`.
+
+```bash
+python3 scripts/proptest_seed.py            # random seed, printed and persisted
+python3 scripts/proptest_seed.py --seed N   # one-command replay of a CI/local failure
+python3 scripts/proptest_seed.py --replay   # replay the seed saved in the last report
+```
+
+On failure the seed, the minimal failing input and the replay command are
+printed at the end of the output. Script tests: `python3 -m unittest discover -s scripts`.
+
 ### 4. Deploy to testnet
 
 See [DEPLOYMENT.md](./DEPLOYMENT.md) for the full deployment
@@ -806,7 +870,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |

@@ -58,6 +58,11 @@ contracts. Deployed addresses are saved to `.deployed-addresses`.
 | `--only <contract>` | Redeploy a single contract (hotfix mode) |
 | `--help` | Show usage |
 
+Run `bash scripts/deploy.sh --dry-run` or `pwsh -File scripts/deploy.ps1 -DryRun`
+to inspect the planned deployment and wiring. Preview needs no Stellar CLI.
+It leaves `.deployed-addresses`, `.env.deployed`, and `deployments.json` intact.
+With fresh mode, it plans against an empty address list without clearing it.
+
 #### Single-Contract Hotfix Redeploys
 
 To hotfix a single contract without rerunning the full pipeline, pass
