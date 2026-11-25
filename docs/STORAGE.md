@@ -236,6 +236,8 @@ let status = if !profile_exists {
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
+| `IssuerConfirmedAt(BytesN<32>)` | `u64` | Ledger timestamp of the issuer's delivery confirmation, exposed by `get_issuer_confirmed_at` (issue #1137). Stored separately from the `Invoice` record so already-stored invoices keep decoding unchanged |
+| `DeliveryEvidence(BytesN<32>)` | `BytesN<32>` | Write-once proof-of-delivery evidence hash attached after shipment by the buyer or issuer, exposed by `get_delivery_evidence` (issue #1162). Only the hash is stored; documents stay off-chain |
 
 #### Supported Asset Allow-List
 
