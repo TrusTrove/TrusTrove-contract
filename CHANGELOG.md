@@ -108,6 +108,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`__constructor` since #827, formerly `initialize`: `funding_asset`,
   `registry_contract`, `treasury`, `min_initial_deposit`,
   `share_name`, `share_symbol`, `share_decimals`)
+- `invoice`: `get_buyer_invoice_ids(address, page, page_size)` view returning
+  a bounded page of one buyer's invoice IDs in creation order without loading
+  any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
+  otherwise it panics with `InvalidPageSize`. Out-of-range pages return empty.
+  `get_by_buyer` and the storage layout are unchanged (#1151)
 
 ### Changed
 
