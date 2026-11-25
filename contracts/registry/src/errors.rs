@@ -22,4 +22,24 @@ pub enum RegistryError {
     /// The `caller` passed to `verify_profile` is neither the stored admin
     /// nor the stored verifier (#732).
     Unauthorized = 9,
+    /// The guardian has frozen admin-only writes (#1125). Only the guardian
+    /// can lift the freeze with `unfreeze_admin`.
+    AdminFrozen = 10,
+    /// A guardian-only entry point was called but no guardian is configured.
+    GuardianNotSet = 11,
+    /// `set_guardian` was given the current admin; the guardian must be a
+    /// separate key to be useful against an admin key compromise.
+    InvalidGuardian = 12,
+    /// `accept_admin` / `cancel_admin_transfer` was called with no pending
+    /// delayed admin transfer.
+    NoPendingAdminTransfer = 13,
+    /// `accept_admin` was called before the proposal's `activates_at`.
+    AdminTransferNotReady = 14,
+    /// `propose_admin` was given a delay below `MIN_ADMIN_TRANSFER_DELAY`, a
+    /// delay that overflows the ledger timestamp, or the current admin as the
+    /// new admin.
+    InvalidAdminTransfer = 15,
+    /// A metadata key is not allowed by the active `MetadataKeyPolicy`
+    /// (#1120).
+    UnknownMetadataKey = 16,
 }
