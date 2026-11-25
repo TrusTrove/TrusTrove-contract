@@ -1841,9 +1841,7 @@ fn test_backfill_cumulative_funded_migrates_legacy_loss_history_once() {
 
     te.pool.backfill_cumulative_funded(&200);
     assert_eq!(te.pool.get_realized_loss_ratio_bps(), 5_000);
-    assert!(te.pool
-        .try_backfill_cumulative_funded(&200)
-        .is_err());
+    assert!(te.pool.try_backfill_cumulative_funded(&200).is_err());
 }
 
 #[test]
@@ -1860,9 +1858,7 @@ fn test_backfill_cumulative_funded_rejects_total_below_realized_loss() {
             .set(&DataKey::TotalLossRealised, &100u128);
     });
 
-    assert!(te.pool
-        .try_backfill_cumulative_funded(&99)
-        .is_err());
+    assert!(te.pool.try_backfill_cumulative_funded(&99).is_err());
     let has_counter = te.env.as_contract(&te.pool_id, || {
         te.env.storage().instance().has(&DataKey::CumulativeFunded)
     });
@@ -8890,7 +8886,8 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 ///
 /// Re-pinned: `escrow.lock` and invoice contract enhancements add to the
 /// cross-contract call. The ceilings below pin the re-measurement at
-/// cpu = 1,677,859 / mem = 363,894 after adding lifetime-funded accounting (#1189), with small headroom.
+/// cpu = 1,714,128 / mem = 375,634 after merging lifetime volume metrics and adding
+/// lifetime-funded accounting (#1189), with small headroom.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -8904,11 +8901,11 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_685_000,
+        cpu < 1_735_000,
         "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 375_000,
+        mem < 390_000,
         "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned memory budget: {mem}"
     );
 }
