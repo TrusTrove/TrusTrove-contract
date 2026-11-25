@@ -289,6 +289,11 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
 | Invoice | `get_supported_asset_count` | `get_supported_asset_count() -> u32` |
+| Invoice | `get_supported_assets` | `get_supported_assets() -> Vec<Address>` |
+| Invoice | `get_supported_asset_ids` | `get_supported_asset_ids() -> Vec<Address>` |
+| Invoice | `get_supported_assets_page` | `get_supported_assets_page(page: u32, page_size: u32) -> Vec<Address>` |
+| Invoice | `set_asset_metadata` | `set_asset_metadata(asset: Address, code: Option<String>, decimals: Option<u32>) -> ()` |
+| Invoice | `get_asset_metadata` | `get_asset_metadata(asset: Address) -> Option<AssetMetadata>` |
 | Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
 | Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
 | Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
@@ -307,6 +312,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
+| Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
+| Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
 | Invoice | `expire_listing` | `expire_listing(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Invoice | `get_status` | `get_status(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `has_status_membership` | `has_status_membership(status: InvoiceStatus, invoice_id: BytesN<32>) -> bool` |
@@ -321,6 +328,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
@@ -413,7 +422,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 163 public entry points across five deployable contracts.**
+**Total: 172 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
