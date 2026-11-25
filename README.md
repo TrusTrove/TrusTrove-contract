@@ -81,7 +81,38 @@ get_profile(address) → Profile
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
+get_profile_version(address) → u64               ← per-profile update sequence number
+propose_admin(new_admin, delay) → u64            ← delayed admin change, delay ≥ 1 day
+accept_admin() / cancel_admin_transfer(caller)
+set_guardian(guardian) / freeze_admin() / unfreeze_admin()
+set_metadata_key_policy(policy)                  ← Unrestricted (default) | AllowlistV1
 ```
+
+**Admin safety controls.**
+
+- **Delayed admin change (#1124).** `propose_admin(new_admin, delay)` records
+  the proposed admin and an activation time at least `MIN_ADMIN_TRANSFER_DELAY`
+  (1 day) away. The current admin stays active until `new_admin` calls
+  `accept_admin()` at or after that time. The admin or the guardian can
+  cancel it. The immediate `transfer_ownership` / `transfer_admin` paths still
+  exist and clear any pending proposal.
+- **Emergency freeze (#1125).** A preconfigured guardian key (`set_guardian`)
+  can `freeze_admin()` after a suspected admin key compromise. While frozen,
+  every admin-only write reverts with `AdminFrozen`: upgrade, batch
+  registration, verify/revoke/reinstate, admin transfers, role changes, the
+  key policy, and pause/unpause. Existing verification results, all reads and
+  users' own registration and profile updates are unaffected. Only the
+  guardian can `unfreeze_admin()`.
+- **Profile sequence numbers (#1128).** `get_profile_version(address)` starts
+  at `1` on registration and increases by one per actual profile change, with
+  a matching `profile_version` event, so consumers can detect missed updates.
+- **Metadata key policy (#1120).** `set_metadata_key_policy(AllowlistV1)`
+  restricts registration and update metadata to the documented keys `name`,
+  `legal_name`, `email`, `phone`, `website`, `country`, `jurisdiction`,
+  `registration_number`, `tax_id`, `industry`, `description` and `logo_url`.
+  Unknown keys are rejected with `UnknownMetadataKey`. The default,
+  `Unrestricted`, keeps the previous behaviour, and stored metadata is never
+  rewritten. `get_allowed_metadata_keys()` returns the active list.
 
 **The registry is enumerable without replaying events.** Every registration
 path — single and batch, issuer and buyer — appends the new address to a
@@ -133,7 +164,9 @@ repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
 get_attestation(invoice_id) → Option<Attestation>
+get_attestation_age(invoice_id) → Option<AttestationAge>
 get_by_status(status, page, page_size) → Vec<Invoice>
+get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
 get_by_buyer(address, page, page_size) → Vec<Invoice>
 get_buyer_invoice_ids(address, page, page_size) → Vec<invoice_id>  ← IDs only, 1..=50 per page
@@ -141,6 +174,9 @@ get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
+get_financing_terms(invoice_id) → FinancingTerms
+get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
+get_seconds_to_maturity(invoice_id) → i128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
 
@@ -170,10 +206,71 @@ loop {
 
 #### `list_for_financing(invoice_id, discount_bps) → bool`
 - Marks a `Created` invoice as available for financing (`Listed` status).
-- `discount_bps`: Annualized discount rate in basis points (valid range: `0..=5000`, where 5,000 = 50% max). Values above 5,000 panic with `DiscountTooHigh` (`#9`).
+- `discount_bps`: Annualized discount rate in basis points (valid range: `1..=5000`, where 5,000 = 50% max). `0` panics with `InvalidDiscount` and values above 5,000 panic with `DiscountTooHigh`.
 - Only the invoice `issuer` can call this.
 - Requires invoice to be in `Created` status.
 - Requires an active, non-expired risk attestation from an authorized Underwrite agent (`AttestationExpired` (#30) if its `valid_until` has passed).
+
+#### `get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage`
+- Cursor-driven, ID-only view of one status for indexers (#1152). Each call reads at most `page_size` status-index rows and their membership markers, and never decodes an `Invoice` record.
+- Returns `InvoiceIdPage { ids: Vec<BytesN<32>>, next: Option<u32> }`. Pass `cursor = None` for the first page, then each `next` back as `cursor`. `next` is `None` once the walk is complete, including after an exactly full last page.
+- `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- The walk runs from the end of the status index to its start, newest rows first. A cursor above the current count is clamped (the index shrinks as invoices leave the status), and `Some(0)` returns an empty page with `next: None`.
+- Every returned ID exists and has `status` when its page is read.
+- **While invoices change status between calls:** an invoice that stays in the status for the whole iteration is never skipped. An invoice can be returned twice, so de-duplicate by ID. Invoices that leave before their position is read are not returned, and new entrants may be missed. With no transitions, every ID is returned exactly once. The status index removes entries by swap-and-pop, which is why it walks backwards: forward offsets could silently skip invoices that never changed status.
+- A page can hold fewer than `page_size` IDs (even none) while `next` is still `Some`, when stale rows from the pre-#831 append-only index are filtered out. Keep going until `next` is `None`.
+- No authorization is required.
+
+An indexer walking one status:
+
+```rust
+let mut cursor = None;
+let mut seen = Map::<BytesN<32>, ()>::new(&env);
+loop {
+    let page = client.get_invoice_ids_by_status(&InvoiceStatus::Listed, &cursor, &MAX_PAGE_SIZE);
+    for id in page.ids.iter() {
+        seen.set(id, ()); // de-duplicates
+    }
+    match page.next {
+        Some(next) => cursor = Some(next),
+        None => break,
+    }
+}
+```
+
+#### `get_attestation_age` / `get_lifecycle_timestamps` / `get_financing_terms` / `get_seconds_to_maturity`
+
+Read-only companion views for clients that would otherwise stitch several calls
+together. None of them writes storage, bumps a TTL, or changes listing
+eligibility.
+
+- `get_attestation_age(invoice_id) → Option<AttestationAge>` returns
+  `AttestationAge { submitted_at, age_seconds }`, where `age_seconds` is the
+  current ledger timestamp minus the recorded submission time (saturating at
+  `0`). Returns `None` when the invoice has no attestation, including for an
+  unknown invoice ID.
+- `get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps` returns the
+  optional `created_at`, `listed_at`, `funded_at`, `shipped_at`, `repaid_at`,
+  `first_confirmation_at` and `second_confirmation_at`. Each field is `None`
+  until the contract records that transition: creation is always present;
+  listing, funding, shipping and repayment appear when those calls succeed
+  (`repaid_at` stays `None` for defaulted, cancelled or expired invoices).
+  `first_confirmation_at`/`second_confirmation_at` order the issuer's and
+  buyer's `confirm_delivery` timestamps by time: the first is `None` until one
+  party confirms, the second until both (equal when both confirm in the same
+  ledger). Invoices confirmed before #1160 only carry the boolean flags, so
+  both report `None`.
+- `get_financing_terms(invoice_id) → FinancingTerms` returns
+  `FinancingTerms { face_value, discount_bps, funding_asset, due_date, issuer,
+  buyer, status }` in one storage read, alongside the older single-field views
+  and the `get_funding_terms` tuple.
+- `get_seconds_to_maturity(invoice_id) → i128` returns `due_date - now` at the
+  current ledger timestamp: positive while time remains, `0` exactly at
+  `due_date`, negative once overdue. Whole days are `seconds / 86_400`. The
+  signed subtraction cannot overflow at the `u64` bounds.
+
+All four require no authorization. Except for the age view (`None`), they panic
+with `NotFound` (`#2`) for an unknown invoice.
 
 #### `batch_create(issuer, entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(buyer, face_value, due_date, funding_asset)`.
@@ -183,7 +280,7 @@ loop {
 
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
-- **Tolerant**: entries that fail validation (already listed, no attestation, bad discount) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
+- **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
 
 ### escrow_contract
@@ -198,13 +295,17 @@ handle_default(invoice_id, caller) → bool   ← admin or pool_contract
 pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 get_lock_record(invoice_id) → Option<EscrowRecord>
+get_lock_expiration(invoice_id) → Option<u64>
+get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
-Read-only views (`get_locked`) stay callable.
+Read-only views (`get_locked`, `get_lock_record`, `get_lock_expiration`, `has_lock`) stay callable.
 
 ### pool_contract
+
+When upgrading a pool that predates the lifetime funding counter, the admin must call `backfill_cumulative_funded` once with the sum of successful `invoice_funded` event amounts before relying on the realized-loss ratio. Fresh pools initialize the counter automatically.
 
 USDC liquidity pool where LP shares are a SEP-41 transferable token. Share price grows as invoices repay.
 
@@ -225,6 +326,8 @@ set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted
 get_max_time_to_maturity() → u64
 get_stats() → PoolStats
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
+get_max_fundable_amount() → u128        ← available principal under liquidity and utilization caps
+get_funding_eligibility(invoice_id) → FundingEligibility  ← invoice state and funding rejection reasons
 get_lp_position(address) → LPPosition
 transfer(from, to, amount) → ()             ← SEP-41 share transfer (generic token::Client compatible)
 transfer_shares(from, to, amount) → ()      ← non-standard legacy alias of transfer
@@ -235,6 +338,11 @@ decimals() → u32                     ← per-instance, set at initialize
 name() → String                      ← set at initialize()
 symbol() → String                    ← set at initialize()
 ```
+
+The funding preflight views are permissionless and read-only. The maximum
+fundable amount uses the same rounded basis-point cap as `fund_invoice`, while
+the eligibility result includes the invoice's computed amount, pool capacity,
+asset match, current utilization, and any applicable rejection reasons.
 
 ---
 
@@ -254,8 +362,11 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `register_buyer` | `register_buyer(address: Address, metadata: Map<String, String>) -> bool` |
 | Registry | `update_profile` | `update_profile(address: Address, metadata: Map<String, String>) -> bool` |
 | Registry | `update_metadata` | `update_metadata(address: Address, metadata: Map<String, String>) -> bool` |
+| Registry | `remove_metadata_key` | `remove_metadata_key(address: Address, metadata_key: String) -> bool` |
+| Registry | `get_metadata_key_count` | `get_metadata_key_count(address: Address) -> u32` |
 | Registry | `get_profile` | `get_profile(address: Address) -> Profile` |
 | Registry | `is_verified` | `is_verified(address: Address) -> bool` |
+| Registry | `get_verified_since` | `get_verified_since(address: Address) -> Option<u64>` |
 | Registry | `get_verification_status` | `get_verification_status(address: Address) -> VerificationStatus` |
 | Registry | `get_role` | `get_role(address: Address) -> Option<Role>` |
 | Registry | `get_profile_count` | `get_profile_count(role: Role) -> u32` |
@@ -270,6 +381,20 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `get_verifier` | `get_verifier() -> Option<Address>` |
 | Registry | `pause` | `pause() -> ()` |
 | Registry | `unpause` | `unpause() -> ()` |
+| Registry | `propose_admin` | `propose_admin(new_admin: Address, delay: u64) -> u64` |
+| Registry | `accept_admin` | `accept_admin() -> ()` |
+| Registry | `cancel_admin_transfer` | `cancel_admin_transfer(caller: Address) -> ()` |
+| Registry | `get_pending_admin_transfer` | `get_pending_admin_transfer() -> Option<PendingAdminTransfer>` |
+| Registry | `set_guardian` | `set_guardian(guardian: Address) -> ()` |
+| Registry | `remove_guardian` | `remove_guardian() -> ()` |
+| Registry | `get_guardian` | `get_guardian() -> Option<Address>` |
+| Registry | `freeze_admin` | `freeze_admin() -> ()` |
+| Registry | `unfreeze_admin` | `unfreeze_admin() -> ()` |
+| Registry | `is_admin_frozen` | `is_admin_frozen() -> bool` |
+| Registry | `set_metadata_key_policy` | `set_metadata_key_policy(policy: MetadataKeyPolicy) -> ()` |
+| Registry | `get_metadata_key_policy` | `get_metadata_key_policy() -> MetadataKeyPolicy` |
+| Registry | `get_allowed_metadata_keys` | `get_allowed_metadata_keys() -> Option<Vec<String>>` |
+| Registry | `get_profile_version` | `get_profile_version(address: Address) -> u64` |
 | Registry | `get_admin` | `get_admin() -> Address` |
 | Invoice | `__constructor` | `__constructor(admin: Address, registry_contract: Address) -> ()` |
 | Invoice | `get_admin` | `get_admin() -> Option<Address>` |
@@ -282,10 +407,17 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
 | Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
 | Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `get_attestation_age` | `get_attestation_age(invoice_id: BytesN<32>) -> Option<AttestationAge>` |
+| Invoice | `get_attestation_evidence_hash` | `get_attestation_evidence_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
 | Invoice | `get_supported_asset_count` | `get_supported_asset_count() -> u32` |
+| Invoice | `get_supported_assets` | `get_supported_assets() -> Vec<Address>` |
+| Invoice | `get_supported_asset_ids` | `get_supported_asset_ids() -> Vec<Address>` |
+| Invoice | `get_supported_assets_page` | `get_supported_assets_page(page: u32, page_size: u32) -> Vec<Address>` |
+| Invoice | `set_asset_metadata` | `set_asset_metadata(asset: Address, code: Option<String>, decimals: Option<u32>) -> ()` |
+| Invoice | `get_asset_metadata` | `get_asset_metadata(asset: Address) -> Option<AssetMetadata>` |
 | Invoice | `create` | `create(issuer: Address, buyer: Address, face_value: u128, due_date: u64, funding_asset: Address) -> BytesN<32>` |
 | Invoice | `batch_create` | `batch_create(issuer: Address, entries: Vec<(Address, u128, u64, Address)>) -> Vec<BytesN<32>>` |
 | Invoice | `list_for_financing` | `list_for_financing(invoice_id: BytesN<32>, discount_bps: u32) -> bool` |
@@ -303,7 +435,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_default_grace_seconds` | `get_default_grace_seconds() -> u64` |
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
+| Invoice | `get_listing_expiry_preview` | `get_listing_expiry_preview(invoice_id: BytesN<32>) -> ListingExpiryPreview` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
+| Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
+| Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
 | Invoice | `expire_listing` | `expire_listing(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Invoice | `get_status` | `get_status(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `has_status_membership` | `has_status_membership(status: InvoiceStatus, invoice_id: BytesN<32>) -> bool` |
@@ -313,10 +448,19 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
+| Invoice | `get_financing_terms` | `get_financing_terms(invoice_id: BytesN<32>) -> FinancingTerms` |
+| Invoice | `get_lifecycle_timestamps` | `get_lifecycle_timestamps(invoice_id: BytesN<32>) -> LifecycleTimestamps` |
+| Invoice | `get_seconds_to_maturity` | `get_seconds_to_maturity(invoice_id: BytesN<32>) -> i128` |
+| Invoice | `get_settlement_summary` | `get_settlement_summary(invoice_id: BytesN<32>) -> SettlementSummary` |
+| Invoice | `get_funding_eligibility` | `get_funding_eligibility(invoice_id: BytesN<32>) -> InvoiceFundingEligibility` |
+| Invoice | `get_repayment_eligibility` | `get_repayment_eligibility(invoice_id: BytesN<32>, caller: Address) -> RepaymentEligibility` |
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
+| Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_buyer_invoice_ids` | `get_buyer_invoice_ids(address: Address, page: u32, page_size: u32) -> Vec<BytesN<32>>` |
@@ -347,12 +491,17 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
 | Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
+| Escrow | `has_lock` | `has_lock(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_lock_expiration` | `get_lock_expiration(invoice_id: BytesN<32>) -> Option<u64>` |
 | Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
+| Escrow | `get_custody_balance` | `get_custody_balance() -> i128` |
+| Escrow | `get_lock_checksum` | `get_lock_checksum(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
 | Escrow | `get_history_page` | `get_history_page(invoice_id: BytesN<32>, offset: u32, limit: u32) -> (Vec<EscrowEvent>, u32)` |
+| Escrow | `get_release_authorization` | `get_release_authorization(caller: Address) -> ReleaseAuthorization` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
 | Pool | `get_funding_asset` | `get_funding_asset() -> Address` |
 | Pool | `get_usdc_asset` | `get_usdc_asset() -> Address` |
@@ -386,12 +535,16 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_realized_loss_ratio_bps` | `get_realized_loss_ratio_bps() -> u32` |
+| Pool | `backfill_cumulative_funded` | `backfill_cumulative_funded(total_funded: u128) -> ()` |
 | Pool | `get_share_price` | `get_share_price() -> u128` |
 | Pool | `get_lifetime_deposited_volume` | `get_lifetime_deposited_volume() -> u128` |
 | Pool | `get_lifetime_withdrawn_volume` | `get_lifetime_withdrawn_volume() -> u128` |
 | Pool | `get_lifetime_repaid_volume` | `get_lifetime_repaid_volume() -> u128` |
 | Pool | `get_lp_position` | `get_lp_position(lp: Address) -> LPPosition` |
 | Pool | `get_utilization_rate` | `get_utilization_rate() -> u32` |
+| Pool | `get_max_fundable_amount` | `get_max_fundable_amount() -> u128` |
+| Pool | `get_funding_eligibility` | `get_funding_eligibility(invoice_id: BytesN<32>) -> FundingEligibility` |
 | Pool | `get_suggested_discount_bps` | `get_suggested_discount_bps() -> u32` |
 | Pool | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> Option<u128>` |
 | Pool | `set_max_utilization` | `set_max_utilization(admin: Address, new_cap_bps: u32) -> bool` |
@@ -410,7 +563,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 163 public entry points across five deployable contracts.**
+**Total: 208 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -466,7 +619,7 @@ Pool ──[shares]──► LP
 ```
 
 #### Step 2 — Create & List (no funds move)
-The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 0 and 5,000, representing 0% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. If `discount_bps > 5000`, the transaction fails with `InvoiceError::DiscountTooHigh` (#9).
+The issuer creates an invoice (recording `face_value`, `due_date`, `buyer`, `funding_asset`), then lists it with a `discount_bps` (between 1 and 5,000, representing 0.01% to 50% max yield) expressing the yield they will give up in exchange for immediate liquidity. A zero discount fails with `InvoiceError::InvalidDiscount`, and `discount_bps > 5000` fails with `InvoiceError::DiscountTooHigh`.
 
 
 Before listing, an Underwrite agent must sign an `AttestationPayload` (v2 layout: `domain_separator`, `invoice_id`, `contract_address`, `network_id`, `risk_score`, `evidence_hash`, `agent_id`, `nonce`, `valid_until`) off-chain with a secp256k1 key. `contract_address` and `network_id` bind the signature to one deployed invoice contract on one network, so attestations cannot replay across testnet/mainnet or redeploys (issue #822); `valid_until` (seconds, ledger timestamp) bounds how long the assessment unlocks listing (issue #823). Anyone can relay this signature via `submit_attestation`, which recovers the signer and verifies it against the agent-registry contract (deployed separately from the `underwrite-contract` repo). The agent-registry address is configured via `set_agent_registry_contract` (admin-only). `list_for_financing` panics with `VerificationRequired` until a valid attestation exists for the invoice, and with `AttestationExpired` once the stored attestation's `valid_until` has passed. The exact interface the agent-registry must implement, and the payload/signature scheme agents must sign, are specified in [Agent-Registry Interface](./docs/AGENT_REGISTRY_INTERFACE.md).
@@ -839,7 +992,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 9 | `DiscountTooHigh` | `discount_bps` exceeds maximum permitted 5,000 (50%) |
 | 10 | `AlreadyConfirmed` | Caller has already confirmed delivery |
 | 11 | `DueDateNotPassed` | Invoice due date has not passed yet |
-| 12 | `InvalidDiscount` | Discount computation resulted in an invalid state |
+| 12 | `InvalidDiscount` | `discount_bps` is 0 (listing requires at least 1 bp), or a discount computation resulted in an invalid state |
 | 13 | `UnsupportedAsset` | Token asset is not registered as supported |
 | 14 | `ListingNotExpired` | Invoice listing has not reached expiry |
 | 15 | `MathOverflow` | Arithmetic operation overflowed or underflowed |
@@ -854,7 +1007,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_buyer_invoice_ids` |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` or `get_buyer_invoice_ids` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |

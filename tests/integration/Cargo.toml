@@ -21,3 +21,4 @@ trusttrove-escrow = { workspace = true }
 trusttrove-pool = { workspace = true }
 trusttrove-ttl = { path = "../../contracts/ttl" }
 k256 = { version = "0.13.1", default-features = false, features = ["ecdsa"] }
+tempfile = "3"
