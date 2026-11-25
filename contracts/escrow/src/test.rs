@@ -292,7 +292,7 @@ fn assert_last_event_three<T1, T2>(
     assert_eq!(actual_data, expected_data);
 }
 
-fn assert_last_event_four<T1, T2, T3>(
+fn assert_last_event_four<T1, T2, T3, D>(
     env: &Env,
     events: &CapturedEvents,
     expected_name: &str,
@@ -304,9 +304,11 @@ fn assert_last_event_four<T1, T2, T3>(
     T1: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
     T2: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
     T3: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
+    D: TryFromVal<Env, soroban_sdk::Val> + core::fmt::Debug + PartialEq,
     <T1 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
     <T2 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
     <T3 as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
+    <D as TryFromVal<Env, soroban_sdk::Val>>::Error: core::fmt::Debug,
 {
     let (_, topics, data) = events.last().expect("expected at least one event");
 
@@ -2013,7 +2015,7 @@ fn test_handle_default_event_includes_caller() {
     assert!(result);
 
     let events = env.events().all();
-    let (_, topics, _) = events.last().expect("expected at least one event");
+    let (_, topics, data) = events.last().expect("expected at least one event");
 
     let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
     let topic1: BytesN<32> = BytesN::<32>::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
@@ -2024,6 +2026,9 @@ fn test_handle_default_event_includes_caller() {
     assert_eq!(topic1, invoice_id);
     assert_eq!(topic2, pool);
     assert_eq!(topic3, admin);
+    let (emitted_amount, lock_age): (u128, u64) = <(u128, u64)>::try_from_val(&env, &data).unwrap();
+    assert_eq!(emitted_amount, amount);
+    assert_eq!(lock_age, 60);
 
     // Verify caller is also recorded in history
     let history = client.get_history(&invoice_id);
@@ -3774,4 +3779,205 @@ fn test_release_authorization_is_read_only() {
     assert_eq!(first, second);
     assert_eq!(client.get_locked(&invoice_id), amount);
     assert_eq!(client.get_history(&invoice_id), history_before);
+}
+
+// ============================================================================
+// get_history_count (issue #1195)
+// ============================================================================
+
+#[test]
+fn test_get_history_count_returns_zero_for_missing_history() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1201);
+    let contract_id = client.address.clone();
+    let key = DataKey::History(invoice_id.clone());
+
+    // Verify key does not exist before query
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+
+    // Missing history returns 0
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+
+    // Missing history view call does not materialize storage
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+}
+
+#[test]
+fn test_get_history_count_increments_with_events_and_persists_after_lock_removed() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1202);
+    let amount: u128 = 1_000_000_000;
+
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+
+    // 1. Lock invoice -> 1 event
+    client.lock(&invoice_id, &amount, &issuer);
+    assert_eq!(client.get_history_count(&invoice_id), 1);
+    assert_eq!(
+        client.get_history_count(&invoice_id),
+        client.get_history(&invoice_id).len()
+    );
+
+    // 2. Release to issuer -> 2 events; lock record is removed
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert!(!client.has_lock(&invoice_id));
+
+    // Entry count is preserved after active lock is removed
+    assert_eq!(client.get_history_count(&invoice_id), 2);
+    assert_eq!(
+        client.get_history_count(&invoice_id),
+        client.get_history(&invoice_id).len()
+    );
+
+    // 3. Partial repayment on another invoice to test multiple events and residual
+    let invoice_id_2 = generate_invoice_id(&env, 1203);
+    client.lock(&invoice_id_2, &amount, &issuer);
+    assert_eq!(client.get_history_count(&invoice_id_2), 1);
+
+    client.release_to_pool(&invoice_id_2, &(amount / 2));
+    assert_eq!(client.get_history_count(&invoice_id_2), 2);
+
+    client.release_to_pool(&invoice_id_2, &(amount / 2));
+    assert_eq!(client.get_history_count(&invoice_id_2), 3);
+    assert_eq!(client.get_locked(&invoice_id_2), 0);
+    assert_eq!(client.get_history_count(&invoice_id_2), 3);
+
+    // 4. Default handled scenario -> lock removed
+    let invoice_id_3 = generate_invoice_id(&env, 1204);
+    client.lock(&invoice_id_3, &amount, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&invoice_id_3, &pool));
+    assert_eq!(client.get_locked(&invoice_id_3), 0);
+    assert_eq!(client.get_history_count(&invoice_id_3), 2);
+}
+
+#[test]
+fn test_get_history_count_extends_ttl() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1205);
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    let key = DataKey::History(invoice_id.clone());
+    let ttl_before = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+
+    let count = client.get_history_count(&invoice_id);
+    assert_eq!(count, 1);
+
+    let ttl_after = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after >= ttl_before,
+        "get_history_count should extend TTL: before={ttl_before}, after={ttl_after}"
+    );
+}
+
+#[test]
+fn test_get_history_count_authorization_and_idempotency() {
+    // Auth: test without mocked auths to ensure view does not require caller auth
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup_without_auths();
+    let invoice_id = generate_invoice_id(&env, 1206);
+
+    // Calling on missing history requires no auth
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+    assert!(env.auths().is_empty());
+
+    // Lock requires auth, so try_lock fails
+    assert!(client.try_lock(&invoice_id, &1_000_000, &issuer).is_err());
+    // Missing history remains 0 and idempotent
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+
+    // Now populate with auths in a standard setup
+    let (env2, client2, _admin, _pool, issuer2, _usdc_id) = setup();
+    let invoice_id2 = generate_invoice_id(&env2, 1207);
+    client2.lock(&invoice_id2, &500_000, &issuer2);
+
+    // Idempotency: repeated calls produce identical results without side effects
+    let count1 = client2.get_history_count(&invoice_id2);
+    let count2 = client2.get_history_count(&invoice_id2);
+    assert_eq!(count1, 1);
+    assert_eq!(count2, 1);
+
+    // View is callable while paused
+    client2.pause();
+    assert_eq!(client2.get_history_count(&invoice_id2), 1);
+    client2.unpause();
+    assert_eq!(client2.get_history_count(&invoice_id2), 1);
+}
+
+// ============================================================================
+// Lock age on default resolution (issue #1193)
+// ============================================================================
+
+#[test]
+fn test_default_resolved_emits_elapsed_lock_age() {
+    let (env, client, admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1193);
+    let amount: u128 = 2_500_000_000;
+
+    env.ledger().set_timestamp(1_000_000);
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // Advance by 3600 seconds
+    env.ledger().set_timestamp(1_003_600);
+    assert!(client.handle_default(&invoice_id, &admin));
+
+    let events = env.events().all();
+    assert_last_event_four(
+        &env,
+        &events,
+        "default_resolved",
+        invoice_id.clone(),
+        pool.clone(),
+        admin.clone(),
+        (amount, 3600u64),
+    );
+}
+
+#[test]
+fn test_default_resolved_failed_attempts_produce_no_event() {
+    let (env, client, admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1194);
+    let amount: u128 = 1_000_000_000;
+
+    // 1. Missing lock record -> returns false, no event emitted
+    assert!(!client.handle_default(&invoice_id, &admin));
+    assert!(env.events().all().is_empty());
+
+    // Lock funds at t = 100
+    env.ledger().set_timestamp(100);
+    client.lock(&invoice_id, &amount, &issuer);
+
+    // 2. Unauthorized caller (not admin or pool) -> panics, no event committed
+    let stranger = Address::generate(&env);
+    env.ledger().set_timestamp(200);
+    assert!(client.try_handle_default(&invoice_id, &stranger).is_err());
+    assert!(env.events().all().is_empty());
+
+    // 3. Before grace period (less than 60s) -> panics, no event committed
+    env.ledger().set_timestamp(159);
+    assert!(client.try_handle_default(&invoice_id, &admin).is_err());
+    assert!(env.events().all().is_empty());
+
+    // 4. Future locked_at / timestamp rollback -> panics, no event committed
+    env.ledger().set_timestamp(50);
+    assert!(client.try_handle_default(&invoice_id, &admin).is_err());
+    assert!(env.events().all().is_empty());
+
+    // 5. Successful default at boundary (exactly 60s) -> succeeds and emits lock age = 60
+    env.ledger().set_timestamp(160);
+    assert!(client.handle_default(&invoice_id, &pool));
+    let events_after_success = env.events().all();
+    assert_last_event_four(
+        &env,
+        &events_after_success,
+        "default_resolved",
+        invoice_id.clone(),
+        pool.clone(),
+        pool.clone(),
+        (amount, 60u64),
+    );
+
+    // 6. Idempotent second call on now-consumed record -> returns false, produces no event
+    assert!(!client.handle_default(&invoice_id, &pool));
+    assert!(env.events().all().is_empty());
 }
