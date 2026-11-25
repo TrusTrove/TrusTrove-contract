@@ -40,10 +40,20 @@ pub fn batch_registered(env: &Env, registered: u32, skipped: u32) {
     );
 }
 
-pub fn profile_verified(env: &Env, address: &Address, status: bool) {
+/// Emitted for every verification decision, including repeats (#987).
+///
+/// `reason_hash` is the optional 32-byte evidence commitment supplied on the
+/// verification call; it is `None` for legacy `verify_profile` calls and for
+/// un-verification. No raw document is ever included.
+pub fn profile_verified(
+    env: &Env,
+    address: &Address,
+    status: bool,
+    reason_hash: &Option<BytesN<32>>,
+) {
     env.events().publish(
         (Symbol::new(env, "profile_verified"), address.clone()),
-        status,
+        (status, reason_hash.clone()),
     );
 }
 

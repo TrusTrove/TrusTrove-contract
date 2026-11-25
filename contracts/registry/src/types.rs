@@ -113,4 +113,8 @@ pub enum DataKey {
     /// Ledger timestamp when the address most recently became verified. Cleared
     /// on revocation and set again on reinstatement or verification.
     VerifiedSince(Address),
+    /// Privacy-preserving commitment to the evidence used for the current
+    /// verification decision (#1126). A 32-byte hash only — raw documents are
+    /// never written to the ledger. Cleared whenever verification is withdrawn.
+    VerificationReason(Address),
 }

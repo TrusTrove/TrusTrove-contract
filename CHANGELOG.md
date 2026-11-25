@@ -32,6 +32,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `registry`: `verify_profile_with_reason(caller, address, verify, reason_hash)`
+  accepts an optional 32-byte commitment to verification evidence, stores it
+  under `DataKey::VerificationReason(address)` and exposes it through
+  `get_verification_reason(address)` while the profile is verified. No raw
+  documents are written on chain. `verify_profile` remains as the no-hash
+  legacy path, and `profile_verified` now emits
+  `(status, Option<reason_hash>)` so the commitment is part of the
+  state-change event (#1126)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,

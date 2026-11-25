@@ -4016,12 +4016,12 @@ fn test_upgrade_requires_admin_auth() {
 // ============== ISSUES #986, #987, #989, #991: REGISTRY INVARIANTS ==============
 
 /// Data payloads of every `profile_verified` event emitted for `address`, in
-/// emission order.
+/// emission order. Since #1126 each payload is `(status, Option<reason_hash>)`.
 fn profile_verified_payloads(
     env: &Env,
     events: &Vec<(Address, Vec<Val>, Val)>,
     address: &Address,
-) -> std::vec::Vec<bool> {
+) -> std::vec::Vec<(bool, Option<BytesN<32>>)> {
     let mut out = std::vec::Vec::new();
     for event in events.iter() {
         let topics: Vec<Val> = match event.1.clone().try_into_val(env) {
@@ -4040,7 +4040,13 @@ fn profile_verified_payloads(
             Err(_) => continue,
         };
         if name == Symbol::new(env, "profile_verified") && who == *address {
-            out.push(event.2.clone().try_into_val(env).expect("bool payload"));
+            out.push(
+                event
+                    .2
+                    .clone()
+                    .try_into_val(env)
+                    .expect("(bool, Option<BytesN<32>>) payload"),
+            );
         }
     }
     out
@@ -4076,7 +4082,7 @@ fn test_verify_profile_maintains_verified_and_revoked_flags() {
     );
     assert_eq!(
         profile_verified_payloads(&env, &events_after_verify, &issuer),
-        [true]
+        [(true, None)]
     );
 
     // verify=false -> Revoked, verified cleared.
@@ -4094,7 +4100,7 @@ fn test_verify_profile_maintains_verified_and_revoked_flags() {
     // Each call's own buffer carries only its own event (sdk >=22).
     assert_eq!(
         profile_verified_payloads(&env, &events_after_unverify, &issuer),
-        [false]
+        [(false, None)]
     );
 }
 
@@ -4124,11 +4130,11 @@ fn test_verify_profile_repeated_call_is_an_audit_event() {
     // capture — together they prove two distinct audit events were emitted.
     assert_eq!(
         profile_verified_payloads(&env, &events_after_first, &issuer),
-        [true]
+        [(true, None)]
     );
     assert_eq!(
         profile_verified_payloads(&env, &events_after_second, &issuer),
-        [true]
+        [(true, None)]
     );
 
     // Same rule in the un-verify direction.
@@ -4143,11 +4149,11 @@ fn test_verify_profile_repeated_call_is_an_audit_event() {
     );
     assert_eq!(
         profile_verified_payloads(&env, &events_after_unverify1, &issuer),
-        [false]
+        [(false, None)]
     );
     assert_eq!(
         profile_verified_payloads(&env, &events_after_unverify2, &issuer),
-        [false]
+        [(false, None)]
     );
 }
 
@@ -4459,4 +4465,152 @@ fn test_get_metadata_key_count_not_found_panics() {
         .unwrap_err()
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());
+}
+
+// ============== ISSUE #1126: VERIFICATION REASON HASH ==============
+
+#[test]
+fn test_verify_profile_with_reason_stores_exposes_and_emits_hash() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let hash = BytesN::from_array(&env, &[0xABu8; 32]);
+
+    assert!(client.verify_profile_with_reason(&admin, &issuer, &true, &Some(hash.clone())));
+    let events = env.events().all();
+
+    assert_eq!(client.get_verification_reason(&issuer), Some(hash.clone()));
+    assert!(client.get_verified_since(&issuer).is_some());
+    assert_eq!(
+        profile_verified_payloads(&env, &events, &issuer),
+        [(true, Some(hash.clone()))]
+    );
+
+    // Only the fixed-size digest is persisted; no document/key string is stored.
+    let contract_id = client.address.clone();
+    let stored: BytesN<32> = env.as_contract(&contract_id, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VerificationReason(issuer.clone()))
+            .unwrap()
+    });
+    assert_eq!(stored, hash);
+}
+
+#[test]
+fn test_verify_profile_with_reason_requires_admin_or_verifier() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let outsider = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let hash = BytesN::from_array(&env, &[1u8; 32]);
+
+    let err = client
+        .try_verify_profile_with_reason(&outsider, &issuer, &true, &Some(hash.clone()))
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::Unauthorized.into());
+    assert_eq!(client.get_verification_reason(&issuer), None);
+
+    // A registered verifier may make the same decision (#732).
+    client.set_verifier(&outsider);
+    assert!(client.verify_profile_with_reason(&outsider, &issuer, &true, &Some(hash.clone())));
+    assert_eq!(client.get_verification_reason(&issuer), Some(hash));
+    assert!(!client.get_profile(&issuer).revoked());
+
+    // Admin authorization still works on the reason-aware path.
+    assert!(client.verify_profile_with_reason(&admin, &issuer, &false, &None));
+}
+
+#[test]
+fn test_verify_profile_with_reason_unregistered_panics() {
+    let (env, admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let err = client
+        .try_verify_profile_with_reason(
+            &admin,
+            &unknown,
+            &true,
+            &Some(BytesN::from_array(&env, &[2u8; 32])),
+        )
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+}
+
+#[test]
+fn test_verification_reason_latest_hash_wins_and_none_clears() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let first = BytesN::from_array(&env, &[3u8; 32]);
+    let second = BytesN::from_array(&env, &[4u8; 32]);
+
+    client.verify_profile_with_reason(&admin, &issuer, &true, &Some(first.clone()));
+    let first_events = env.events().all();
+    // Repeats are audit events (#987), each carrying its own hash.
+    client.verify_profile_with_reason(&admin, &issuer, &true, &Some(second.clone()));
+    let second_events = env.events().all();
+
+    assert_eq!(
+        profile_verified_payloads(&env, &first_events, &issuer),
+        [(true, Some(first))]
+    );
+    assert_eq!(
+        profile_verified_payloads(&env, &second_events, &issuer),
+        [(true, Some(second.clone()))]
+    );
+    assert_eq!(client.get_verification_reason(&issuer), Some(second));
+
+    // Omitting the hash clears the commitment but keeps the profile verified.
+    client.verify_profile_with_reason(&admin, &issuer, &true, &None);
+    let cleared_events = env.events().all();
+    assert_eq!(
+        profile_verified_payloads(&env, &cleared_events, &issuer),
+        [(true, None)]
+    );
+    assert_eq!(client.get_verification_reason(&issuer), None);
+    assert!(client.is_verified(&issuer));
+}
+
+#[test]
+fn test_verification_reason_cleared_on_unverify_and_revoke() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    let hash = BytesN::from_array(&env, &[5u8; 32]);
+
+    client.verify_profile_with_reason(&admin, &issuer, &true, &Some(hash.clone()));
+    client.verify_profile(&admin, &issuer, &false);
+    let events = env.events().all();
+    assert_eq!(
+        profile_verified_payloads(&env, &events, &issuer),
+        [(false, None)]
+    );
+    assert_eq!(client.get_verification_reason(&issuer), None);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    client.verify_profile_with_reason(&admin, &issuer, &true, &Some(hash));
+    client.revoke(&issuer);
+    assert_eq!(client.get_verification_reason(&issuer), None);
+    client.reinstate(&issuer);
+    assert_eq!(client.get_verification_reason(&issuer), None);
+}
+
+#[test]
+fn test_legacy_verify_profile_has_no_reason_hash() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    client.verify_profile(&admin, &issuer, &true);
+    let events = env.events().all();
+    assert_eq!(
+        profile_verified_payloads(&env, &events, &issuer),
+        [(true, None)]
+    );
+    assert_eq!(client.get_verification_reason(&issuer), None);
 }
