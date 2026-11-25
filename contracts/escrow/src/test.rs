@@ -1688,7 +1688,9 @@ fn test_lock_expiration_matches_stored_default_period() {
     env.ledger().set_timestamp(expiration - 1);
     assert_eq!(
         client.try_handle_default(&invoice_id, &pool),
-        Err(Ok(EscrowError::NotAuthorized))
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::NotAuthorized as u32
+        )))
     );
     env.ledger().set_timestamp(expiration);
     assert!(client.handle_default(&invoice_id, &pool));
