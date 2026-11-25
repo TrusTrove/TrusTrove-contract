@@ -81,6 +81,7 @@ struct PoolTotals {
     shares: u128,
     deposits: u128,
     funded: u128,
+    cumulative_funded: u128,
     yield_distributed: u128,
     loss_realised: u128,
     active_invoices: u32,
@@ -235,6 +236,9 @@ impl PoolContract {
             .instance()
             .set(&DataKey::TotalDeposits, &0u128);
         env.storage().instance().set(&DataKey::TotalFunded, &0u128);
+        env.storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &0u128);
         env.storage()
             .instance()
             .set(&DataKey::TotalYieldDistributed, &0u128);
@@ -653,6 +657,10 @@ impl PoolContract {
     /// * `Overflow` if `usdc_amount * total_shares` would overflow `u128`
     ///   while computing the proportional share price.
     ///
+    /// Successful deposits also increment the lifetime deposited-volume
+    /// counter exposed by [`Self::get_lifetime_deposited_volume`]; withdrawals
+    /// never reduce it (#1172).
+    ///
     /// # Returns
     /// * `u128` - The number of shares issued.
     ///
@@ -675,6 +683,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + usdc_amount));
+        Self::bump_lifetime_volume(&env, &DataKey::LifetimeDepositedVolume, usdc_amount);
 
         let lp_deposit_count_key = DataKey::LPDepositCount(lp.clone());
         let count: u32 = env
@@ -819,6 +828,11 @@ impl PoolContract {
     ///   rounding remainder staying in `LPInitialDeposit`), and realised yield is
     ///   credited as `usdc_to_return.saturating_sub(principal_portion)`.
     ///
+    /// Successful withdrawals increment the lifetime withdrawn-volume counter
+    /// exposed by [`Self::get_lifetime_withdrawn_volume`]. Only LP redemptions
+    /// through this entry point count: internal funding transfers to escrow
+    /// and failed calls leave the counter unchanged (#1173).
+    ///
     /// # Returns
     /// * `u128` - The amount of USDC returned.
     ///
@@ -859,6 +873,7 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
+        Self::bump_lifetime_volume(&env, &DataKey::LifetimeWithdrawnVolume, usdc_to_return);
 
         if remaining_shares == 0 {
             // Full withdrawal: reset LP-scoped storage to prevent stale state
@@ -1448,6 +1463,7 @@ impl PoolContract {
         let totals = Self::totals(&env);
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
+        let cumulative_funded = totals.cumulative_funded;
         let available = total_deposits - total_funded;
         if funded_amount > available {
             if stop_on_capacity {
@@ -1458,6 +1474,9 @@ impl PoolContract {
 
         let max_utilization_bps = totals.max_utilization_bps;
         let new_total_funded = total_funded + funded_amount;
+        let new_cumulative_funded = cumulative_funded
+            .checked_add(funded_amount)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
         let utilization_after =
             Self::utilization_bps_or_panic(&env, new_total_funded, total_deposits);
         if utilization_after > max_utilization_bps {
@@ -1474,6 +1493,9 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::TotalFunded, &(total_funded + funded_amount));
+        env.storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &new_cumulative_funded);
         let active_count = totals.active_invoices;
         env.storage()
             .instance()
@@ -1604,7 +1626,11 @@ impl PoolContract {
         funded
     }
 
-    /// Receives invoice repayment, updates pool liquidity metrics, and emits `repayment_received`.
+    /// Receives invoice repayment, updates pool liquidity metrics, and emits
+    /// `repayment_received`. When the repayment credits non-zero LP yield it
+    /// also emits `share_price_updated` with the old and new fixed-point share
+    /// prices (issue #1171) and adds the full `amount` to the lifetime repaid
+    /// volume (#1174).
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1645,7 +1671,10 @@ impl PoolContract {
     }
 
     /// Receives invoice repayment with a partial refund to the buyer, updates
-    /// pool liquidity metrics, and emits `repayment_received`.
+    /// pool liquidity metrics, and emits `repayment_received`. When the net
+    /// LP yield slice is non-zero it also emits `share_price_updated` (issue
+    /// #1171). The lifetime repaid volume counts the full `amount` received
+    /// from the buyer, before the refund is returned (#1174).
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -2066,6 +2095,175 @@ impl PoolContract {
             total_shares: totals.shares,
             max_utilization_bps: totals.max_utilization_bps,
         }
+    }
+
+    /// Returns cumulative realized principal loss as a percentage of all principal
+    /// successfully funded by this pool, expressed in basis points.
+    ///
+    /// The denominator is lifetime funding and does not decrease when invoices
+    /// are repaid or default. A pool with no recorded funding returns zero.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// Overflow if cumulative loss exceeds lifetime funded principal, scaling
+    /// the cumulative loss by 10,000 overflows, or the result exceeds u32.
+    ///
+    /// # Returns
+    /// u32 - cumulative realized loss in basis points (10,000 = 100%).
+    ///
+    /// # Example
+    /// Call client.get_realized_loss_ratio_bps() for the current ratio.
+    pub fn get_realized_loss_ratio_bps(env: Env) -> u32 {
+        let totals = Self::totals(&env);
+        if totals.cumulative_funded == 0 {
+            return 0;
+        }
+        if totals.loss_realised > totals.cumulative_funded {
+            panic_with_error!(&env, PoolError::Overflow);
+        }
+        let scaled_loss = totals
+            .loss_realised
+            .checked_mul(10_000)
+            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+        u32::try_from(scaled_loss / totals.cumulative_funded)
+            .unwrap_or_else(|_| panic_with_error!(&env, PoolError::Overflow))
+    }
+
+    /// Initializes the lifetime funded-principal counter on a pool upgraded from
+    /// a version that did not record it.
+    ///
+    /// The admin must provide the historical sum of successful funding amounts
+    /// from the pool's invoice_funded events. This is a one-time migration:
+    /// newly constructed pools already have the counter and cannot be changed.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin.
+    ///
+    /// # Panics
+    /// NotInitialized if this pool is not initialized. InvalidConfiguration if
+    /// the counter is already present or the supplied total is less than the
+    /// pool's cumulative realized loss.
+    pub fn backfill_cumulative_funded(env: Env, total_funded: u128) {
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        let key = DataKey::CumulativeFunded;
+        if env.storage().instance().has(&key) {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
+        }
+        let total_loss: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalLossRealised)
+            .unwrap_or(0);
+        if total_funded < total_loss {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
+        }
+        env.storage().instance().set(&key, &total_funded);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the current LP share price as an 18-decimal fixed-point number.
+    ///
+    /// The price is `TotalDeposits / TotalShares` scaled by
+    /// [`SHARE_PRICE_SCALE`] (1e18), the same encoding carried by the
+    /// `share_price_updated` event's `old_price` / `new_price` payload (issue
+    /// #1171). `1_000_000_000_000_000_000` means one stroop of pool value per
+    /// share; a price of `1_050_000_000_000_000_000` means 1.05. An empty
+    /// pool with no shares reports `0`, since no price can be formed yet.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `Overflow` if `TotalDeposits * SHARE_PRICE_SCALE` would overflow
+    ///   `u128`.
+    ///
+    /// # Returns
+    /// * `u128` - The fixed-point share price, or `0` when no shares exist.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let price = client.get_share_price();
+    /// ```
+    pub fn get_share_price(env: Env) -> u128 {
+        Self::share_price(&env)
+    }
+
+    /// Returns lifetime gross LP deposit volume, in funding-asset base units.
+    ///
+    /// This is the sum of every successful [`Self::deposit`] amount over the
+    /// pool's lifetime. Unlike `PoolStats::total_deposits`, it is never
+    /// reduced by withdrawals, defaults or invoice funding, so it reports
+    /// historical inflows rather than current net pool value (issue #1172).
+    /// Instances predating this counter read `0` until their first deposit.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `u128` - Cumulative deposited amount.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let volume = client.get_lifetime_deposited_volume();
+    /// ```
+    pub fn get_lifetime_deposited_volume(env: Env) -> u128 {
+        Self::read_lifetime_volume(&env, &DataKey::LifetimeDepositedVolume)
+    }
+
+    /// Returns lifetime gross LP withdrawal volume, in funding-asset base
+    /// units.
+    ///
+    /// This is the sum of the USDC amounts returned by every successful
+    /// [`Self::withdraw`] call. Failed calls revert without incrementing it,
+    /// and internal funding transfers (`fund_invoice` moving capital into
+    /// escrow) are not withdrawals and do not touch it (issue #1173).
+    /// Instances predating this counter read `0` until their first withdrawal.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `u128` - Cumulative withdrawn amount.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let volume = client.get_lifetime_withdrawn_volume();
+    /// ```
+    pub fn get_lifetime_withdrawn_volume(env: Env) -> u128 {
+        Self::read_lifetime_volume(&env, &DataKey::LifetimeWithdrawnVolume)
+    }
+
+    /// Returns lifetime gross buyer repayment volume, in funding-asset base
+    /// units.
+    ///
+    /// This is the sum of the full `amount` passed to every successful
+    /// [`Self::receive_repayment`] or
+    /// [`Self::receive_repayment_with_refund`] call, including early
+    /// repayments. A buyer refund is a separate outbound transfer and is not
+    /// netted out. Because a successful settlement removes the `FundedInvoice`
+    /// entry, replaying a repayment reverts with `InvoiceNotFound` and cannot
+    /// count twice (issue #1174). Instances predating this counter read `0`
+    /// until their first repayment.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `u128` - Cumulative repaid amount.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let volume = client.get_lifetime_repaid_volume();
+    /// ```
+    pub fn get_lifetime_repaid_volume(env: Env) -> u128 {
+        Self::read_lifetime_volume(&env, &DataKey::LifetimeRepaidVolume)
     }
 
     /// Returns the LP's position, including shares, value, yield, and deposits.
@@ -2612,6 +2810,40 @@ impl PoolContract {
         }
     }
 
+    /// Fixed-point share price used by both `get_share_price` and the
+    /// `share_price_updated` event. `0` shares means no price exists yet.
+    fn share_price(env: &Env) -> u128 {
+        let totals = Self::totals(env);
+        if totals.shares == 0 {
+            return 0;
+        }
+        totals
+            .deposits
+            .checked_mul(SHARE_PRICE_SCALE)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow))
+            / totals.shares
+    }
+
+    /// Reads a lifetime volume counter, defaulting to `0` until the first
+    /// successful operation writes it (issue #1172/#1173/#1174). The counters
+    /// live in persistent storage so they do not enlarge the instance entry
+    /// read by every unrelated pool call.
+    fn read_lifetime_volume(env: &Env, key: &DataKey) -> u128 {
+        env.storage().persistent().get(key).unwrap_or(0)
+    }
+
+    /// Increments a lifetime volume counter and refreshes its TTL.
+    fn bump_lifetime_volume(env: &Env, key: &DataKey, amount: u128) -> u128 {
+        let updated = Self::read_lifetime_volume(env, key)
+            .checked_add(amount)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+        env.storage().persistent().set(key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        updated
+    }
+
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
         if total_deposits == 0 {
             return 0;
@@ -2759,6 +2991,11 @@ impl PoolContract {
                 .instance()
                 .get(&DataKey::TotalFunded)
                 .unwrap_or(0),
+            cumulative_funded: env
+                .storage()
+                .instance()
+                .get(&DataKey::CumulativeFunded)
+                .unwrap_or(0),
             yield_distributed: env
                 .storage()
                 .instance()
@@ -2810,8 +3047,15 @@ impl PoolContract {
     ///    funded-entry removal: a mismatched destination moves no funds and
     ///    finalizes no accounting.
     /// 5. Pays the protocol cut to the treasury, applies the checked totals,
+    ///    increments the lifetime repaid volume by the full `amount` (#1174),
     ///    removes the funded entry, emits `repayment_received`, and extends
     ///    the instance TTL.
+    /// 6. When the LP yield slice is non-zero, emits `share_price_updated`
+    ///    with the pre-settlement and post-settlement 1e18 fixed-point share
+    ///    prices and this invoice ID (issue #1171). Exact-funded and
+    ///    fully-refunded repayments emit no price event. The event is published
+    ///    before `repayment_received` so that the canonical settlement event
+    ///    remains the last pool event of the invocation for existing indexers.
     ///
     /// Refund-specific logic (the USDC transfer back to the buyer) is layered
     /// on top in `receive_repayment_with_refund`.
@@ -2859,6 +3103,9 @@ impl PoolContract {
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
         let total_yield = totals.yield_distributed;
+        // Price before the yield is credited; a zero-yield repayment leaves
+        // the price untouched and must not emit an event (#1171).
+        let old_share_price = Self::share_price(env);
 
         // Validate every pool-side arithmetic bound before anything moves:
         // both yield credits are bounded up front (#967), and the funded
@@ -2932,12 +3179,20 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::ActiveInvoiceCount, &new_active_count);
+        Self::bump_lifetime_volume(env, &DataKey::LifetimeRepaidVolume, amount);
 
         env.storage().persistent().remove(&funded_key);
         env.storage()
             .persistent()
             .remove(&DataKey::FundedInvoiceBuyer(invoice_id.clone()));
 
+        // The share price changed only when LPs actually received yield.
+        // Emit ahead of `repayment_received` so indexers that read the last
+        // pool event still see the canonical settlement event (issue #1171).
+        if lp_yield > 0 {
+            let new_share_price = Self::share_price(env);
+            events::share_price_updated(env, invoice_id, old_share_price, new_share_price);
+        }
         // Update event to include protocol cut information
         events::repayment_received(env, invoice_id, amount, lp_yield, protocol_cut);
         Self::extend_instance_ttl(env);

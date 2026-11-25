@@ -20,7 +20,8 @@ use soroban_sdk::{
 
 use crate::{
     DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent, EscrowRecord,
-    DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS, TTL_EXTEND_TO, TTL_THRESHOLD,
+    ReleaseAuthorization, DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
+    TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 #[contract]
@@ -557,6 +558,15 @@ fn test_lock_stores_record_and_transfers_usdc() {
     // Verify record was stored
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, amount);
+}
+
+#[test]
+fn test_has_lock_remains_false_after_rejected_zero_amount_lock() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 3);
+
+    assert!(client.try_lock(&invoice_id, &0, &issuer).is_err());
+    assert!(!client.has_lock(&invoice_id));
 }
 
 #[test]
@@ -1623,17 +1633,77 @@ fn test_handle_default_rejects_future_locked_at_and_keeps_lock() {
 }
 
 #[test]
+fn test_history_page_preserves_order_and_total() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 10);
+
+    assert_eq!(client.get_history_page(&invoice_id, &0, &1).1, 0);
+    assert_eq!(
+        client.try_get_history_page(&invoice_id, &0, &0),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::InvalidConfig as u32,
+        )))
+    );
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&invoice_id, &pool));
+
+    let full = client.get_history(&invoice_id);
+    assert_eq!(full.len(), 2);
+    for offset in 0..full.len() {
+        let (page, total) = client.get_history_page(&invoice_id, &offset, &1);
+        assert_eq!(total, full.len());
+        assert_eq!(page, full.slice(offset..offset + 1));
+    }
+    let (page, total) = client.get_history_page(&invoice_id, &u32::MAX, &100);
+    assert!(page.is_empty());
+    assert_eq!(total, full.len());
+}
+
+#[test]
 fn test_handle_default_allows_at_grace_period_boundary() {
     let (env, client, _admin, pool, issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 10);
     let amount: u128 = 1_000_000_000;
 
+    assert_eq!(client.get_lock_expiration(&invoice_id), None);
+    let expected_expiration = env.ledger().timestamp() + 60;
     client.lock(&invoice_id, &amount, &issuer);
-    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert_eq!(
+        client.get_lock_expiration(&invoice_id),
+        Some(expected_expiration)
+    );
+    env.ledger().set_timestamp(expected_expiration);
 
     let result = client.handle_default(&invoice_id, &pool);
     assert!(result);
     assert_eq!(client.get_locked(&invoice_id), 0);
+    assert_eq!(client.get_lock_expiration(&invoice_id), None);
+}
+
+#[test]
+fn test_lock_expiration_matches_stored_default_period() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 11);
+    let period = 120u64;
+    env.as_contract(&client.address, || {
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockSeconds, &period);
+    });
+    let expiration = env.ledger().timestamp() + period;
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    assert_eq!(client.get_lock_expiration(&invoice_id), Some(expiration));
+    env.ledger().set_timestamp(expiration - 1);
+    assert_eq!(
+        client.try_handle_default(&invoice_id, &pool),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::NotAuthorized as u32
+        )))
+    );
+    env.ledger().set_timestamp(expiration);
+    assert!(client.handle_default(&invoice_id, &pool));
 }
 
 #[test]
@@ -1821,6 +1891,59 @@ fn test_handle_default_unauthorized_caller_panics() {
 }
 
 #[test]
+fn test_has_lock_returns_false_without_materializing_missing_key() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 8);
+    let key = DataKey::Locked(invoice_id.clone());
+
+    assert!(!env.as_contract(&client.address, || { env.storage().persistent().has(&key) }));
+    assert!(!client.has_lock(&invoice_id));
+    assert!(!env.as_contract(&client.address, || { env.storage().persistent().has(&key) }));
+}
+
+#[test]
+fn test_has_lock_returns_true_for_existing_lock() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 9);
+
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    assert!(client.has_lock(&invoice_id));
+}
+
+#[test]
+fn test_has_lock_returns_true_for_zero_amount_record() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 10);
+    let record = EscrowRecord {
+        invoice_id: invoice_id.clone(),
+        amount: 0,
+        locked_at: env.ledger().timestamp(),
+        issuer,
+    };
+    let key = DataKey::Locked(invoice_id.clone());
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&key, &record)
+    });
+
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert!(client.has_lock(&invoice_id));
+}
+
+#[test]
+fn test_has_lock_returns_false_after_lock_is_completed() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 11);
+    let amount = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    assert!(client.has_lock(&invoice_id));
+
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert!(!client.has_lock(&invoice_id));
+}
+
+#[test]
 fn test_get_locked_returns_zero_when_empty() {
     let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
     let invoice_id = generate_invoice_id(&env, 9);
@@ -1835,6 +1958,49 @@ fn test_get_locked_returns_zero_for_unknown_id() {
     // Generate a random unknown invoice ID
     let unknown_id = generate_invoice_id(&env, 999);
     assert_eq!(client.get_locked(&unknown_id), 0);
+}
+
+#[test]
+fn test_get_lock_record_returns_active_amount_and_timestamp() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 100);
+    let amount = 1_234_567u128;
+    env.ledger().set_timestamp(1_000_000);
+
+    client.lock(&invoice_id, &amount, &issuer);
+
+    let record = client
+        .get_lock_record(&invoice_id)
+        .expect("active lock should be returned");
+    assert_eq!(record.invoice_id, invoice_id);
+    assert_eq!(record.amount, amount);
+    assert_eq!(record.locked_at, 1_000_000);
+    assert_eq!(record.issuer, issuer);
+}
+
+#[test]
+fn test_get_lock_record_returns_none_without_creating_missing_entry() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 101);
+    let contract_id = client.address.clone();
+    let key = DataKey::Locked(invoice_id.clone());
+
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+    assert!(client.get_lock_record(&invoice_id).is_none());
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+}
+
+#[test]
+fn test_get_lock_record_returns_none_after_lock_is_removed() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 102);
+    let amount = 1_000_000u128;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    assert!(client.get_lock_record(&invoice_id).is_some());
+
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert!(client.get_lock_record(&invoice_id).is_none());
 }
 
 #[test]
@@ -3127,4 +3293,175 @@ fn test_invoice_only_redeployment_updates_pinned_recipient_validation() {
     let invoice_id = generate_invoice_id(&env, 109);
     client.lock(&invoice_id, &1_000_000_000, &new_invoice);
     client.release_to_issuer(&invoice_id, &new_invoice);
+}
+
+// ============================================================================
+// get_release_authorization (issue #1198)
+// ============================================================================
+
+/// Expected preview for a live (unpaused) escrow: only `release_after_timeout`
+/// is open to everyone, the other flags come from the caller's role.
+fn live_authorization(
+    lock: bool,
+    release_to_issuer: bool,
+    release_to_pool: bool,
+    handle_default: bool,
+) -> ReleaseAuthorization {
+    ReleaseAuthorization {
+        paused: false,
+        lock,
+        release_to_issuer,
+        release_to_pool,
+        handle_default,
+        release_after_timeout: true,
+    }
+}
+
+#[test]
+fn test_release_authorization_for_pool_contract() {
+    let (_env, client, _admin, pool, _issuer, _usdc_id) = setup();
+
+    assert_eq!(
+        client.get_release_authorization(&pool),
+        live_authorization(true, true, false, true)
+    );
+}
+
+#[test]
+fn test_release_authorization_for_pool_resolved_invoice_contract() {
+    let (env, client, _admin, pool, _issuer, _usdc_id) = setup();
+    let invoice = poolmock::MockPoolClient::new(&env, &pool).get_invoice_contract();
+
+    assert_eq!(
+        client.get_release_authorization(&invoice),
+        live_authorization(false, false, true, false)
+    );
+}
+
+#[test]
+fn test_release_authorization_for_admin() {
+    let (_env, client, admin, _pool, _issuer, _usdc_id) = setup();
+
+    assert_eq!(
+        client.get_release_authorization(&admin),
+        live_authorization(false, false, false, true)
+    );
+}
+
+#[test]
+fn test_release_authorization_for_unrelated_address() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let stranger = Address::generate(&env);
+
+    let expected = live_authorization(false, false, false, false);
+    assert_eq!(client.get_release_authorization(&stranger), expected);
+    // The issuer receives released funds but may not call any release path.
+    assert_eq!(client.get_release_authorization(&issuer), expected);
+}
+
+#[test]
+fn test_release_authorization_with_matching_pin() {
+    let (_env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice = client.get_invoice_contract();
+    client.set_invoice_contract(&invoice);
+
+    assert!(client.get_release_authorization(&invoice).release_to_pool);
+}
+
+/// A pin that disagrees with the pool makes `release_to_pool` fail with
+/// `InvalidConfig` for every caller, so the preview reports it closed for both
+/// the pool-resolved and the pinned address, and the write path agrees.
+#[test]
+fn test_release_authorization_with_drifted_pin() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let resolved = poolmock::MockPoolClient::new(&env, &pool).get_invoice_contract();
+    let pinned = env.register(MockCaller, ());
+    client.set_invoice_contract(&pinned);
+
+    assert!(!client.get_release_authorization(&resolved).release_to_pool);
+    assert!(!client.get_release_authorization(&pinned).release_to_pool);
+
+    let invoice_id = generate_invoice_id(&env, 1198);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+    assert!(client.try_release_to_pool(&invoice_id, &amount).is_err());
+}
+
+/// A pool that cannot answer `get_invoice_contract` leaves nobody able to call
+/// `release_to_pool`; the preview reports that instead of panicking.
+#[test]
+fn test_release_authorization_when_pool_cannot_resolve_invoice() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let admin = env.register(MockCaller, ());
+    let pool = env.register(MockCaller, ());
+    let usdc = env.register(MockToken, ());
+    let contract_id = env.register(EscrowContract, (admin.clone(), pool.clone(), usdc.clone()));
+    let client = EscrowContractClient::new(&env, &contract_id);
+    let candidate = Address::generate(&env);
+
+    assert!(!client.get_release_authorization(&candidate).release_to_pool);
+    assert_eq!(
+        client.get_release_authorization(&pool),
+        live_authorization(true, true, false, true)
+    );
+}
+
+/// Boundary: while paused every write reverts, so every action flag is
+/// `false`; unpausing restores the role-based answer.
+#[test]
+fn test_release_authorization_while_paused() {
+    let (_env, client, admin, pool, _issuer, _usdc_id) = setup();
+    client.pause();
+
+    let paused = ReleaseAuthorization {
+        paused: true,
+        lock: false,
+        release_to_issuer: false,
+        release_to_pool: false,
+        handle_default: false,
+        release_after_timeout: false,
+    };
+    assert_eq!(client.get_release_authorization(&pool), paused);
+    assert_eq!(client.get_release_authorization(&admin), paused);
+
+    client.unpause();
+    assert_eq!(
+        client.get_release_authorization(&pool),
+        live_authorization(true, true, false, true)
+    );
+}
+
+/// The preview never substitutes for auth: it needs none itself, and a caller
+/// it reports as allowed is still rejected by the write path without the
+/// caller's signature.
+#[test]
+fn test_release_authorization_does_not_grant_auth() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup_without_auths();
+    let invoice_id = generate_invoice_id(&env, 1199);
+
+    let preview = client.get_release_authorization(&pool);
+    assert!(preview.lock);
+    assert!(env.auths().is_empty());
+
+    assert!(client.try_lock(&invoice_id, &1_000_000, &issuer).is_err());
+    assert_eq!(client.get_locked(&invoice_id), 0);
+}
+
+/// Idempotency: the view writes nothing, so repeated calls agree and leave
+/// escrow state untouched.
+#[test]
+fn test_release_authorization_is_read_only() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1200);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+    let history_before = client.get_history(&invoice_id);
+
+    let first = client.get_release_authorization(&pool);
+    let second = client.get_release_authorization(&pool);
+
+    assert_eq!(first, second);
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_history(&invoice_id), history_before);
 }
