@@ -1,0 +1,74 @@
+name: ABI Compatibility
+
+on:
+  pull_request:
+    paths:
+      - "contracts/**"
+      - "scripts/check_abi_compat.py"
+      - "scripts/soroban_spec.py"
+      - "scripts/test_check_abi_compat.py"
+      - ".github/workflows/abi-compat.yml"
+  schedule:
+    - cron: "23 5 * * *"
+  workflow_dispatch:
+    inputs:
+      network:
+        description: Target Stellar network to compare against
+        required: false
+        default: testnet
+        type: string
+      fail_on_incompatible:
+        description: Fail the job if incompatible ABI changes are detected
+        required: false
+        default: true
+        type: boolean
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  unit-tests:
+    name: unit-tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Run ABI compatibility unit tests
+        run: python3 -m unittest discover -s scripts -p 'test_check_abi_compat.py' -v
+
+  testnet-abi-check:
+    name: testnet-abi-check
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          targets: wasm32v1-none
+
+      - name: Ensure wasm32v1-none target
+        run: rustup target add wasm32v1-none --toolchain 1.85.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Build release WASMs
+        run: cargo build --workspace --release --target wasm32v1-none
+
+      - name: Compare local WASM specs with deployed testnet contracts
+        env:
+          TARGET_NETWORK: ${{ inputs.network || 'testnet' }}
+          FAIL_ON_INCOMPATIBLE: ${{ github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.fail_on_incompatible) }}
+        run: |
+          flags=(--network "$TARGET_NETWORK" --mode rpc --summary-file "$GITHUB_STEP_SUMMARY")
+          if [ "$FAIL_ON_INCOMPATIBLE" != "true" ]; then
+            flags+=(--report-only)
+          fi
+          python3 scripts/check_abi_compat.py "${flags[@]}"
+        shell: bash
