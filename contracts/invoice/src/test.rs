@@ -2519,25 +2519,41 @@ fn test_list_fails_discount_too_high() {
 }
 
 #[test]
-fn test_zero_discount_full_lifecycle_and_zero_term_repayment() {
+fn test_zero_discount_is_rejected_with_invalid_discount() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    let result = client.try_list_for_financing(&invoice_id, &0);
+    assert_eq!(
+        result.err().and_then(|e| e.ok()),
+        Some(soroban_sdk::Error::from(InvoiceError::InvalidDiscount))
+    );
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
+}
+
+#[test]
+fn test_min_discount_full_lifecycle_and_zero_term_repayment() {
+    // The smallest valid discount (1 bp) still runs the full lifecycle, and
+    // funding at maturity exercises repay's zero-term branch.
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let face_value = DEFAULT_FACE_VALUE;
+    let funded_amount = face_value * 9_999 / 10_000;
     let invoice_id = client.create(&issuer, &buyer, &face_value, &due_date, &usdc);
     attest(&env, &client, &invoice_id);
-    assert!(client.list_for_financing(&invoice_id, &0));
+    assert!(client.list_for_financing(&invoice_id, &1));
 
     let pool = mock_pool_with_asset(&env, &usdc);
     client.set_pool_contract(&pool);
     let escrow = mock_escrow_for_pool(&env, &pool, &usdc);
     client.set_escrow_contract(&escrow);
 
-    // Funding at maturity exercises repay's zero-term branch.
     env.ledger().set_timestamp(due_date);
-    client.mark_funded(&invoice_id, &pool, &usdc, &face_value);
+    client.mark_funded(&invoice_id, &pool, &usdc, &funded_amount);
     let funded = client.get(&invoice_id);
-    assert_eq!(funded.discount_bps, 0);
-    assert_eq!(funded.funded_amount, face_value);
+    assert_eq!(funded.discount_bps, 1);
+    assert_eq!(funded.funded_amount, funded_amount);
 
     client.mark_shipped(&invoice_id);
     client.confirm_delivery(&invoice_id, &issuer);
@@ -4410,7 +4426,7 @@ fn prop_any_future_due_date_creates_invoice_successfully() {
 fn prop_discount_bps_within_limit_always_lists_invoice() {
     let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
     runner
-        .run(&(0u32..=5000u32), |discount_bps| {
+        .run(&(1u32..=5000u32), |discount_bps| {
             let (env, client, issuer, buyer, _, usdc) = setup();
             let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
             let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
@@ -4423,6 +4439,69 @@ fn prop_discount_bps_within_limit_always_lists_invoice() {
             Ok(())
         })
         .unwrap();
+}
+
+#[test]
+fn prop_discount_bps_outside_valid_range_is_rejected_without_state_change() {
+    // Rejected side of the invariant: 0 -> InvalidDiscount, anything above
+    // 5000 (up to u32::MAX) -> DiscountTooHigh, and the invoice is untouched.
+    let rejected = prop_oneof![Just(0u32), 5001u32..=u32::MAX];
+    let mut runner = TestRunner::new(ProptestConfig::with_cases(10));
+    runner
+        .run(&rejected, |discount_bps| {
+            let (env, client, issuer, buyer, _, usdc) = setup();
+            let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+            let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+            attest(&env, &client, &id);
+            let counts_before = client.get_counts();
+
+            let result = client.try_list_for_financing(&id, &discount_bps);
+            let expected = if discount_bps == 0 {
+                InvoiceError::InvalidDiscount
+            } else {
+                InvoiceError::DiscountTooHigh
+            };
+            prop_assert_eq!(
+                result.err().and_then(|e| e.ok()),
+                Some(soroban_sdk::Error::from(expected))
+            );
+
+            let inv = client.get(&id);
+            prop_assert_eq!(inv.status, InvoiceStatus::Created);
+            prop_assert_eq!(inv.discount_bps, 0);
+            prop_assert_eq!(client.get_counts(), counts_before);
+            Ok(())
+        })
+        .unwrap();
+}
+
+#[test]
+fn test_discount_bps_boundaries_1_5000_5001() {
+    for (bps, expected) in [
+        (1u32, None),
+        (5000u32, None),
+        (5001u32, Some(InvoiceError::DiscountTooHigh)),
+    ] {
+        let (env, client, issuer, buyer, _, usdc) = setup();
+        let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+        let id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+        attest(&env, &client, &id);
+        let result = client.try_list_for_financing(&id, &bps);
+        match expected {
+            None => {
+                assert!(result.is_ok());
+                assert_eq!(client.get(&id).status, InvoiceStatus::Listed);
+                assert_eq!(client.get(&id).discount_bps, bps);
+            }
+            Some(err) => {
+                assert_eq!(
+                    result.err().and_then(|e| e.ok()),
+                    Some(soroban_sdk::Error::from(err))
+                );
+                assert_eq!(client.get(&id).status, InvoiceStatus::Created);
+            }
+        }
+    }
 }
 
 #[test]
@@ -4500,7 +4579,7 @@ fn prop_random_valid_transition_paths_preserve_indexes_and_terminality() {
         .run(
             &(
                 any::<bool>(),
-                0u32..=5000u32,
+                1u32..=5000u32,
                 1u64..=2_592_000u64,
                 any::<bool>(),
             ),
@@ -7096,6 +7175,30 @@ fn test_batch_list_for_financing_returns_failed_entries_without_reverting() {
     assert_eq!(client.get_status(&unattested), 0); // Created
     assert_eq!(client.get_discount_bps(&unattested), 0);
     assert_eq!(client.get_status(&bad_discount), 0); // Created
+}
+
+/// A zero discount fails only its own entry in the batch path, matching the
+/// `InvalidDiscount` rejection in `list_for_financing`.
+#[test]
+fn test_batch_list_for_financing_reports_zero_discount_as_failed_entry() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+
+    let zero = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &zero);
+    let good = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &good);
+
+    let entries = vec![&env, (zero.clone(), 0), (good.clone(), 1)];
+    let failed = client.batch_list_for_financing(&entries);
+
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed.get(0).unwrap(), zero);
+    let inv = client.get(&zero);
+    assert_eq!(inv.status, InvoiceStatus::Created);
+    assert_eq!(inv.discount_bps, 0);
+    assert_eq!(client.get_status(&good), 1);
+    assert_eq!(client.get_discount_bps(&good), 1);
 }
 
 /// A discount above the cap fails only its own entry; a valid entry later in

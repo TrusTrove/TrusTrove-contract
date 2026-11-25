@@ -561,6 +561,15 @@ fn test_lock_stores_record_and_transfers_usdc() {
 }
 
 #[test]
+fn test_has_lock_remains_false_after_rejected_zero_amount_lock() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 3);
+
+    assert!(client.try_lock(&invoice_id, &0, &issuer).is_err());
+    assert!(!client.has_lock(&invoice_id));
+}
+
+#[test]
 #[should_panic(expected = "Error(Contract, #5)")]
 fn test_lock_fails_zero_amount() {
     let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
@@ -1646,9 +1655,50 @@ fn test_history_page_preserves_order_and_total() {
         assert_eq!(total, full.len());
         assert_eq!(page, full.slice(offset..offset + 1));
     }
+    let (page, total) = client.get_history_page(&invoice_id, &0, &100);
+    assert_eq!(page, full);
+    assert_eq!(total, full.len());
+    let (page, total) = client.get_history_page(&invoice_id, &1, &100);
+    assert_eq!(page, full.slice(1..full.len()));
+    assert_eq!(total, full.len());
+    assert_eq!(
+        client.try_get_history_page(&invoice_id, &0, &101),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::InvalidConfig as u32,
+        )))
+    );
+
     let (page, total) = client.get_history_page(&invoice_id, &u32::MAX, &100);
     assert!(page.is_empty());
     assert_eq!(total, full.len());
+}
+
+#[test]
+fn test_history_page_caps_large_histories_and_keeps_append_order() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 10);
+    let mut history = Vec::new(&env);
+    for timestamp in 0..101 {
+        history.push_back(EscrowEvent {
+            invoice_id: invoice_id.clone(),
+            action: EscrowAction::Locked,
+            amount: 1,
+            timestamp,
+            caller: None,
+        });
+    }
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::History(invoice_id.clone()), &history);
+    });
+
+    let (first, total) = client.get_history_page(&invoice_id, &0, &100);
+    assert_eq!(first, history.slice(0..100));
+    assert_eq!(total, 101);
+    let (last, total) = client.get_history_page(&invoice_id, &100, &100);
+    assert_eq!(last, history.slice(100..101));
+    assert_eq!(total, 101);
 }
 
 #[test]
@@ -1879,6 +1929,59 @@ fn test_handle_default_unauthorized_caller_panics() {
     client.handle_default(&invoice_id, &stranger);
     // also ensure that pool is indeed required for the normal path
     let _ = pool;
+}
+
+#[test]
+fn test_has_lock_returns_false_without_materializing_missing_key() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 8);
+    let key = DataKey::Locked(invoice_id.clone());
+
+    assert!(!env.as_contract(&client.address, || { env.storage().persistent().has(&key) }));
+    assert!(!client.has_lock(&invoice_id));
+    assert!(!env.as_contract(&client.address, || { env.storage().persistent().has(&key) }));
+}
+
+#[test]
+fn test_has_lock_returns_true_for_existing_lock() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 9);
+
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    assert!(client.has_lock(&invoice_id));
+}
+
+#[test]
+fn test_has_lock_returns_true_for_zero_amount_record() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 10);
+    let record = EscrowRecord {
+        invoice_id: invoice_id.clone(),
+        amount: 0,
+        locked_at: env.ledger().timestamp(),
+        issuer,
+    };
+    let key = DataKey::Locked(invoice_id.clone());
+    env.as_contract(&client.address, || {
+        env.storage().persistent().set(&key, &record)
+    });
+
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert!(client.has_lock(&invoice_id));
+}
+
+#[test]
+fn test_has_lock_returns_false_after_lock_is_completed() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 11);
+    let amount = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    assert!(client.has_lock(&invoice_id));
+
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert!(!client.has_lock(&invoice_id));
 }
 
 #[test]

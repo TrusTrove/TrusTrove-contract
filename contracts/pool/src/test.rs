@@ -20,8 +20,8 @@ use crate::{
         MAX_BATCH_SIZE, MAX_PROTOCOL_FEE_BPS, SHARE_PRICE_SCALE, SUGGESTED_DISCOUNT_CEILING_BPS,
         SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
-    DataKey, PoolContract, PoolContractClient, PoolError, DEFAULT_MIN_INITIAL_DEPOSIT,
-    DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
+    DataKey, FundingRejectionReason, PoolContract, PoolContractClient, PoolError,
+    DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -1746,6 +1746,126 @@ fn test_lp_position_after_deposit() {
 
 //  UTILIZATION RATE TESTS
 #[test]
+fn test_realized_loss_ratio_is_zero_without_funding_and_requires_no_auth() {
+    let te = setup();
+    te.env.set_auths(&[]);
+
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 0);
+}
+
+#[test]
+fn test_realized_loss_ratio_uses_lifetime_funding_after_default_and_repayment() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let defaulted = create_and_list(&te, &te.usdc_id);
+    let repaid = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&defaulted);
+    te.pool.fund_invoice(&repaid);
+
+    te.invoice.mark_shipped(&repaid);
+    te.invoice.confirm_delivery(&repaid, &te.issuer);
+    te.invoice.confirm_delivery(&repaid, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_200);
+    assert!(te.invoice.repay_early(&repaid));
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 43_201);
+    assert!(te.pool.handle_default(&defaulted));
+
+    assert_eq!(te.pool.get_stats().total_funded, 0);
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 5_000);
+}
+
+#[test]
+fn test_rejected_duplicate_funding_does_not_increase_cumulative_denominator() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let before: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .get(&DataKey::CumulativeFunded)
+            .unwrap()
+    });
+    assert_eq!(before, DEFAULT_FUNDED_AMOUNT);
+    assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
+
+    let after: u128 = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .get(&DataKey::CumulativeFunded)
+            .unwrap()
+    });
+    assert_eq!(after, before);
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #13)")]
+fn test_realized_loss_ratio_rejects_scaled_loss_overflow() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &(u128::MAX / 10_000 + 1));
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &u128::MAX);
+    });
+
+    te.pool.get_realized_loss_ratio_bps();
+}
+
+#[test]
+fn test_backfill_cumulative_funded_migrates_legacy_loss_history_once() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .remove(&DataKey::CumulativeFunded);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &100u128);
+    });
+
+    te.pool.backfill_cumulative_funded(&200);
+    assert_eq!(te.pool.get_realized_loss_ratio_bps(), 5_000);
+    assert!(te.pool.try_backfill_cumulative_funded(&200).is_err());
+}
+
+#[test]
+fn test_backfill_cumulative_funded_rejects_total_below_realized_loss() {
+    let te = setup();
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .remove(&DataKey::CumulativeFunded);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &100u128);
+    });
+
+    assert!(te.pool.try_backfill_cumulative_funded(&99).is_err());
+    let has_counter = te.env.as_contract(&te.pool_id, || {
+        te.env.storage().instance().has(&DataKey::CumulativeFunded)
+    });
+    assert!(!has_counter);
+}
+
+#[test]
 fn test_utilization_rate_zero_when_no_deposits() {
     let te = setup();
     assert_eq!(te.pool.get_utilization_rate(), 0);
@@ -1798,6 +1918,125 @@ fn test_utilization_rate_calculates_correctly() {
     assert_eq!(
         te.pool.get_utilization_rate(),
         (DEFAULT_FUNDED_AMOUNT * 10000 / 10_000_000_000) as u32
+    );
+}
+
+#[test]
+fn test_max_fundable_amount_handles_empty_pool_and_exact_utilization_boundary() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    assert_eq!(te.pool.get_max_fundable_amount(), 0);
+
+    te.env.mock_all_auths();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let max_fundable = te.pool.get_max_fundable_amount();
+    assert_eq!(max_fundable, 85_009_999_999);
+    assert_eq!((max_fundable * 10_000 / 100_000_000_000) as u32, 8500);
+    assert_eq!(((max_fundable + 1) * 10_000 / 100_000_000_000) as u32, 8501);
+}
+
+#[test]
+fn test_funding_eligibility_reports_metrics_without_writing_pool_state() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.env.set_auths(&[]);
+
+    let eligibility = te.pool.get_funding_eligibility(&invoice_id);
+
+    assert!(eligibility.is_eligible);
+    assert_eq!(eligibility.invoice_status, 1);
+    assert!(eligibility.funding_asset_matches);
+    assert_eq!(eligibility.funded_amount, DEFAULT_FUNDED_AMOUNT);
+    assert_eq!(eligibility.available_liquidity, 100_000_000_000);
+    assert_eq!(eligibility.max_fundable_amount, 100_000_000_000);
+    assert_eq!(eligibility.utilization_rate_bps, 0);
+    assert_eq!(eligibility.max_utilization_bps, 10_000);
+    assert!(eligibility.rejection_reasons.is_empty());
+    assert_eq!(te.pool.get_stats().total_funded, 0);
+    let has_funding_record = te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .persistent()
+            .has(&DataKey::FundedInvoice(invoice_id.clone()))
+    });
+    assert!(!has_funding_record);
+}
+
+#[test]
+fn test_funding_eligibility_reports_asset_capacity_and_amount_rejections() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.set_max_utilization(&te.admin, &8500);
+
+    let wrong_asset_invoice = create_and_list(&te, &te.xlm_id);
+    let wrong_asset = te.pool.get_funding_eligibility(&wrong_asset_invoice);
+    assert!(!wrong_asset.is_eligible);
+    assert!(!wrong_asset.funding_asset_matches);
+    assert_eq!(
+        wrong_asset.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::AssetMismatch
+    );
+
+    let over_capacity_invoice = create_and_list(&te, &te.usdc_id);
+    let over_capacity = te.pool.get_funding_eligibility(&over_capacity_invoice);
+    assert!(!over_capacity.is_eligible);
+    assert_eq!(over_capacity.max_fundable_amount, 8_500_999_999);
+    assert_eq!(
+        over_capacity.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::UtilizationCapExceeded
+    );
+
+    let zero_amount_invoice = BytesN::from_array(&te.env, &[7; 32]);
+    let mock_invoice_id = te.env.register(MockHugeFaceInvoice, ());
+    MockHugeFaceInvoiceClient::new(&te.env, &mock_invoice_id).configure(
+        &te.issuer,
+        &te.buyer,
+        &te.usdc_id,
+        &1,
+        &5000,
+    );
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::InvoiceContract, &mock_invoice_id);
+    });
+    let zero_amount = te.pool.get_funding_eligibility(&zero_amount_invoice);
+    assert!(!zero_amount.is_eligible);
+    assert_eq!(zero_amount.funded_amount, 0);
+    assert_eq!(
+        zero_amount.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::InvalidAmount
+    );
+}
+
+#[test]
+fn test_funding_eligibility_rejects_unknown_invoice() {
+    let te = setup();
+    let missing_invoice = BytesN::from_array(&te.env, &[0; 32]);
+    assert!(te
+        .pool
+        .try_get_funding_eligibility(&missing_invoice)
+        .is_err());
+}
+
+#[test]
+fn test_funding_preflight_reports_paused_pool() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.pause();
+
+    assert_eq!(te.pool.get_max_fundable_amount(), 0);
+    let eligibility = te.pool.get_funding_eligibility(&invoice_id);
+    assert!(!eligibility.is_eligible);
+    assert_eq!(eligibility.max_fundable_amount, 0);
+    assert_eq!(
+        eligibility.rejection_reasons.get(0).unwrap(),
+        FundingRejectionReason::ContractPaused
     );
 }
 
@@ -8766,7 +9005,8 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 ///
 /// Re-pinned: `escrow.lock` and invoice contract enhancements add to the
 /// cross-contract call. The ceilings below pin the re-measurement at
-/// cpu = 1,666,890 / mem = 371,242 with small headroom.
+/// cpu = 1,714,128 / mem = 375,634 after merging lifetime volume metrics and adding
+/// lifetime-funded accounting (#1189), with small headroom.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -8780,11 +9020,11 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_685_000,
-        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_735_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 375_000,
+        mem < 390_000,
         "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned memory budget: {mem}"
     );
 }
@@ -10704,4 +10944,128 @@ fn test_lifetime_repaid_volume_counts_full_amounts_including_early_repayment() {
     assert!(te.invoice.repay_early(&early_invoice));
 
     assert_eq!(te.pool.get_lifetime_repaid_volume(), 2 * DEFAULT_FACE_VALUE);
+}
+
+// ---------------------------------------------------------------------------
+// ISSUE #1166: SHARE PRICE AS A FIXED-POINT VIEW
+// ---------------------------------------------------------------------------
+//
+// `get_share_price` is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares`,
+// truncated toward zero. These pin the documented value in each pool state
+// and the rounding direction, so clients can rely on the view instead of
+// recomputing it with their own rounding.
+
+/// Sets the two totals the price is read from, as a corrupted or extreme
+/// pool would hold them.
+fn set_share_price_totals(te: &TestEnv, deposits: u128, shares: u128) {
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalDeposits, &deposits);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalShares, &shares);
+    });
+}
+
+#[test]
+fn test_share_price_is_zero_for_an_empty_pool() {
+    let te = setup();
+    assert_eq!(te.pool.total_supply(), 0);
+    assert_eq!(te.pool.get_share_price(), 0);
+}
+
+#[test]
+fn test_share_price_is_exactly_one_after_the_first_deposit_and_stays_on_more() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &30_000_000_000);
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+
+    // A deposit at the current price mints shares 1:1 and leaves it unchanged.
+    let second = create_lp_with_balance(&te, 12_345_678_901);
+    te.pool.deposit(&second, &12_345_678_901);
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+}
+
+#[test]
+fn test_share_price_rises_with_yield_and_rounds_down() {
+    let te = setup();
+    let deposit = 30_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    // Funding moves capital into an invoice but not value out of the pool.
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+
+    assert!(te.pool.receive_repayment(&invoice_id, &DEFAULT_FACE_VALUE));
+
+    // (30_000_000_000 + 200_000_000) * 1e18 / 30_000_000_000
+    // = 1_006_666_666_666_666_666.67, truncated toward zero.
+    assert_eq!(
+        te.pool.get_stats().total_deposits,
+        deposit + DEFAULT_YIELD_AMOUNT
+    );
+    assert_eq!(te.pool.get_share_price(), 1_006_666_666_666_666_666);
+    assert!(te.pool.get_share_price() > SHARE_PRICE_SCALE);
+}
+
+#[test]
+fn test_share_price_falls_when_a_default_absorbs_a_loss() {
+    let te = setup();
+    let deposit = 30_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let due_date = te.env.ledger().timestamp() + 86_400;
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    te.env.ledger().set_timestamp(due_date + 1);
+    assert!(te.pool.handle_default(&invoice_id));
+
+    // The pool wrote the funded principal off: (30e9 - 9.8e9) * 1e18 / 30e9
+    // = 673_333_333_333_333_333.33, truncated toward zero.
+    assert_eq!(
+        te.pool.get_stats().total_deposits,
+        deposit - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(te.pool.get_share_price(), 673_333_333_333_333_333);
+    assert!(te.pool.get_share_price() < SHARE_PRICE_SCALE);
+}
+
+#[test]
+fn test_share_price_needs_no_authorization() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &30_000_000_000);
+    te.env.set_auths(&[]);
+    assert_eq!(te.pool.get_share_price(), SHARE_PRICE_SCALE);
+    assert!(te.env.auths().is_empty());
+}
+
+#[test]
+fn test_share_price_truncates_rather_than_rounding_to_nearest() {
+    let te = setup();
+    // 2 / 3 = 0.666…: nearest would be …667, truncation gives …666.
+    set_share_price_totals(&te, 2, 3);
+    assert_eq!(te.pool.get_share_price(), 666_666_666_666_666_666);
+    // Less than one base unit of value per 1e18 shares still truncates to 0,
+    // which is distinct from the empty pool only by the share count.
+    set_share_price_totals(&te, 1, SHARE_PRICE_SCALE + 1);
+    assert_eq!(te.pool.get_share_price(), 0);
+}
+
+#[test]
+fn test_share_price_overflow_boundary() {
+    let te = setup();
+    let largest = u128::MAX / SHARE_PRICE_SCALE;
+    set_share_price_totals(&te, largest, 1);
+    assert_eq!(te.pool.get_share_price(), largest * SHARE_PRICE_SCALE);
+
+    // One more base unit and `TotalDeposits * SHARE_PRICE_SCALE` overflows:
+    // the view reports the typed error instead of wrapping.
+    set_share_price_totals(&te, largest + 1, 1);
+    assert_eq!(
+        te.pool.try_get_share_price(),
+        Err(Ok(soroban_sdk::Error::from(PoolError::Overflow)))
+    );
 }
