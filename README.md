@@ -169,6 +169,7 @@ get_attestation_age(invoice_id) → Option<AttestationAge>
 get_by_status(status, page, page_size) → Vec<Invoice>
 get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
+get_issuer_invoice_ids(address, page, page_size) → Vec<invoice_id>  ← IDs only, 1..=50 per page
 get_by_buyer(address, page, page_size) → Vec<Invoice>
 get_buyer_invoice_ids(address, page, page_size) → Vec<invoice_id>  ← IDs only, 1..=50 per page
 get_invoice_count_by_issuer(address) → u32
@@ -298,6 +299,30 @@ if client.exists(&invoice_id) {
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
 - **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
+
+#### `get_issuer_invoice_ids(address, page, page_size) → Vec<invoice_id>`
+- ID-only view of an issuer's invoices for issuers with too many invoices to fetch through `get_by_issuer` (#1150). It reads only the issuer index and never loads an `Invoice` record, so each call costs at most `page_size` index reads.
+- `page` is zero-based, and `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- IDs come back in creation order. The issuer index is append-only, so a page always returns the same IDs and new invoices only show up on later pages. For the same `page`/`page_size` the IDs are exactly those of `get_by_issuer`.
+- A page that starts at or past the end returns an empty `Vec`, as does an issuer with no invoices.
+- Every returned ID is an existing invoice of `address`. Terminal invoices (repaid, cancelled, defaulted, expired) are included.
+- No authorization is required.
+
+Paging through all of an issuer's invoice IDs:
+
+```rust
+let mut page = 0;
+loop {
+    let ids = client.get_issuer_invoice_ids(&issuer, &page, &MAX_PAGE_SIZE);
+    // ... process ids ...
+    if ids.len() < MAX_PAGE_SIZE {
+        break; // last page
+    }
+    page += 1;
+}
+```
+
+`get_invoice_count_by_issuer(address)` gives the total up front if you need to size the last page.
 
 ### escrow_contract
 
@@ -479,6 +504,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_issuer_invoice_ids` | `get_issuer_invoice_ids(address: Address, page: u32, page_size: u32) -> Vec<BytesN<32>>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_buyer_invoice_ids` | `get_buyer_invoice_ids(address: Address, page: u32, page_size: u32) -> Vec<BytesN<32>>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
@@ -580,7 +606,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 209 public entry points across five deployable contracts.**
+**Total: 210 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -1024,7 +1050,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` or `get_buyer_invoice_ids` |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status`, `get_issuer_invoice_ids`, or `get_buyer_invoice_ids` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |
