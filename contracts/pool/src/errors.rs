@@ -62,4 +62,12 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
+    /// Funding would push the invoice issuer's active funded exposure
+    /// (`DataKey::IssuerExposure(issuer)`) above the admin-configured
+    /// per-issuer cap (`DataKey::IssuerConcentrationLimit`, set via
+    /// `set_issuer_concentration_limit`). An amount that lands exactly on
+    /// the cap is accepted; only `current + amount > cap` is rejected. The
+    /// cap defaults to `0` (disabled), where the check is skipped entirely
+    /// (issue #1182).
+    IssuerConcentrationExceeded = 31,
 }

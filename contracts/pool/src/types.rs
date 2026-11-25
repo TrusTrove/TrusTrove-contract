@@ -159,6 +159,28 @@ pub enum DataKey {
     /// calls, before any buyer refund is netted out. Stored in persistent
     /// storage (#1174).
     LifetimeRepaidVolume,
+    /// Admin-configured per-issuer active funded exposure cap, in
+    /// funding-asset base units, enforced by `fund_invoice` (issue #1182).
+    /// `0` (the default when never set) disables the check. A single
+    /// pool-wide value applied to every issuer, mirroring the convention
+    /// `MaxTimeToMaturity` and `MinDiscountBps` set: one admin-set policy
+    /// key, no per-issuer override. Appended after `LifetimeRepaidVolume` to
+    /// keep existing discriminants stable.
+    IssuerConcentrationLimit,
+    /// Active funded exposure currently attributed to one issuer, in
+    /// funding-asset base units (issue #1182). Incremented by every
+    /// successful `fund_invoice` and released — saturating at `0` — when an
+    /// invoice of that issuer settles or defaults. Persistent storage like
+    /// the per-LP position keys: exposure is per-issuer state, not config
+    /// that belongs on the instance footprint.
+    IssuerExposure(Address),
+    /// Issuer of a funded invoice, snapshotted from the funding context at
+    /// funding time and removed together with the `FundedInvoice` entry
+    /// (issue #1182). Settlement and default handling need it to release
+    /// `IssuerExposure`, but during both the invoice contract is the active
+    /// caller, so Soroban's no-re-entry rule forbids resolving it then —
+    /// the same constraint that produced `FundedInvoiceBuyer` (#969).
+    FundedInvoiceIssuer(BytesN<32>),
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,

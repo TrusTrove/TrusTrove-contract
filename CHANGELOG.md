@@ -32,6 +32,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `pool`: optional per-issuer concentration limit enforced at funding.
+  `set_issuer_concentration_limit(cap)` (stored admin only, emits
+  `issuer_concentration_updated(old, new)`) plus
+  `get_issuer_concentration_limit()` and `get_issuer_exposure(issuer)`,
+  stored as `DataKey::IssuerConcentrationLimit` with per-issuer tracking in
+  `DataKey::IssuerExposure(issuer)` and an issuer snapshot under
+  `DataKey::FundedInvoiceIssuer(invoice_id)` — all appended keys, so existing
+  storage decoding is unchanged. While the cap is positive, `fund_invoice`
+  rejects a funding that would make `current_exposure + funded_amount > cap`
+  with the new `PoolError::IssuerConcentrationExceeded` (#31); an amount
+  landing exactly on the cap is accepted, and a negative cap is rejected by
+  the setter with `InvalidAmount`. `batch_fund_invoice` treats a breach as a
+  capacity shortfall and stops at that entry. The default `0` disables the
+  check, and repayment/default handling release the issuer's exposure
+  (saturating at 0) so capacity is freed when an invoice settles or defaults
+  (#1182)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
