@@ -193,6 +193,11 @@ The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta
   cost entirely: they read a single stored counter (`u32`) in O(1), so
   pagination and badge UIs should prefer them over `.len()` on the
   full-fetch views.
+- `get_buyer_invoice_ids` is the cheaper ID-only view of the buyer index
+  (#1151): same paging as `get_by_buyer`, `page_size` in `1..=MAX_PAGE_SIZE`,
+  but it reads at most `page_size` index entries and no `Invoice` records.
+  Buyers with many invoices should page IDs with it and fetch full records
+  only as needed.
 - `registry::list_profiles` is bounded per call: it returns at most 50
   addresses (`PageSizeExceeded` above that, mirroring the 50-entry batch cap)
   and costs O(1) in `limit`, not in the total number of registered profiles.

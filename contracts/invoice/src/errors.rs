@@ -36,8 +36,8 @@ pub enum InvoiceError {
     /// A paginated `get_by_*` query was given a `page_size` larger than
     /// [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), which would defeat the
     /// per-call gas bound pagination exists to provide.
-    /// `get_invoice_ids_by_status` and `get_issuer_invoice_ids` also raise it
-    /// for `page_size == 0`.
+    /// `get_invoice_ids_by_status`, `get_issuer_invoice_ids`, and
+    /// `get_buyer_invoice_ids` also raise it for `page_size == 0`.
     InvalidPageSize = 27,
     /// A batch entry point was given more entries than
     /// [`MAX_BATCH_SIZE`](crate::MAX_BATCH_SIZE), which would defeat the

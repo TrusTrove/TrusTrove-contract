@@ -3702,6 +3702,100 @@ impl InvoiceContract {
         hydrate_ids(&env, ids)
     }
 
+    /// Lists a page of invoice **IDs** associated with a given buyer.
+    ///
+    /// ID-only counterpart of `get_by_buyer` (issue #1151). It reads only the
+    /// buyer index (`BuyerIndexCount` plus at most `page_size`
+    /// `BuyerIndexEntry` rows) and never loads or decodes an [`Invoice`]
+    /// record. The cost of a call is therefore bounded by `page_size`, no
+    /// matter how many invoices the buyer has or how large they are.
+    ///
+    /// # Ordering and paging
+    /// IDs are returned in buyer-index order, which is creation order. The
+    /// index is append-only: a new invoice always gets the next position, and
+    /// no entry is ever removed or reordered. Page `p` therefore covers index
+    /// positions `p * page_size .. (p + 1) * page_size` and returns the same
+    /// IDs on every call. New invoices only show up on later pages. Walking
+    /// `page = 0, 1, 2, ...` with a fixed `page_size` until a page comes back
+    /// shorter than `page_size` returns every ID exactly once. For the same
+    /// `page`/`page_size`, the result is exactly the `id`s of `get_by_buyer`.
+    ///
+    /// # Existence
+    /// Every returned ID refers to an existing invoice whose `buyer` is
+    /// `address`. An ID is appended to the buyer index only by `create`,
+    /// after the invoice record is stored. An invoice's buyer is fixed at
+    /// creation and never reassigned, and no code path removes invoice
+    /// records or buyer index entries. Invoices where `address` is only the
+    /// issuer are never included. Invoices that reach a terminal status
+    /// (`Repaid`, `Cancelled`, `Defaulted`, `Expired`) are still returned;
+    /// filter them with `get_status` if needed.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The buyer address.
+    /// * `page` - Zero-based page index. A page that starts at or past the end
+    ///   of the index (including an overflowing `page * page_size`) returns an
+    ///   empty `Vec`.
+    /// * `page_size` - Maximum IDs to return for this page. Must be in
+    ///   `1..=MAX_PAGE_SIZE` (50).
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `InvoiceError::InvalidPageSize` if `page_size == 0` or
+    ///   `page_size > MAX_PAGE_SIZE`.
+    /// * `InvoiceError::NotFound` if an index entry inside the buyer's count
+    ///   is missing (a broken storage invariant, as in `get_by_buyer`).
+    ///
+    /// # Returns
+    /// * `Vec<BytesN<32>>` - Up to `page_size` invoice IDs for the buyer, in
+    ///   creation order. Empty if the buyer has no invoices or the page is
+    ///   out of range.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let mut page = 0;
+    /// loop {
+    ///     let ids = client.get_buyer_invoice_ids(&buyer, &page, &MAX_PAGE_SIZE);
+    ///     // ... process ids ...
+    ///     if ids.len() < MAX_PAGE_SIZE {
+    ///         break;
+    ///     }
+    ///     page += 1;
+    /// }
+    /// ```
+    pub fn get_buyer_invoice_ids(
+        env: Env,
+        address: Address,
+        page: u32,
+        page_size: u32,
+    ) -> Vec<BytesN<32>> {
+        // A zero-sized page could never make progress, so it is rejected
+        // instead of silently returning an empty page. `page_range` rejects
+        // the upper bound.
+        if page_size == 0 {
+            panic_with_error!(&env, InvoiceError::InvalidPageSize);
+        }
+        let count_key = DataKey::BuyerIndexCount(address.clone());
+        let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        // Issue #832: read-time TTL bump, see `get_by_status`.
+        bump_persistent(&env, &count_key);
+        let (start, end) = page_range(&env, count, page, page_size);
+        let mut ids: Vec<BytesN<32>> = Vec::new(&env);
+        for i in start..end {
+            let entry_key = DataKey::BuyerIndexEntry(address.clone(), i);
+            let id: BytesN<32> = env
+                .storage()
+                .persistent()
+                .get(&entry_key)
+                .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+            bump_persistent(&env, &entry_key);
+            ids.push_back(id);
+        }
+        ids
+    }
+
     /// Returns the number of invoices created by a given issuer.
     ///
     /// Reads only the issuer index counter, so it is much cheaper than
