@@ -103,7 +103,9 @@ done
 
 # Prefer a globally available `stellar` on PATH, fall back to STELLAR_BIN env var,
 # then fall back to a common WSL installation
-if command -v stellar &> /dev/null; then
+if [ "$DRY_RUN" = true ]; then
+  STELLAR="stellar"
+elif command -v stellar &> /dev/null; then
   STELLAR="stellar"
 elif [ -n "${STELLAR_BIN:-}" ] && [ -f "$STELLAR_BIN" ]; then
   STELLAR="$STELLAR_BIN"
@@ -132,17 +134,19 @@ fi
 
 ADDRESSES_FILE=".deployed-addresses"
 
-if [ "$FRESH" = true ]; then
+if [ "$FRESH" = true ] && [ "$DRY_RUN" != true ]; then
   echo "=== --fresh flag set: removing saved addresses and starting clean ==="
   rm -f "$ADDRESSES_FILE"
 fi
 
-touch "$ADDRESSES_FILE"
+if [ "$DRY_RUN" != true ]; then touch "$ADDRESSES_FILE"; fi
+_dry_run_excluded_keys=()
 
 # Write or overwrite a key in the addresses file
 save_address() {
   local key="$1"
   local value="$2"
+  if [ "$DRY_RUN" = true ]; then return 0; fi
   # Remove any existing line for this key, then append
   if grep -q "^${key}=" "$ADDRESSES_FILE" 2>/dev/null; then
     # Use a temp file for portability (no in-place sed on all systems)
@@ -154,6 +158,13 @@ save_address() {
 # Return the saved address for a key (empty string if not found)
 load_address() {
   local key="$1"
+  if [ "$DRY_RUN" = true ]; then
+    if [ "$FRESH" = true ]; then return 0; fi
+    local excluded
+    for excluded in "${_dry_run_excluded_keys[@]}"; do
+      if [ "$key" = "$excluded" ]; then return 0; fi
+    done
+  fi
   grep "^${key}=" "$ADDRESSES_FILE" 2>/dev/null | cut -d= -f2 || true
 }
 
@@ -504,11 +515,15 @@ if [ -z "${XLM_ASSET:-}" ]; then
   exit 1
 fi
 
+if [ "$DRY_RUN" = true ]; then
+  DEPLOYER_ADDRESS="${DEPLOYER_ADDRESS:-<address-for-$DEPLOYER_ACCOUNT>}"
+else
 DEPLOYER_ADDRESS=$("$STELLAR" keys address "$DEPLOYER_ACCOUNT" 2>&1) || {
   echo "ERROR: Could not resolve address for key '$DEPLOYER_ACCOUNT'."
   echo "       Run scripts/setup-testnet.sh first."
   exit 1
 }
+fi
 echo "  Deployer address : $DEPLOYER_ADDRESS"
 echo "  Addresses file   : $ADDRESSES_FILE"
 echo "  Fresh deploy     : $FRESH"
@@ -573,8 +588,12 @@ if [ -n "$ONLY_CONTRACT" ]; then
   done
   _pattern=$(printf '%s|' "${_clear_keys[@]}")
   _pattern="${_pattern%|}"
-  grep -vE "^(${_pattern})=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
-  mv "${ADDRESSES_FILE}.tmp" "$ADDRESSES_FILE"
+  if [ "$DRY_RUN" = true ]; then
+    _dry_run_excluded_keys=("${_clear_keys[@]}")
+  else
+    grep -vE "^(${_pattern})=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
+    mv "${ADDRESSES_FILE}.tmp" "$ADDRESSES_FILE"
+  fi
 
   # Load all surviving saved addresses into variables for cross-refs
   REGISTRY_ID=$(load_address "registry")

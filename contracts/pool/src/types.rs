@@ -146,6 +146,19 @@ pub enum DataKey {
     /// on repayment or default; used as the realized-loss ratio denominator.
     /// Appended to preserve existing key encoding.
     CumulativeFunded,
+    /// Lifetime gross USDC (funding-asset base units) deposited by LPs across
+    /// all successful `deposit` calls. Never reduced by withdrawals and stored
+    /// in persistent storage so the instance footprint stays unchanged (#1172).
+    LifetimeDepositedVolume,
+    /// Lifetime gross USDC (funding-asset base units) withdrawn by LPs across
+    /// all successful `withdraw` calls. Internal funding transfers do not
+    /// touch it, and the counter lives in persistent storage (#1173).
+    LifetimeWithdrawnVolume,
+    /// Lifetime gross USDC (funding-asset base units) repaid by buyers across
+    /// all successful `receive_repayment` / `receive_repayment_with_refund`
+    /// calls, before any buyer refund is netted out. Stored in persistent
+    /// storage (#1174).
+    LifetimeRepaidVolume,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,

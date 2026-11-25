@@ -84,6 +84,9 @@ impl EscrowContract {
         env.storage()
             .instance()
             .set(&DataKey::UsdcAsset, &usdc_asset);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockSeconds, &DEFAULT_MIN_LOCK_SECONDS);
         Self::extend_instance_ttl(&env);
         // #867: every other contract announces initialization; escrow must
         // too, so an indexer sees admin/pool/asset without reading storage.
@@ -670,7 +673,7 @@ impl EscrowContract {
     /// * `NotAuthorized` if the record has not been locked long enough to satisfy the grace period.
     ///
     /// # Coupling with `invoice.trigger_default`
-    /// This grace period (`DEFAULT_MIN_LOCK_SECONDS`, measured from
+    /// This grace period (measured from
     /// [`EscrowRecord::locked_at`]) is independent of, and not known to,
     /// `invoice.trigger_default`'s own due-date gate (`now >= due_date`).
     /// Since issue #819 the funding path releases the principal to the issuer
@@ -717,7 +720,7 @@ impl EscrowContract {
         // A timestamp rollback (or a malformed record seeded with a future
         // `locked_at`) must fail the grace-period check as a typed
         // authorization error, not underflow `now - locked_at`.
-        if now < record.locked_at || now - record.locked_at < DEFAULT_MIN_LOCK_SECONDS {
+        if now < record.locked_at || now - record.locked_at < Self::min_lock_seconds(&env) {
             panic_with_error!(&env, EscrowError::NotAuthorized);
         }
 
@@ -921,6 +924,44 @@ impl EscrowContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Returns the active escrow lock record for an invoice.
+    ///
+    /// This view reads the existing [`DataKey::Locked`] entry and returns the
+    /// stored [`EscrowRecord`] without changing the storage schema. It is a
+    /// convenient single-call alternative to [`Self::get_locked`] and
+    /// [`Self::get_locked_at`] for clients that need both values.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice ID to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<EscrowRecord>` - The active lock record, or `None` if no lock
+    ///   exists. A missing read does not create a persistent entry.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let lock = client.get_lock_record(&invoice_id);
+    /// ```
+    pub fn get_lock_record(env: Env, invoice_id: BytesN<32>) -> Option<EscrowRecord> {
+        let key = DataKey::Locked(invoice_id);
+        match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+            Some(record) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some(record)
+            }
+            None => None,
+        }
+    }
+
     /// Returns the amount of USDC currently locked against an invoice.
     ///
     /// # Arguments
@@ -983,6 +1024,28 @@ impl EscrowContract {
             }
             None => 0,
         }
+    }
+
+    fn min_lock_seconds(env: &Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinLockSeconds)
+            .unwrap_or(DEFAULT_MIN_LOCK_SECONDS)
+    }
+
+    /// Returns the first timestamp at which the minimum lock no longer blocks
+    /// default handling. Returns `None` when there is no active escrow.
+    /// Fails with `MathOverflow` if the expiration cannot fit in a `u64`.
+    pub fn get_lock_expiration(env: Env, invoice_id: BytesN<32>) -> Option<u64> {
+        let key = DataKey::Locked(invoice_id);
+        let storage = env.storage().persistent();
+        let record: EscrowRecord = storage.get(&key)?;
+        let expiration = record
+            .locked_at
+            .checked_add(Self::min_lock_seconds(&env))
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::MathOverflow));
+        storage.extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Some(expiration)
     }
 
     /// Returns the ledger sequence when the escrow was locked for an invoice.
@@ -1098,6 +1161,26 @@ impl EscrowContract {
             }
             None => Vec::new(&env),
         }
+    }
+
+    /// Reads up to 100 escrow events in append order, starting at `offset`.
+    /// Returns the matching events and the total number of stored events.
+    /// A limit outside 1–100 fails with `InvalidConfig`.
+    pub fn get_history_page(
+        env: Env,
+        invoice_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<EscrowEvent>, u32) {
+        if !(1..=100).contains(&limit) {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+
+        let history = Self::get_history(env, invoice_id);
+        let total = history.len();
+        let start = offset.min(total);
+        let end = start.saturating_add(limit).min(total);
+        (history.slice(start..end), total)
     }
 
     fn append_history(
