@@ -498,6 +498,26 @@ When an invoice is repaid early via `receive_repayment_with_refund()`, part of t
 
 ---
 
+### `share_price_updated`
+
+Emitted by the pool when a successful repayment credits non-zero LP yield and therefore changes the value of one LP share (issue #1171). It lets indexers track realised-yield repricing without replaying every settlement.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"share_price_updated"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID whose repayment moved the price |
+| **Data** | `(u128, u128)` | `(old_price, new_price)`, both 18-decimal fixed-point values |
+
+- Both prices are `TotalDeposits / TotalShares` scaled by `SHARE_PRICE_SCALE` (`1_000_000_000_000_000_000` = 1.0), matching the `get_share_price()` view. For example, `1_050_000_000_000_000_000` represents 1.05 funding-asset base units of value per share.
+- Only the LP yield slice is priced: protocol fee cuts and buyer refunds are excluded. Failed settlements revert and emit nothing; exact-funded or fully-refunded repayments with zero LP yield emit no price event.
+- The event is published immediately before `repayment_received`, so the canonical settlement event remains the last pool event of the invocation.
+
+**Emitted by:** `settle_repayment()` called by `receive_repayment()` and `receive_repayment_with_refund()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:91`
+
+---
+
 ### `invoice_defaulted`
 
 Emitted when the pool handles a defaulted invoice via `handle_default()`. Topics index the event name and the defaulted `invoice_id`. The data payload is the defaulted funded principal (`funded_amount`).
@@ -1128,7 +1148,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 2. **Use topics for filtering** — `topic[0]` is always the event name (Symbol)
 3. **Data decoding** — payloads use Soroban SDK xdr encoding; decode based on the schemas above
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
-5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `invoice_defaulted` tracks defaulted funded principal
+5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `share_price_updated` tracks the 1e18 fixed-point LP share price before and after a yield-bearing repayment; `invoice_defaulted` tracks defaulted funded principal
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`
 7. **Batch events** — `batch_invoices_created` and `batch_invoices_listed` are summary events emitted after the per-invoice events of the same call. `pool::batch_fund_invoice` has no summary event; reconcile it from the individual `invoice_funded` events instead, which is also what tells you which entries a capacity stop skipped.
 
