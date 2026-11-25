@@ -299,6 +299,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `set_escrow_contract` | `set_escrow_contract(escrow_contract: Address) -> ()` |
 | Invoice | `get_escrow_contract` | `get_escrow_contract() -> Option<Address>` |
 | Invoice | `get_attestation` | `get_attestation(invoice_id: BytesN<32>) -> Option<Attestation>` |
+| Invoice | `get_attestation_evidence_hash` | `get_attestation_evidence_hash(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `add_supported_asset` | `add_supported_asset(asset: Address) -> ()` |
 | Invoice | `remove_supported_asset` | `remove_supported_asset(asset: Address) -> ()` |
 | Invoice | `is_supported_asset` | `is_supported_asset(asset: Address) -> bool` |
@@ -325,6 +326,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_default_grace_seconds` | `get_default_grace_seconds() -> u64` |
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
+| Invoice | `get_listing_expiry_preview` | `get_listing_expiry_preview(invoice_id: BytesN<32>) -> ListingExpiryPreview` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
 | Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
 | Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
@@ -338,6 +340,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
 | Invoice | `get_settlement_summary` | `get_settlement_summary(invoice_id: BytesN<32>) -> SettlementSummary` |
+| Invoice | `get_funding_eligibility` | `get_funding_eligibility(invoice_id: BytesN<32>) -> InvoiceFundingEligibility` |
+| Invoice | `get_repayment_eligibility` | `get_repayment_eligibility(invoice_id: BytesN<32>, caller: Address) -> RepaymentEligibility` |
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
@@ -446,7 +450,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 185 public entry points across five deployable contracts.**
+**Total: 189 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
