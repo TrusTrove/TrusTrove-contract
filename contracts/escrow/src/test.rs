@@ -3651,3 +3651,126 @@ fn test_release_authorization_is_read_only() {
     assert_eq!(client.get_locked(&invoice_id), amount);
     assert_eq!(client.get_history(&invoice_id), history_before);
 }
+
+// ============================================================================
+// get_history_count (issue #1195)
+// ============================================================================
+
+#[test]
+fn test_get_history_count_returns_zero_for_missing_history() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1201);
+    let contract_id = client.address.clone();
+    let key = DataKey::History(invoice_id.clone());
+
+    // Verify key does not exist before query
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+
+    // Missing history returns 0
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+
+    // Missing history view call does not materialize storage
+    assert!(!env.as_contract(&contract_id, || env.storage().persistent().has(&key)));
+}
+
+#[test]
+fn test_get_history_count_increments_with_events_and_persists_after_lock_removed() {
+    let (env, client, _admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1202);
+    let amount: u128 = 1_000_000_000;
+
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+
+    // 1. Lock invoice -> 1 event
+    client.lock(&invoice_id, &amount, &issuer);
+    assert_eq!(client.get_history_count(&invoice_id), 1);
+    assert_eq!(
+        client.get_history_count(&invoice_id),
+        client.get_history(&invoice_id).len()
+    );
+
+    // 2. Release to issuer -> 2 events; lock record is removed
+    client.release_to_issuer(&invoice_id, &issuer);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+    assert!(!client.has_lock(&invoice_id));
+
+    // Entry count is preserved after active lock is removed
+    assert_eq!(client.get_history_count(&invoice_id), 2);
+    assert_eq!(
+        client.get_history_count(&invoice_id),
+        client.get_history(&invoice_id).len()
+    );
+
+    // 3. Partial repayment on another invoice to test multiple events and residual
+    let invoice_id_2 = generate_invoice_id(&env, 1203);
+    client.lock(&invoice_id_2, &amount, &issuer);
+    assert_eq!(client.get_history_count(&invoice_id_2), 1);
+
+    client.release_to_pool(&invoice_id_2, &(amount / 2));
+    assert_eq!(client.get_history_count(&invoice_id_2), 2);
+
+    client.release_to_pool(&invoice_id_2, &(amount / 2));
+    assert_eq!(client.get_history_count(&invoice_id_2), 3);
+    assert_eq!(client.get_locked(&invoice_id_2), 0);
+    assert_eq!(client.get_history_count(&invoice_id_2), 3);
+
+    // 4. Default handled scenario -> lock removed
+    let invoice_id_3 = generate_invoice_id(&env, 1204);
+    client.lock(&invoice_id_3, &amount, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&invoice_id_3, &pool));
+    assert_eq!(client.get_locked(&invoice_id_3), 0);
+    assert_eq!(client.get_history_count(&invoice_id_3), 2);
+}
+
+#[test]
+fn test_get_history_count_extends_ttl() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1205);
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    let key = DataKey::History(invoice_id.clone());
+    let ttl_before = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+
+    let count = client.get_history_count(&invoice_id);
+    assert_eq!(count, 1);
+
+    let ttl_after = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
+    assert!(
+        ttl_after >= ttl_before,
+        "get_history_count should extend TTL: before={ttl_before}, after={ttl_after}"
+    );
+}
+
+#[test]
+fn test_get_history_count_authorization_and_idempotency() {
+    // Auth: test without mocked auths to ensure view does not require caller auth
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup_without_auths();
+    let invoice_id = generate_invoice_id(&env, 1206);
+
+    // Calling on missing history requires no auth
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+    assert!(env.auths().is_empty());
+
+    // Lock requires auth, so try_lock fails
+    assert!(client.try_lock(&invoice_id, &1_000_000, &issuer).is_err());
+    // Missing history remains 0 and idempotent
+    assert_eq!(client.get_history_count(&invoice_id), 0);
+
+    // Now populate with auths in a standard setup
+    let (env2, client2, _admin, _pool, issuer2, _usdc_id) = setup();
+    let invoice_id2 = generate_invoice_id(&env2, 1207);
+    client2.lock(&invoice_id2, &500_000, &issuer2);
+
+    // Idempotency: repeated calls produce identical results without side effects
+    let count1 = client2.get_history_count(&invoice_id2);
+    let count2 = client2.get_history_count(&invoice_id2);
+    assert_eq!(count1, 1);
+    assert_eq!(count2, 1);
+
+    // View is callable while paused
+    client2.pause();
+    assert_eq!(client2.get_history_count(&invoice_id2), 1);
+    client2.unpause();
+    assert_eq!(client2.get_history_count(&invoice_id2), 1);
+}
