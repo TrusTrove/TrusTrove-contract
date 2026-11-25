@@ -337,8 +337,15 @@ pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 get_lock_record(invoice_id) → Option<EscrowRecord>
 get_lock_expiration(invoice_id) → Option<u64>
+get_custody_coverage(invoice_id) → CustodyCoverage   ← preflight only, no transfer or storage write (#1298)
+get_last_release_recipient(invoice_id) → Option<Address>   ← most recent successful release/default (#1296)
+get_min_lock_amount() → u128
 get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
+
+`set_min_lock_amount(min_amount)` is admin-only and applies to future `lock`
+calls (#1297); the default `0` preserves the previous non-zero-amount rule, and
+locks created earlier remain releasable.
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
@@ -530,6 +537,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `handle_default` | `handle_default(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Escrow | `set_timeout_window` | `set_timeout_window(window: u64) -> ()` |
 | Escrow | `get_timeout_window` | `get_timeout_window() -> u64` |
+| Escrow | `set_min_lock_amount` | `set_min_lock_amount(min_amount: u128) -> ()` |
+| Escrow | `get_min_lock_amount` | `get_min_lock_amount() -> u128` |
+| Escrow | `get_last_release_recipient` | `get_last_release_recipient(invoice_id: BytesN<32>) -> Option<Address>` |
+| Escrow | `get_custody_coverage` | `get_custody_coverage(invoice_id: BytesN<32>) -> CustodyCoverage` |
 | Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
@@ -607,7 +618,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 211 public entry points across five deployable contracts.**
+**Total: 215 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
