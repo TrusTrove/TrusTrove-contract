@@ -642,6 +642,25 @@ nothing.
 
 ---
 
+### `issuer_concentration_updated`
+
+Emitted when the admin changes the per-issuer active funded exposure cap that
+`fund_invoice` enforces, via `set_issuer_concentration_limit` (issue #1182).
+Like `max_maturity_updated`, the old value is included so an indexer can
+report what changed rather than only what it changed to. `0` means disabled.
+A rejected call (non-admin caller, or a negative cap) emits nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"issuer_concentration_updated"` |
+| **Data** | `(i128, i128)` | `(old_cap, new_cap)` — funding-asset base units; `0` disables the limit |
+
+**Emitted by:** `set_issuer_concentration_limit()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:212`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.

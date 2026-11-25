@@ -1321,6 +1321,12 @@ impl PoolContract {
     ///   An invoice exactly at the maximum is accepted. The maximum defaults
     ///   to 0 (unrestricted), where the check and its extra invoice read are
     ///   skipped (issue #1184).
+    /// * `IssuerConcentrationExceeded` if funding would push the invoice
+    ///   issuer's active funded exposure above the admin-configured
+    ///   per-issuer cap (`DataKey::IssuerConcentrationLimit`, set via
+    ///   `set_issuer_concentration_limit`). An amount landing exactly on the
+    ///   cap is accepted; the cap defaults to 0 (disabled), where the check
+    ///   is skipped (issue #1182).
     ///
     /// # Returns
     /// * `bool` - `true` when the invoice is funded.
@@ -1340,10 +1346,11 @@ impl PoolContract {
     /// Shared body of [`Self::fund_invoice`] and [`Self::batch_fund_invoice`].
     ///
     /// When `stop_on_capacity` is `true` (batch mode), a shortfall in available
-    /// liquidity or a utilization-cap breach returns `false` instead of
-    /// panicking so the caller can stop cleanly. All eligibility failures (not
-    /// listed, already funded, unverified issuer/buyer, asset mismatch) panic in
-    /// both modes — those are caller errors, not capacity.
+    /// liquidity, a utilization-cap breach, or an issuer-concentration-cap
+    /// breach returns `false` instead of panicking so the caller can stop
+    /// cleanly. All eligibility failures (not listed, already funded,
+    /// unverified issuer/buyer, asset mismatch) panic in both modes — those
+    /// are caller errors, not capacity.
     fn fund_one(env: Env, invoice_id: BytesN<32>, stop_on_capacity: bool) -> bool {
         let invoice_contract = Self::invoice_contract(&env)
             .unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
@@ -1486,6 +1493,35 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::UtilizationCapExceeded);
         }
 
+        // Admin-set per-issuer concentration cap (issue #1182): reject funding
+        // that would push this issuer's active funded exposure past the cap.
+        // Like the utilization cap it limits how much pool capital may be
+        // deployed, so batch funding stops instead of reverting, while a
+        // single `fund_invoice` raises the typed error. The check runs before
+        // any state is written, so a rejected attempt leaves exposure,
+        // `TotalFunded`, the active count and the funded entry untouched; an
+        // amount landing exactly on the cap is accepted. While the cap is at
+        // its default of 0 (disabled) the persistent exposure read is skipped
+        // entirely, so funding an invoice with the feature off costs no extra
+        // storage read.
+        let issuer_concentration_limit: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::IssuerConcentrationLimit)
+            .unwrap_or(0i128);
+        if issuer_concentration_limit > 0 {
+            let current_exposure = Self::issuer_exposure(&env, &canonical_issuer);
+            let funded_amount_i = i128::try_from(funded_amount)
+                .unwrap_or_else(|_| panic_with_error!(&env, PoolError::Overflow));
+            // saturating: an amount that cannot fit in i128 exceeds any cap.
+            if current_exposure.saturating_add(funded_amount_i) > issuer_concentration_limit {
+                if stop_on_capacity {
+                    return false;
+                }
+                panic_with_error!(&env, PoolError::IssuerConcentrationExceeded);
+            }
+        }
+
         // --- Checks-effects-interactions: commit pool state BEFORE any
         // cross-contract calls so a reentrant callback into this contract
         // always sees the updated TotalFunded / ActiveInvoiceCount /
@@ -1518,6 +1554,37 @@ impl PoolContract {
         env.storage()
             .persistent()
             .extend_ttl(&buyer_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        // Book this issuer's active funded exposure and snapshot the issuer
+        // for its release (issue #1182). Tracking is unconditional — even
+        // while the cap is disabled — so `get_issuer_exposure` always reports
+        // the exposure actually outstanding and settlement always balances
+        // it. The snapshot exists because settlement and default handling
+        // both run with the invoice contract on the invocation stack, so the
+        // issuer cannot be resolved then (same no-re-entry constraint as the
+        // buyer snapshot above, #969).
+        let exposure_key = DataKey::IssuerExposure(canonical_issuer.clone());
+        let exposure: i128 = env
+            .storage()
+            .persistent()
+            .get(&exposure_key)
+            .unwrap_or(0i128);
+        let funded_amount_i = i128::try_from(funded_amount)
+            .unwrap_or_else(|_| panic_with_error!(&env, PoolError::Overflow));
+        env.storage()
+            .persistent()
+            .set(&exposure_key, &(exposure.saturating_add(funded_amount_i)));
+        env.storage()
+            .persistent()
+            .extend_ttl(&exposure_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let issuer_key = DataKey::FundedInvoiceIssuer(invoice_id.clone());
+        env.storage()
+            .persistent()
+            .set(&issuer_key, &canonical_issuer);
+        env.storage()
+            .persistent()
+            .extend_ttl(&issuer_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
         // --- Interactions: cross-contract calls after pool state is committed.
         let escrow_contract = Self::escrow_contract(&env)
@@ -1571,11 +1638,13 @@ impl PoolContract {
     /// # Capacity handling
     ///
     /// When the next entry cannot be funded **because the pool lacks capacity**
-    /// — insufficient available liquidity, or a resulting utilization rate above
-    /// `max_utilization_bps` — funding **stops** and every remaining entry is
-    /// left untouched. This deliberately never partially drains the pool: an
-    /// entry that would breach the cap is not funded in part, and no entry after
-    /// it is funded either.
+    /// — insufficient available liquidity, a resulting utilization rate above
+    /// `max_utilization_bps`, or an issuer's active funded exposure above the
+    /// per-issuer concentration cap (`get_issuer_concentration_limit`) —
+    /// funding **stops** and every remaining entry is left untouched. This
+    /// deliberately never partially drains the pool: an entry that would
+    /// breach the cap is not funded in part, and no entry after it is funded
+    /// either.
     ///
     /// Entries that fail an *eligibility* check (not listed, already funded by
     /// this pool, unverified issuer/buyer, asset mismatch, a discount below
@@ -2007,6 +2076,11 @@ impl PoolContract {
             .set(&DataKey::ActiveInvoiceCount, &new_active_count);
 
         env.storage().persistent().remove(&funded_key);
+        // Release this issuer's concentration capacity (issue #1182): a
+        // defaulted invoice is no longer active funded exposure, so the cap
+        // must not keep counting it against the issuer. Saturates at 0 and
+        // is a no-op for invoices funded before the issuer snapshot existed.
+        Self::release_issuer_exposure(&env, &invoice_id, funded_amount);
 
         events::invoice_defaulted(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
@@ -2741,6 +2815,106 @@ impl PoolContract {
             .unwrap_or(0u32)
     }
 
+    /// Sets the optional per-issuer concentration limit: the maximum active
+    /// funded exposure one issuer may carry in this pool (issue #1182).
+    ///
+    /// Authorization mirrors `set_min_discount`: the *stored* admin must
+    /// sign; the `cap` argument is the new limit, not an actor, so a caller
+    /// can never self-authorize past the check. `0` (the default, and the
+    /// state of every instance predating this feature) disables the check
+    /// entirely, leaving funding behavior unchanged until an admin opts in.
+    /// The value is a single pool-wide cap applied per issuer, matching the
+    /// convention of the other admin-set funding policies
+    /// (`set_min_discount`, `set_max_time_to_maturity`): one instance-storage
+    /// key, no per-issuer override.
+    ///
+    /// When the cap is positive, `fund_invoice` and `batch_fund_invoice`
+    /// reject a funding that would make
+    /// `current_exposure + funded_amount > cap` with
+    /// `PoolError::IssuerConcentrationExceeded` (a batch entry stops the
+    /// batch instead, as a capacity shortfall); an amount landing exactly on
+    /// the cap is accepted. Exposure is tracked per issuer across funding
+    /// and is released again when the invoice settles or defaults, so
+    /// capacity is freed for that issuer either way.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `cap` - The new per-issuer cap in funding-asset base units. `0`
+    ///   removes the limit.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidAmount` if `cap` is negative — the limit is an amount and
+    ///   can only be disabled with `0`, never with a negative value.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the cap is updated. Emits
+    ///   `issuer_concentration_updated(old_cap, new_cap)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Never deploy more than 500 USDC to a single issuer.
+    /// client.set_issuer_concentration_limit(&(500 * 10_000_000));
+    /// ```
+    pub fn set_issuer_concentration_limit(env: Env, cap: i128) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        if cap < 0 {
+            panic_with_error!(&env, PoolError::InvalidAmount);
+        }
+        let old_cap = env
+            .storage()
+            .instance()
+            .get(&DataKey::IssuerConcentrationLimit)
+            .unwrap_or(0i128);
+        env.storage()
+            .instance()
+            .set(&DataKey::IssuerConcentrationLimit, &cap);
+        events::issuer_concentration_updated(&env, old_cap, cap);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the per-issuer active funded exposure cap in funding-asset
+    /// base units. Defaults to `0` (disabled) when never set, so instances
+    /// predating issue #1182 keep their behavior (mirrors
+    /// `get_min_discount_bps`).
+    pub fn get_issuer_concentration_limit(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::IssuerConcentrationLimit)
+            .unwrap_or(0i128)
+    }
+
+    /// Returns `issuer`'s current active funded exposure in this pool, in
+    /// funding-asset base units (issue #1182).
+    ///
+    /// The exposure grows by each funded amount at `fund_invoice` time and
+    /// shrinks — saturating at `0` — when an invoice of that issuer is
+    /// repaid or defaults, so it only ever counts invoices still outstanding.
+    /// An issuer with no live funding, and every issuer on an instance that
+    /// predates this feature, reads `0`. This is the value the
+    /// concentration-limit check compares against
+    /// `get_issuer_concentration_limit`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `issuer` - The issuer address to query.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Returns
+    /// * `i128` - The issuer's active funded exposure; `0` when none.
+    pub fn get_issuer_exposure(env: Env, issuer: Address) -> i128 {
+        Self::issuer_exposure(&env, &issuer)
+    }
+
     /// Returns the pool's contract references and funding policy in one
     /// read-only snapshot (issue #1188).
     ///
@@ -2842,6 +3016,54 @@ impl PoolContract {
             .persistent()
             .extend_ttl(key, TTL_THRESHOLD, TTL_EXTEND_TO);
         updated
+    }
+
+    /// Reads one issuer's active funded exposure (issue #1182). A missing
+    /// key reads as `0`, so issuers with no live funding — and every issuer
+    /// on an instance that predates the key — report no exposure.
+    fn issuer_exposure(env: &Env, issuer: &Address) -> i128 {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuerExposure(issuer.clone()))
+            .unwrap_or(0i128)
+    }
+
+    /// Releases the concentration capacity of an invoice's issuer when that
+    /// invoice settles or defaults (issue #1182).
+    ///
+    /// Reads the issuer from the snapshot `fund_invoice` wrote
+    /// (`DataKey::FundedInvoiceIssuer`) rather than asking the invoice
+    /// contract: the invoice is the active caller during both repayment and
+    /// default handling, so resolving it there would trip Soroban's
+    /// no-re-entry rule (the constraint behind `FundedInvoiceBuyer`, #969).
+    /// An invoice funded before the snapshot existed has no tracked exposure,
+    /// so for it the release skips entirely. The subtraction saturates at
+    /// `0`: a release can never underflow the counter or hand back more
+    /// capacity than was booked.
+    fn release_issuer_exposure(env: &Env, invoice_id: &BytesN<32>, amount: u128) {
+        let issuer_key = DataKey::FundedInvoiceIssuer(invoice_id.clone());
+        let issuer: Address = match env.storage().persistent().get(&issuer_key) {
+            Some(issuer) => issuer,
+            None => return,
+        };
+        let exposure_key = DataKey::IssuerExposure(issuer);
+        let current: i128 = env
+            .storage()
+            .persistent()
+            .get(&exposure_key)
+            .unwrap_or(0i128);
+        // `amount` is a funded principal, which always fits an i128 (the
+        // funding path's checked `u128` scaling bounds it well below
+        // `i128::MAX`); saturate anyway so an absurd input can only ever
+        // zero the counter, never abort settlement.
+        let released = i128::try_from(amount).unwrap_or(i128::MAX);
+        env.storage()
+            .persistent()
+            .set(&exposure_key, &(current.saturating_sub(released)));
+        env.storage()
+            .persistent()
+            .extend_ttl(&exposure_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        env.storage().persistent().remove(&issuer_key);
     }
 
     fn utilization_bps_or_panic(env: &Env, total_funded: u128, total_deposits: u128) -> u32 {
@@ -3185,6 +3407,11 @@ impl PoolContract {
         env.storage()
             .persistent()
             .remove(&DataKey::FundedInvoiceBuyer(invoice_id.clone()));
+        // Release this issuer's concentration capacity (issue #1182): a
+        // repaid invoice is no longer active funded exposure, so its issuer
+        // can fund again up to the cap. Saturates at 0 and is a no-op for
+        // invoices funded before the issuer snapshot existed.
+        Self::release_issuer_exposure(env, invoice_id, funded_amount);
 
         // The share price changed only when LPs actually received yield.
         // Emit ahead of `repayment_received` so indexers that read the last

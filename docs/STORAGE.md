@@ -455,6 +455,7 @@ The `History` vector entries are never removed — they form an append-only log 
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
 | `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 | `MaxTimeToMaturity` | `u64` | Admin-settable maximum remaining time to maturity (`due_date - now`, seconds) accepted by `fund_invoice` for newly funded invoices; `0` means unrestricted (issue #1184) | not set (reads as `0`) |
+| `IssuerConcentrationLimit` | `i128` | Admin-settable per-issuer active funded exposure cap, in `FundingAsset` base units, enforced by `fund_invoice`; `0` disables the check (issue #1182) | not set (reads as `0`) |
 
 ### Persistent Storage
 
@@ -511,6 +512,17 @@ deposit would create it.
 |---------|------|-------------|
 | `FundedInvoice(BytesN<32>)` | `u128` | Funded amount keyed by invoice ID |
 | `FundedInvoiceBuyer(BytesN<32>)` | `Address` | Buyer snapshotted from the invoice contract at funding time (issue #969). `receive_repayment_with_refund` rejects a refund destination that differs from it. Removed together with `FundedInvoice` on settlement. |
+| `FundedInvoiceIssuer(BytesN<32>)` | `Address` | Issuer snapshotted from the invoice's funding context at funding time (issue #1182). Repayment and default handling use it to release the issuer's `IssuerExposure` without re-entering the invoice contract — during both the invoice is the active caller, so `get_issuer` cannot be resolved (the same no-re-entry constraint as the buyer snapshot). Removed together with `FundedInvoice` on settlement. Invoices funded before this key existed have no snapshot and no tracked exposure, so their settlement is a no-op for exposure. |
+
+#### Issuer Exposure Keys (issue #1182)
+
+| DataKey | Type | Description |
+|---------|------|-------------|
+| `IssuerExposure(Address)` | `i128` | Active funded exposure currently attributed to one issuer, in `FundingAsset` base units. Every successful `fund_invoice` adds the funded amount; `receive_repayment` / `receive_repayment_with_refund` and `handle_default` subtract it for the snapshotted issuer, saturating at `0`, so capacity is freed when the invoice settles or defaults. Reads as `0` for issuers with no live funding and on instances predating the key. Persistent rather than instance, like the per-LP position keys: exposure is per-issuer state, not pool-wide config. |
+
+The cap itself (`IssuerConcentrationLimit`, instance storage) is read by the
+funding check and by `get_issuer_concentration_limit`; the exposure keys are
+read by that check and by the `get_issuer_exposure(issuer)` view.
 
 ### Protocol Fee & Yield Distribution Math
 
@@ -527,13 +539,14 @@ $$\text{lp\_yield} = \text{yield\_amount} - \text{protocol\_cut}$$
 
 ### Storage Key Count
 
-**Approximately 8 instance + 3 lifetime counters + (5 × number_of_LPs) + (2 × number_of_funded_invoices).**
+**Approximately 8 instance + 3 lifetime counters + (5 × number_of_LPs) + (3 × number_of_funded_invoices) + (1 × number_of_issuers_funded).**
 
 In practice most pools will have:
 - 8 instance keys (constant)
 - up to 3 persistent lifetime counters (created lazily on first use)
 - 5 keys per active LP
-- 2 keys per funded invoice (removed on repayment/default)
+- 3 keys per funded invoice — `FundedInvoice`, `FundedInvoiceBuyer` and `FundedInvoiceIssuer` (all removed on repayment/default)
+- 1 key per issuer that has been funded (`IssuerExposure`, kept at `0` once all of that issuer's invoices have settled; issue #1182)
 
 ---
 

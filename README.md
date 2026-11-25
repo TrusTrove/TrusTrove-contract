@@ -230,6 +230,9 @@ set_min_discount(bps) → bool               ← admin only, yield floor enforce
 get_min_discount_bps() → u32
 set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted, enforced in fund_invoice (#1184)
 get_max_time_to_maturity() → u64
+set_issuer_concentration_limit(cap) → bool   ← admin only, 0 = disabled, per-issuer exposure cap at funding (#1182)
+get_issuer_concentration_limit() → i128
+get_issuer_exposure(issuer) → i128           ← active funded exposure, released on repayment/default
 get_stats() → PoolStats
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
 get_lp_position(address) → LPPosition
@@ -423,6 +426,9 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
+| Pool | `set_issuer_concentration_limit` | `set_issuer_concentration_limit(cap: i128) -> bool` |
+| Pool | `get_issuer_concentration_limit` | `get_issuer_concentration_limit() -> i128` |
+| Pool | `get_issuer_exposure` | `get_issuer_exposure(issuer: Address) -> i128` |
 | Pool | `get_pool_config` | `get_pool_config() -> PoolConfig` |
 | Pool Factory | `__constructor` | `__constructor(admin: Address) -> ()` |
 | Pool Factory | `register_asset` | `register_asset(asset: Address, pool_wasm_hash: BytesN<32>, invoice_contract: Address, escrow_contract: Address) -> Address` |
@@ -431,7 +437,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 177 public entry points across five deployable contracts.**
+**Total: 180 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -547,6 +553,8 @@ Invoice status: → Repaid
 **Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
 
 **Maximum Time to Maturity (max_time_to_maturity):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap how far out a newly funded invoice may be due via `pool.set_max_time_to_maturity(max_seconds)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose remaining time to maturity (`due_date - now`) exceeds the maximum with `PoolError::MaturityTooLong`. An invoice exactly at the maximum is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded are unaffected by a later change. `pool.get_max_time_to_maturity()` reads the current value (#1184).
+
+**Per-Issuer Concentration Limit (issuer_concentration_limit):** Defaults to 0 (disabled), so funding behavior is unchanged until an admin opts in — with the cap off, one issuer may fund as many invoices as the pool's liquidity and utilization cap allow. The stored admin caps how much active funded exposure a single issuer may carry via `pool.set_issuer_concentration_limit(cap)` (a negative cap is rejected with `PoolError::InvalidAmount`); `fund_invoice` then rejects a funding that would make `current_exposure + funded_amount > cap` with `PoolError::IssuerConcentrationExceeded`, while an amount landing exactly on the cap is accepted. The cap is a single pool-wide value applied per issuer, matching the other admin-set funding policies. Exposure is tracked per issuer: it grows at funding, and is released again — saturating at 0 — when that issuer's invoice is repaid or defaults, so capacity is freed for the issuer either way. In `batch_fund_invoice` a breach is treated as a capacity shortfall: the batch stops at that entry instead of reverting. `pool.get_issuer_concentration_limit()` reads the cap and `pool.get_issuer_exposure(issuer)` reads an issuer's current exposure; the setter emits `issuer_concentration_updated(old, new)` (#1182).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 

@@ -202,3 +202,16 @@ pub fn max_maturity_updated(env: &Env, old_max_seconds: u64, new_max_seconds: u6
         (old_max_seconds, new_max_seconds),
     );
 }
+
+/// Emitted by `set_issuer_concentration_limit` when the admin changes the
+/// per-issuer active funded exposure cap enforced at funding (issue #1182).
+/// Like `max_maturity_updated`, it carries the old value as well as the new
+/// one; `0` means disabled. A rejected change (non-admin caller or a
+/// negative cap) emits nothing. The name stays within Soroban's 32-character
+/// symbol limit (`issuer_concentration_limit_updated` would be 34).
+pub fn issuer_concentration_updated(env: &Env, old_cap: i128, new_cap: i128) {
+    env.events().publish(
+        (Symbol::new(env, "issuer_concentration_updated"),),
+        (old_cap, new_cap),
+    );
+}
