@@ -137,6 +137,10 @@ pub enum DataKey {
     /// Active metadata key policy (#1120); see [`MetadataKeyPolicy`]. Absent
     /// means [`MetadataKeyPolicy::Unrestricted`].
     MetadataKeyPolicy,
+    /// Operator-supplied SHA-256 reason hash recorded on revocation (#1118).
+    /// Stored separately from [`Profile`] so existing profile storage
+    /// decoding is preserved and no personal information is placed on chain.
+    RevocationReasonHash(Address),
 }
 
 /// A proposed admin change waiting out its delay (#1124).

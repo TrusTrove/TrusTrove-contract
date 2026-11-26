@@ -4495,3 +4495,92 @@ fn test_get_metadata_key_count_not_found_panics() {
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());
 }
+
+#[test]
+fn test_revoke_with_reason_records_hash_and_emits_events() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    client.verify_profile(&admin, &issuer, &true);
+    assert!(client.is_verified(&issuer));
+    assert_eq!(client.get_revocation_reason_hash(&issuer), None);
+
+    let reason_hash = soroban_sdk::BytesN::from_array(&env, &[0xAB; 32]);
+    assert!(client.revoke_with_reason(&issuer, &reason_hash));
+
+    let events = env.events().all();
+    let has_reason_event = events.iter().any(|(_, topics, data)| {
+        topics.len() == 2
+            && soroban_sdk::Symbol::try_from_val(&env, &topics.get_unchecked(0))
+                == Ok(soroban_sdk::Symbol::new(&env, "revocation_reason_recorded"))
+            && soroban_sdk::BytesN::<32>::try_from_val(&env, &data) == Ok(reason_hash.clone())
+    });
+    assert!(has_reason_event);
+
+    assert!(!client.is_verified(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+    assert_eq!(
+        client.get_revocation_reason_hash(&issuer),
+        Some(reason_hash.clone())
+    );
+}
+
+#[test]
+#[should_panic]
+fn test_revoke_with_reason_wrong_auth_panics() {
+    let env = Env::default();
+    let admin = Address::generate(&env);
+    let contract_id = env.register(RegistryContract, (&admin,));
+    let client = RegistryContractClient::new(&env, &contract_id);
+
+    let issuer = Address::generate(&env);
+    env.mock_all_auths();
+    client.register_issuer(&issuer, &map![&env]);
+
+    let non_admin = Address::generate(&env);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &contract_id,
+            fn_name: "revoke_with_reason",
+            args: (&issuer, soroban_sdk::BytesN::from_array(&env, &[1u8; 32])).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    let reason_hash = soroban_sdk::BytesN::from_array(&env, &[1u8; 32]);
+    client.revoke_with_reason(&issuer, &reason_hash);
+}
+
+#[test]
+fn test_revoke_with_reason_not_found_panics() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let reason_hash = soroban_sdk::BytesN::from_array(&env, &[0xCD; 32]);
+    let err = client
+        .try_revoke_with_reason(&unknown, &reason_hash)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+}
+
+#[test]
+fn test_revoke_with_reason_idempotent_on_already_revoked() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+    assert!(client.revoke(&issuer));
+
+    let reason_hash = soroban_sdk::BytesN::from_array(&env, &[0xEF; 32]);
+    assert!(client.revoke_with_reason(&issuer, &reason_hash));
+    assert_eq!(
+        client.get_revocation_reason_hash(&issuer),
+        Some(reason_hash)
+    );
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+}

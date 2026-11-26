@@ -952,6 +952,53 @@ impl RegistryContract {
         true
     }
 
+    /// Revokes `address` and records an operator-supplied `reason_hash` (#1118).
+    ///
+    /// Preserves all existing `revoke` verification semantics and storage
+    /// layout: `Profile` is unchanged, while `reason_hash` (e.g. a SHA-256
+    /// digest of off-chain evidence) is stored under
+    /// `DataKey::RevocationReasonHash(address)` so no personal information is
+    /// placed on chain.
+    ///
+    /// Emits `address_revoked(address)` (when transitioning from non-revoked)
+    /// and `revocation_reason_recorded(address, reason_hash)`.
+    ///
+    /// # Auth
+    /// * Requires admin authorization (`DataKey::Admin`) and unfrozen admin.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if `address` is not registered.
+    pub fn revoke_with_reason(env: Env, address: Address, reason_hash: BytesN<32>) -> bool {
+        Self::revoke(env.clone(), address.clone());
+        let reason_key = DataKey::RevocationReasonHash(address.clone());
+        env.storage().persistent().set(&reason_key, &reason_hash);
+        env.storage()
+            .persistent()
+            .extend_ttl(&reason_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::revocation_reason_recorded(&env, &address, &reason_hash);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the operator-supplied revocation reason hash for `address`, if
+    /// one was recorded via `revoke_with_reason`.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    pub fn get_revocation_reason_hash(env: Env, address: Address) -> Option<BytesN<32>> {
+        Self::require_initialized(&env);
+        let reason_key = DataKey::RevocationReasonHash(address);
+        let result: Option<BytesN<32>> = env.storage().persistent().get(&reason_key);
+        if result.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&reason_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+        Self::extend_instance_ttl(&env);
+        result
+    }
+
     /// Reinstates verification for a previously revoked profile.
     ///
     /// This is the admin-only inverse of `revoke`: it flips the profile's
