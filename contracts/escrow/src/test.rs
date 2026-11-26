@@ -4132,3 +4132,202 @@ fn test_custody_coverage_counts_unsolicited_transfers_as_cover() {
     assert_eq!(coverage.token_balance, amount as i128 + 1);
     assert!(coverage.can_release);
 }
+
+// ---- #1201: unexpected-token recovery ----
+
+/// The `soroban_sdk::Error` a typed contract error surfaces as through `try_*`.
+fn escrow_error(code: crate::EscrowError) -> soroban_sdk::Error {
+    soroban_sdk::Error::from_contract_error(code as u32)
+}
+
+/// Registers a stray (non-funding) token and credits `holder` with `amount`.
+fn register_stray_token(env: &Env, holder: &Address, amount: i128) -> Address {
+    let token = env.register(MockToken, ());
+    env.as_contract(&token, || {
+        env.storage()
+            .persistent()
+            .set(&BalanceKey(holder.clone()), &amount);
+    });
+    token
+}
+
+/// Success path: the admin sweeps part of a stray token to the recipient, the
+/// escrow keeps the remainder, and one audit event names admin, token,
+/// recipient and amount.
+#[test]
+fn test_recover_token_sends_stray_token_and_emits_audit_event() {
+    let (env, client, admin, _pool, _issuer, _usdc_id) = setup();
+    let stray = register_stray_token(&env, &client.address, 5_000_000);
+    let to = env.register(MockCaller, ());
+
+    assert!(client.recover_token(&stray, &to, &2_000_000u128));
+    let events = env.events().all();
+
+    assert_last_event_four(
+        &env,
+        &events,
+        "token_recovered",
+        admin,
+        stray.clone(),
+        to.clone(),
+        2_000_000u128,
+    );
+    assert_eq!(get_balance(&env, &stray, &to), 2_000_000);
+    assert_eq!(get_balance(&env, &stray, &client.address), 3_000_000);
+}
+
+/// The funding asset backs every active lock, so it is rejected outright:
+/// the lock, the escrow's USDC balance and the history stay exactly as they
+/// were, whatever amount is requested.
+#[test]
+fn test_recover_token_rejects_funding_asset_and_leaves_locks_untouched() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1201);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+    let to = env.register(MockCaller, ());
+    let escrow_balance = get_balance(&env, &usdc_id, &client.address);
+    let history_before = client.get_history(&invoice_id);
+
+    for requested in [1u128, amount / 2, amount] {
+        assert_eq!(
+            client.try_recover_token(&usdc_id, &to, &requested),
+            Err(Ok(escrow_error(crate::EscrowError::InvalidToken)))
+        );
+    }
+
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(get_balance(&env, &usdc_id, &client.address), escrow_balance);
+    assert_eq!(get_balance(&env, &usdc_id, &to), 0);
+    assert_eq!(client.get_history(&invoice_id), history_before);
+}
+
+/// Recovering an unrelated token while a lock is active reads and writes no
+/// lock state: record, locked amount, ledger and history are unchanged.
+#[test]
+fn test_recover_token_does_not_touch_active_lock() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1202);
+    let amount: u128 = 1_000_000_000;
+    client.lock(&invoice_id, &amount, &issuer);
+    let stray = register_stray_token(&env, &client.address, 7_000_000);
+    let to = env.register(MockCaller, ());
+    let record_before = alloc::format!("{:?}", client.get_lock_record(&invoice_id));
+    let ledger_before = client.get_locked_ledger(&invoice_id);
+    let history_before = client.get_history(&invoice_id);
+    let usdc_before = get_balance(&env, &usdc_id, &client.address);
+
+    client.recover_token(&stray, &to, &7_000_000u128);
+
+    assert_eq!(
+        alloc::format!("{:?}", client.get_lock_record(&invoice_id)),
+        record_before
+    );
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_locked_ledger(&invoice_id), ledger_before);
+    assert_eq!(client.get_history(&invoice_id), history_before);
+    assert_eq!(get_balance(&env, &usdc_id, &client.address), usdc_before);
+    assert_eq!(get_balance(&env, &stray, &client.address), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_recover_token_requires_admin_auth() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup_without_auths();
+    let stray = register_stray_token(&env, &client.address, 1_000);
+    let to = env.register(MockCaller, ());
+    client.recover_token(&stray, &to, &1_000u128);
+}
+
+/// A non-admin signer cannot recover, and nothing moves.
+#[test]
+fn test_recover_token_rejects_non_admin_signer() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let stray = register_stray_token(&env, &client.address, 1_000);
+    let to = env.register(MockCaller, ());
+    let non_admin = env.register(MockCaller, ());
+
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &non_admin,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "recover_token",
+            args: (stray.clone(), to.clone(), 1_000u128).into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(client.try_recover_token(&stray, &to, &1_000u128).is_err());
+    assert_eq!(get_balance(&env, &stray, &client.address), 1_000);
+    assert_eq!(get_balance(&env, &stray, &to), 0);
+}
+
+/// Invalid input: zero and above-`i128::MAX` amounts are `InvalidAmount`.
+#[test]
+fn test_recover_token_rejects_invalid_amounts() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let stray = register_stray_token(&env, &client.address, 1_000);
+    let to = env.register(MockCaller, ());
+
+    assert_eq!(
+        client.try_recover_token(&stray, &to, &0u128),
+        Err(Ok(escrow_error(crate::EscrowError::InvalidAmount)))
+    );
+    assert_eq!(
+        client.try_recover_token(&stray, &to, &(i128::MAX as u128 + 1)),
+        Err(Ok(escrow_error(crate::EscrowError::InvalidAmount)))
+    );
+    assert_eq!(get_balance(&env, &stray, &client.address), 1_000);
+}
+
+/// Invalid input: the escrow cannot be its own recovery recipient.
+#[test]
+fn test_recover_token_rejects_escrow_as_recipient() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let stray = register_stray_token(&env, &client.address, 1_000);
+
+    assert_eq!(
+        client.try_recover_token(&stray, &client.address, &1_000u128),
+        Err(Ok(escrow_error(crate::EscrowError::InvalidRecipient)))
+    );
+}
+
+/// The emergency pause blocks recovery, and it works again after unpause.
+#[test]
+fn test_recover_token_blocked_while_paused() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let stray = register_stray_token(&env, &client.address, 1_000);
+    let to = env.register(MockCaller, ());
+
+    client.pause();
+    assert!(client.try_recover_token(&stray, &to, &1_000u128).is_err());
+    assert_eq!(get_balance(&env, &stray, &to), 0);
+
+    client.unpause();
+    assert!(client.recover_token(&stray, &to, &1_000u128));
+    assert_eq!(get_balance(&env, &stray, &to), 1_000);
+}
+
+/// Boundary and idempotency: the full stray balance can be recovered exactly
+/// once; asking for more than is left reverts with no balance change.
+#[test]
+fn test_recover_token_boundary_full_balance_then_overdraw_reverts() {
+    let (env, client, _admin, _pool, _issuer, _usdc_id) = setup();
+    let strict_token = env.register(strict::StrictMockToken, ());
+    env.as_contract(&strict_token, || {
+        env.storage()
+            .persistent()
+            .set(&BalanceKey(client.address.clone()), &3_000i128);
+    });
+    let to = env.register(MockCaller, ());
+    let token_client = strict::StrictMockTokenClient::new(&env, &strict_token);
+
+    assert!(client.recover_token(&strict_token, &to, &3_000u128));
+    assert_eq!(token_client.balance(&client.address), 0);
+    assert_eq!(token_client.balance(&to), 3_000);
+
+    assert!(client
+        .try_recover_token(&strict_token, &to, &1u128)
+        .is_err());
+    assert_eq!(token_client.balance(&client.address), 0);
+    assert_eq!(token_client.balance(&to), 3_000);
+}

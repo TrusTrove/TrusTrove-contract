@@ -29,6 +29,7 @@ export enum EscrowError {
   TimeoutNotElapsed = 10,
   MathOverflow = 11,
   AmountBelowMinimum = 12,
+  InvalidToken = 13,
 }
 
 export type EscrowAction =
@@ -94,6 +95,7 @@ export interface EscrowClient {
   has_lock(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   lock(args: { invoice_id: BytesN<32>; amount: u128; issuer: Address }): Promise<boolean>;
   pause(): Promise<void>;
+  recover_token(args: { token: Address; to: Address; amount: u128 }): Promise<boolean>;
   release_after_timeout(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   release_to_issuer(args: { invoice_id: BytesN<32>; issuer: Address }): Promise<boolean>;
   release_to_pool(args: { invoice_id: BytesN<32>; repayment_amount: u128 }): Promise<boolean>;
@@ -105,4 +107,4 @@ export interface EscrowClient {
   was_released_to_issuer(args: { invoice_id: BytesN<32> }): Promise<boolean>;
 }
 
-export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_custody_coverage", "get_history", "get_history_count", "get_history_page", "get_invoice_contract", "get_last_release_recipient", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_min_lock_amount", "get_pool_contract", "get_release_authorization", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_min_lock_amount", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;
+export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_custody_coverage", "get_history", "get_history_count", "get_history_page", "get_invoice_contract", "get_last_release_recipient", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_min_lock_amount", "get_pool_contract", "get_release_authorization", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "recover_token", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_min_lock_amount", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;
