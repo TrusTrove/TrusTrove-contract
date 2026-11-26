@@ -138,6 +138,42 @@ jobs:
           [ "$ESCROW" -le "$ESCROW_BUDGET" ] || exit 1
           [ "$POOL" -le "$POOL_BUDGET" ] || exit 1
 
+  migration-fixture:
+    name: storage migration fixture
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # The fixture builds the pull request's base commit, so it needs history.
+          fetch-depth: 0
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: 1.85.0
+          targets: wasm32v1-none
+
+      - name: Ensure wasm32v1-none target
+        run: rustup target add wasm32v1-none --toolchain 1.85.0
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Run storage migration fixture
+        env:
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          base="${PR_BASE_SHA:-}"
+          if [ -z "$base" ]; then
+            base="${PUSH_BEFORE_SHA:-}"
+          fi
+          case "$base" in
+            ''|0000000000000000000000000000000000000000) base="HEAD~1" ;;
+          esac
+          bash scripts/migration_fixture.sh --base-ref "$base"
+        shell: bash
+
   coverage:
     name: coverage
     runs-on: ubuntu-24.04
