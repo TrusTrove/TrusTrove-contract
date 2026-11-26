@@ -9679,6 +9679,248 @@ fn test_set_max_time_to_maturity_emits_event_with_old_and_new_values() {
     assert_eq!(te.pool.get_max_time_to_maturity(), ONE_DAY);
 }
 
+// ---------------------------------------------------------------------------
+//  ISSUE #1183: ADMIN-SETTABLE MINIMUM TIME TO MATURITY
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_min_time_to_maturity_defaults_to_unrestricted() {
+    let te = setup();
+    assert_eq!(te.pool.get_min_time_to_maturity(), 0);
+
+    // With no minimum, an invoice due within the hour still funds, proving
+    // pre-#1183 behaviour is unchanged.
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 60);
+    assert!(te.pool.fund_invoice(&invoice_id));
+    assert_eq!(te.pool.get_min_time_to_maturity(), 0);
+}
+
+#[test]
+fn test_fund_invoice_at_min_time_to_maturity_boundary_accepted() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_time_to_maturity(&(30 * ONE_DAY));
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+    assert_eq!(te.pool.get_min_time_to_maturity(), 30 * ONE_DAY);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_fund_invoice_one_second_below_min_time_to_maturity_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_time_to_maturity(&(30 * ONE_DAY));
+
+    let invoice_id = create_and_list_with_params_and_term(
+        &te,
+        &te.usdc_id,
+        10_000_000_000,
+        200,
+        30 * ONE_DAY - 1,
+    );
+    te.pool.fund_invoice(&invoice_id);
+}
+
+/// An invoice that has already matured reports 0 remaining seconds, which is
+/// below any non-zero minimum, so the same comparison rejects it.
+#[test]
+fn test_fund_invoice_already_matured_rejected_and_state_unchanged() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_time_to_maturity(&ONE_DAY);
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 2 * ONE_DAY);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 2 * ONE_DAY);
+
+    let stats_before = te.pool.get_stats();
+    assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
+    assert_eq!(te.pool.get_funded_amount(&invoice_id), None);
+
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_funded, stats_before.total_funded);
+    assert_eq!(
+        stats_after.active_invoice_count,
+        stats_before.active_invoice_count
+    );
+    assert_eq!(
+        stats_after.available_liquidity,
+        stats_before.available_liquidity
+    );
+}
+
+/// The minimum is measured from the current ledger time, so an invoice that
+/// is too close to maturity when listed becomes fundable once enough time
+/// has passed for it to clear the window.
+#[test]
+fn test_min_time_to_maturity_uses_remaining_time() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_time_to_maturity(&ONE_DAY);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 3 * ONE_DAY);
+    assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
+
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 2 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+/// A short-dated invoice is an eligibility failure, not a capacity
+/// shortfall, so batch funding reverts instead of stopping silently.
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_batch_fund_invoice_below_min_time_to_maturity_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_time_to_maturity(&ONE_DAY);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, ONE_DAY / 2);
+    let ids = vec![&te.env, invoice_id];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+/// A funding attempt rejected by the minimum must leave every pre-existing
+/// position exactly as it was: the already-funded invoice keeps its entry,
+/// the pool totals and the LP position are untouched, and the rejected
+/// invoice records nothing.
+#[test]
+fn test_failed_funding_preserves_existing_positions() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let funded =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&funded));
+    let funded_amount = te.pool.get_funded_amount(&funded).unwrap();
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
+    te.pool.set_min_time_to_maturity(&(30 * ONE_DAY));
+    let rejected =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, ONE_DAY);
+    assert!(te.pool.try_fund_invoice(&rejected).is_err());
+
+    // Existing funding, totals and the LP position are completely unaltered.
+    assert_eq!(te.pool.get_funded_amount(&funded), Some(funded_amount));
+    assert_eq!(te.pool.get_funded_amount(&rejected), None);
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_funded, stats_before.total_funded);
+    assert_eq!(
+        stats_after.active_invoice_count,
+        stats_before.active_invoice_count
+    );
+    assert_eq!(
+        stats_after.available_liquidity,
+        stats_before.available_liquidity
+    );
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(position_after.usdc_value, position_before.usdc_value);
+    assert_eq!(position_after.yield_earned, position_before.yield_earned);
+    assert_eq!(position_after.deposit_count, position_before.deposit_count);
+}
+
+#[test]
+fn test_set_min_time_to_maturity_zero_removes_rule() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_time_to_maturity(&ONE_DAY);
+    te.pool.set_min_time_to_maturity(&0);
+    assert_eq!(te.pool.get_min_time_to_maturity(), 0);
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 60);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_min_time_to_maturity_requires_admin_authorization() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_min_time_to_maturity(&ONE_DAY);
+}
+
+/// Self-authorizing non-admin: only `non_admin` signed the call, so the
+/// stored admin's `require_auth()` rejects it — mirroring the
+/// `set_max_time_to_maturity` negative-auth pattern from #1184.
+#[test]
+fn test_set_min_time_to_maturity_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_min_time_to_maturity",
+            args: (ONE_DAY,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_min_time_to_maturity(&ONE_DAY).is_err());
+    assert_eq!(te.pool.get_min_time_to_maturity(), 0);
+}
+
+#[test]
+fn test_set_min_time_to_maturity_emits_event_with_old_and_new_values() {
+    let te = setup();
+
+    te.pool.set_min_time_to_maturity(&(30 * ONE_DAY));
+    let events = te.env.events().all();
+    // sdk >=22: this buffer holds only the set_min_time_to_maturity call's event.
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "min_maturity_updated")
+    );
+    // setup() leaves the rule at its default 0, so the first change
+    // reports 0 -> 30 days.
+    assert_eq!(
+        <(u64, u64)>::try_from_val(&te.env, &data).unwrap(),
+        (0u64, 30 * ONE_DAY)
+    );
+
+    // A second change reports the value it replaced, not the original one.
+    te.pool.set_min_time_to_maturity(&ONE_DAY);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u64, u64)>::try_from_val(&te.env, &data).unwrap(),
+        (30 * ONE_DAY, ONE_DAY)
+    );
+    assert_eq!(te.pool.get_min_time_to_maturity(), ONE_DAY);
+
+    // A rejected change (non-admin) emits nothing and leaves the stored
+    // minimum at ONE_DAY.
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_min_time_to_maturity",
+            args: (0u64,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_min_time_to_maturity(&0).is_err());
+    assert_eq!(te.env.events().all().len(), 0);
+    assert_eq!(te.pool.get_min_time_to_maturity(), ONE_DAY);
+}
+
 // --------------- Configurable failing invoice (issue #964) ---------------
 //
 // Stand-in for the pool's invoice contract whose individual view methods
