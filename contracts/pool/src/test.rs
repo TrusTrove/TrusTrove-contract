@@ -9689,11 +9689,11 @@ fn test_max_invoice_exposure_defaults_to_unrestricted() {
     let te = setup();
     assert_eq!(te.pool.get_max_invoice_exposure_bps(), 0);
 
-    // With no per-invoice exposure limit, a single invoice consuming 80% of
+    // With no per-invoice exposure limit, a single invoice consuming ~78.4% of
     // pool deposits (below the 85% utilization cap) still funds.
     te.pool.deposit(&te.lp, &100_000_000_000);
     let invoice_id =
-        create_and_list_with_params_and_term(&te, &te.usdc_id, 80_000_000_000, 0, 30 * ONE_DAY);
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 80_000_000_000, 200, 30 * ONE_DAY);
     assert!(te.pool.fund_invoice(&invoice_id));
 }
 
@@ -9703,8 +9703,9 @@ fn test_fund_invoice_at_max_invoice_exposure_boundary_accepted() {
     te.pool.deposit(&te.lp, &100_000_000_000);
     te.pool.set_max_invoice_exposure(&2_500); // 25% -> 25_000_000_000
 
+    // 50_000_000_000 at 5000 bps discount -> funded_amount = 25_000_000_000 (exact boundary).
     let invoice_id =
-        create_and_list_with_params_and_term(&te, &te.usdc_id, 25_000_000_000, 0, 30 * ONE_DAY);
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_000, 5_000, 30 * ONE_DAY);
     assert!(te.pool.fund_invoice(&invoice_id));
 }
 
@@ -9715,10 +9716,11 @@ fn test_fund_invoice_one_stroop_above_max_invoice_exposure_rejected() {
     te.pool.deposit(&te.lp, &100_000_000_000);
     te.pool.set_max_invoice_exposure(&2_500); // 25% -> 25_000_000_000
 
+    // 50_000_000_002 at 5000 bps discount -> funded_amount = 25_000_000_001.
     // Utilization would be ~25% (well below the 85% pool cap), but this single
     // invoice is 1 stroop above the 25% per-invoice exposure limit.
     let invoice_id =
-        create_and_list_with_params_and_term(&te, &te.usdc_id, 25_000_000_001, 0, 30 * ONE_DAY);
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_002, 5_000, 30 * ONE_DAY);
     te.pool.fund_invoice(&invoice_id);
 }
 
@@ -9730,11 +9732,12 @@ fn test_max_invoice_exposure_allows_funding_after_pool_deposits_grow() {
     te.pool.deposit(&te.lp, &60_000_000_000);
     te.pool.set_max_invoice_exposure(&2_500); // 25% of 60B = 15B
 
+    // 20B at 200 bps discount -> funded_amount = 19.6B (> 15B, <= 25B).
     let invoice_id =
-        create_and_list_with_params_and_term(&te, &te.usdc_id, 20_000_000_000, 0, 30 * ONE_DAY);
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 20_000_000_000, 200, 30 * ONE_DAY);
     assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
 
-    // Grow deposits to 100B so 25% = 25B >= 20B.
+    // Grow deposits to 100B so 25% = 25B >= 19.6B.
     te.pool.deposit(&te.lp, &40_000_000_000);
     assert!(te.pool.fund_invoice(&invoice_id));
 }
@@ -9750,7 +9753,7 @@ fn test_batch_fund_invoice_above_max_invoice_exposure_rejected() {
     te.pool.set_max_invoice_exposure(&2_500);
 
     let invoice_id =
-        create_and_list_with_params_and_term(&te, &te.usdc_id, 30_000_000_000, 0, 30 * ONE_DAY);
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 30_000_000_000, 200, 30 * ONE_DAY);
     let ids = vec![&te.env, invoice_id];
     te.pool.batch_fund_invoice(&ids);
 }
@@ -9798,7 +9801,7 @@ fn test_set_max_invoice_exposure_zero_removes_limit() {
     assert_eq!(te.pool.get_max_invoice_exposure_bps(), 0);
 
     let invoice_id =
-        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_000, 0, 30 * ONE_DAY);
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_000, 200, 30 * ONE_DAY);
     assert!(te.pool.fund_invoice(&invoice_id));
 }
 
