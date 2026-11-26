@@ -32,4 +32,8 @@ pub enum EscrowError {
     /// Returned when `lock` is called with a non-zero amount below the
     /// configured minimum lock amount (#1297).
     AmountBelowMinimum = 12,
+    /// Returned when `recover_token` is asked to move the configured funding
+    /// asset. That asset backs every active lock, so it is never recoverable
+    /// through this path.
+    InvalidToken = 13,
 }

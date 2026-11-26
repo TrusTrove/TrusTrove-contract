@@ -123,6 +123,22 @@ pub fn timeout_released(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amou
     );
 }
 
+/// Emitted by `recover_token` when the admin sweeps a stray, non-funding token
+/// out of the escrow. `admin`, `token` and `to` are indexed so an auditor can
+/// filter by who recovered, which asset, and where it went; the data is the
+/// amount moved.
+pub fn token_recovered(env: &Env, admin: &Address, token: &Address, to: &Address, amount: u128) {
+    env.events().publish(
+        (
+            Symbol::new(env, "token_recovered"),
+            admin.clone(),
+            token.clone(),
+            to.clone(),
+        ),
+        amount,
+    );
+}
+
 #[allow(dead_code)]
 pub fn ownership_transferred(env: &Env, old_admin: &Address, new_admin: &Address) {
     env.events().publish(
