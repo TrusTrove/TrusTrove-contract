@@ -176,6 +176,7 @@ get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
+get_amount_due(invoice_id) → u128  ← outstanding now: 0 unless funded and unpaid; unpaid balance after default
 get_financing_terms(invoice_id) → FinancingTerms
 get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
 get_seconds_to_maturity(invoice_id) → i128
@@ -486,6 +487,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_face_value` | `get_face_value(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_remaining_balance` | `get_remaining_balance(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_repaid_amount` | `get_repaid_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_amount_due` | `get_amount_due(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
@@ -607,7 +609,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 211 public entry points across five deployable contracts.**
+**Total: 212 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
