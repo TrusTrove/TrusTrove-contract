@@ -92,6 +92,22 @@ Emitted when either the issuer or buyer confirms delivery.
 
 ---
 
+### `delivery_evidence_recorded`
+
+Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery evidence hash after shipment (issue #1162). Only the hash is published — the delivery documents themselves stay off-chain.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"delivery_evidence_recorded"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Actor (buyer or issuer) that attached the hash |
+| **Data** | `BytesN<32>` | Evidence hash |
+
+**Emitted by:** `record_delivery_evidence()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `both_confirmed`
 
 Emitted when both issuer and buyer have confirmed delivery (invoice advances to Confirmed).

@@ -1929,6 +1929,200 @@ impl InvoiceContract {
         true
     }
 
+    /// Returns the ledger timestamp at which the issuer confirmed delivery.
+    ///
+    /// Set by [`Self::confirm_delivery`] when the issuer confirms, and never
+    /// cleared or overwritten afterwards. Confirmations by the buyer do not
+    /// affect it (issue #1137).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `Option<u64>` - The issuer's confirmation timestamp, or `None` until
+    ///   the issuer has confirmed.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let confirmed_at = client.get_issuer_confirmed_at(&invoice_id);
+    /// ```
+    pub fn get_issuer_confirmed_at(env: Env, invoice_id: BytesN<32>) -> Option<u64> {
+        // Panics with NotFound for unknown invoice ids, like the other
+        // per-invoice views.
+        Self::get_invoice(&env, invoice_id.clone());
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuerConfirmedAt(invoice_id))
+    }
+
+    /// Returns whether the invoice could be defaulted right now, and why not
+    /// when it could not.
+    ///
+    /// The eligibility rule is exactly the one [`Self::trigger_default`]
+    /// enforces: the status must be `Funded`, `Active`, or `Confirmed`, and
+    /// the ledger timestamp must be strictly greater than
+    /// `due_date + default_grace_seconds`. This is a read-only view; it never
+    /// fails on an ineligible invoice, it reports the reason instead
+    /// (issue #1149).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::MathOverflow` if adding the configured grace period to
+    ///   the due date overflows, matching `trigger_default`.
+    ///
+    /// # Returns
+    /// * [`DefaultEligibility`] - `eligible` plus the blocking
+    ///   [`DefaultEligibilityReason`] when it is `false`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let eligibility = client.get_default_eligibility(&invoice_id);
+    /// if eligibility.eligible { client.trigger_default(&invoice_id); }
+    /// ```
+    pub fn get_default_eligibility(env: Env, invoice_id: BytesN<32>) -> DefaultEligibility {
+        let invoice = Self::get_invoice(&env, invoice_id);
+
+        let defaultable_status = invoice.status == InvoiceStatus::Funded
+            || invoice.status == InvoiceStatus::Active
+            || invoice.status == InvoiceStatus::Confirmed;
+        if !defaultable_status {
+            return DefaultEligibility {
+                eligible: false,
+                reason: DefaultEligibilityReason::InvalidStatus,
+            };
+        }
+
+        let grace_seconds: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DefaultGraceSeconds)
+            .unwrap_or(DEFAULT_GRACE_SECONDS);
+        let default_after = invoice
+            .due_date
+            .checked_add(grace_seconds)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+        if env.ledger().timestamp() <= default_after {
+            return DefaultEligibility {
+                eligible: false,
+                reason: DefaultEligibilityReason::DueDateNotPassed,
+            };
+        }
+
+        DefaultEligibility {
+            eligible: true,
+            reason: DefaultEligibilityReason::Eligible,
+        }
+    }
+
+    /// Attaches a 32-byte proof-of-delivery evidence hash to a shipped
+    /// invoice.
+    ///
+    /// Only the hash is recorded on-chain — the delivery documents themselves
+    /// stay off-chain, so participants get a tamper-evident commitment to
+    /// their evidence without exposing its contents (issue #1162).
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The shipped invoice the evidence belongs to.
+    /// * `actor` - The buyer or issuer attaching the hash.
+    /// * `evidence_hash` - 32-byte hash of the delivery evidence. The all-zero
+    ///   hash is rejected as a placeholder.
+    ///
+    /// # Auth
+    /// Requires authorization from `actor`, which must be the invoice's buyer
+    /// or issuer.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    /// * `InvoiceError::NotAuthorized` if `actor` is neither issuer nor buyer.
+    /// * `InvoiceError::InvalidStatusTransition` if the invoice has not been
+    ///   shipped (or is no longer `Active`/`Confirmed`).
+    /// * `InvoiceError::InvalidEvidenceHash` if `evidence_hash` is all zeros.
+    /// * `InvoiceError::EvidenceAlreadyRecorded` if evidence was already
+    ///   attached to this invoice; evidence is write-once.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the hash is recorded.
+    ///
+    /// # Events
+    /// Emits `delivery_evidence_recorded` with topics
+    /// `(invoice_id, actor)` and the hash as data.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.record_delivery_evidence(&invoice_id, &buyer, &evidence_hash);
+    /// ```
+    pub fn record_delivery_evidence(
+        env: Env,
+        invoice_id: BytesN<32>,
+        actor: Address,
+        evidence_hash: BytesN<32>,
+    ) -> bool {
+        require_not_paused(&env);
+        actor.require_auth();
+
+        let invoice = Self::get_invoice(&env, invoice_id.clone());
+        if actor != invoice.issuer && actor != invoice.buyer {
+            panic_with_error!(&env, InvoiceError::NotAuthorized);
+        }
+        // Evidence can only be attached after shipment, i.e. while the
+        // invoice is Active or Confirmed.
+        if invoice.shipped_at.is_none()
+            || (invoice.status != InvoiceStatus::Active
+                && invoice.status != InvoiceStatus::Confirmed)
+        {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+        if evidence_hash == BytesN::from_array(&env, &[0u8; 32]) {
+            panic_with_error!(&env, InvoiceError::InvalidEvidenceHash);
+        }
+
+        let evidence_key = DataKey::DeliveryEvidence(invoice_id.clone());
+        if env.storage().persistent().has(&evidence_key) {
+            panic_with_error!(&env, InvoiceError::EvidenceAlreadyRecorded);
+        }
+        env.storage()
+            .persistent()
+            .set(&evidence_key, &evidence_hash);
+        bump_persistent(&env, &evidence_key);
+        Self::extend_instance_ttl(&env);
+
+        events::delivery_evidence_recorded(&env, &invoice_id, &actor, &evidence_hash);
+        true
+    }
+
+    /// Returns the proof-of-delivery evidence hash attached to an invoice.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Panics
+    /// * `InvoiceError::NotFound` if the invoice cannot be found.
+    ///
+    /// # Returns
+    /// * `Option<BytesN<32>>` - The evidence hash, or `None` until one is
+    ///   attached with [`Self::record_delivery_evidence`].
+    ///
+    /// # Example
+    /// ```ignore
+    /// let evidence = client.get_delivery_evidence(&invoice_id);
+    /// ```
+    pub fn get_delivery_evidence(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        Self::get_invoice(&env, invoice_id.clone());
+        env.storage()
+            .persistent()
+            .get(&DataKey::DeliveryEvidence(invoice_id))
+    }
+
     /// Repays an invoice in partial installments or in full.
     ///
     /// Transfers `amount` from the buyer into escrow. If the cumulative

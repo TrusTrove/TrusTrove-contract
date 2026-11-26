@@ -262,6 +262,28 @@ pub fn asset_metadata_set(
     );
 }
 
+/// Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery
+/// evidence hash after shipment (issue #1162).
+///
+/// Topics are `(delivery_evidence_recorded, invoice_id, actor)` and the
+/// payload is the evidence hash. Only the hash is published — the underlying
+/// delivery documents are never written on-chain.
+pub fn delivery_evidence_recorded(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    actor: &Address,
+    evidence_hash: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "delivery_evidence_recorded"),
+            invoice_id.clone(),
+            actor.clone(),
+        ),
+        evidence_hash.clone(),
+    );
+}
+
 pub fn max_invoice_lifetime_set(env: &Env, lifetime: u64) {
     env.events()
         .publish((Symbol::new(env, "max_invoice_lifetime_set"),), lifetime);
