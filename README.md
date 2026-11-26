@@ -176,6 +176,7 @@ get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
+get_amount_due(invoice_id) → u128  ← outstanding now: 0 unless funded and unpaid; unpaid balance after default
 get_financing_terms(invoice_id) → FinancingTerms
 get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
 get_seconds_to_maturity(invoice_id) → i128
@@ -337,8 +338,15 @@ pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 get_lock_record(invoice_id) → Option<EscrowRecord>
 get_lock_expiration(invoice_id) → Option<u64>
+get_custody_coverage(invoice_id) → CustodyCoverage   ← preflight only, no transfer or storage write (#1298)
+get_last_release_recipient(invoice_id) → Option<Address>   ← most recent successful release/default (#1296)
+get_min_lock_amount() → u128
 get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
+
+`set_min_lock_amount(min_amount)` is admin-only and applies to future `lock`
+calls (#1297); the default `0` preserves the previous non-zero-amount rule, and
+locks created earlier remain releasable.
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
@@ -468,6 +476,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `mark_funded` | `mark_funded(invoice_id: BytesN<32>, pool_address: Address, asset_address: Address, funded_amount: u128) -> bool` |
 | Invoice | `mark_shipped` | `mark_shipped(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `confirm_delivery` | `confirm_delivery(invoice_id: BytesN<32>, confirmer: Address) -> bool` |
+| Invoice | `get_issuer_confirmed_at` | `get_issuer_confirmed_at(invoice_id: BytesN<32>) -> Option<u64>` |
+| Invoice | `get_default_eligibility` | `get_default_eligibility(invoice_id: BytesN<32>) -> DefaultEligibility` |
+| Invoice | `record_delivery_evidence` | `record_delivery_evidence(invoice_id: BytesN<32>, actor: Address, evidence_hash: BytesN<32>) -> bool` |
+| Invoice | `get_delivery_evidence` | `get_delivery_evidence(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `repay_partial` | `repay_partial(invoice_id: BytesN<32>, amount: u128) -> bool` |
 | Invoice | `repay` | `repay(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `repay_early` | `repay_early(invoice_id: BytesN<32>) -> bool` |
@@ -488,6 +500,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_face_value` | `get_face_value(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_remaining_balance` | `get_remaining_balance(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_repaid_amount` | `get_repaid_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_amount_due` | `get_amount_due(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
@@ -533,9 +546,14 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `handle_default` | `handle_default(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Escrow | `set_timeout_window` | `set_timeout_window(window: u64) -> ()` |
 | Escrow | `get_timeout_window` | `get_timeout_window() -> u64` |
+| Escrow | `set_min_lock_amount` | `set_min_lock_amount(min_amount: u128) -> ()` |
+| Escrow | `get_min_lock_amount` | `get_min_lock_amount() -> u128` |
+| Escrow | `get_last_release_recipient` | `get_last_release_recipient(invoice_id: BytesN<32>) -> Option<Address>` |
+| Escrow | `get_custody_coverage` | `get_custody_coverage(invoice_id: BytesN<32>) -> CustodyCoverage` |
 | Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
+| Escrow | `recover_token` | `recover_token(token: Address, to: Address, amount: u128) -> bool` |
 | Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
 | Escrow | `has_lock` | `has_lock(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |

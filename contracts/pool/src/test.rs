@@ -9007,6 +9007,11 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// cross-contract call. The ceilings below pin the re-measurement at
 /// cpu = 1,714,128 / mem = 375,634 after merging lifetime volume metrics and adding
 /// lifetime-funded accounting (#1189), with small headroom.
+///
+/// Re-pinned by #1296: `escrow.release_to_issuer` now also records the last
+/// release recipient (one persistent write + TTL bump) on the funding payout
+/// path. The flow now measures cpu = 1,763,382 / mem = 392,926; the ceilings
+/// below leave headroom on top of that intentional cost.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -9020,12 +9025,12 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_735_000,
-        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_790_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter + #1296 release recipient) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 390_000,
-        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned memory budget: {mem}"
+        mem < 405_000,
+        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger + #1296 release recipient) must stay within its re-pinned memory budget: {mem}"
     );
 }
 

@@ -197,3 +197,26 @@ pub struct ReleaseAuthorization {
     /// `release_after_timeout`: permissionless, so any address.
     pub release_after_timeout: bool,
 }
+
+/// Read-only custody coverage preview for one invoice, returned by
+/// [`EscrowContract::get_custody_coverage`](crate::EscrowContract::get_custody_coverage)
+/// (issue #1298).
+///
+/// The view compares the amount the contract tracks as locked against the
+/// tokens it actually holds, letting an operator decide whether a proposed
+/// release can succeed before submitting a transaction. It transfers nothing
+/// and writes no storage, so it can be called while the contract is paused.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustodyCoverage {
+    /// Amount tracked in the invoice's active [`DataKey::Locked`] record, or
+    /// `0` when no lock exists.
+    pub tracked_amount: u128,
+    /// Actual balance of the configured asset held by the escrow contract, in
+    /// stroops. Includes unsolicited transfers and residual dust, so it may
+    /// exceed the sum of tracked locks.
+    pub token_balance: i128,
+    /// `true` when an active lock exists and `token_balance` covers
+    /// `tracked_amount`; `false` otherwise (including when there is no lock).
+    pub can_release: bool,
+}

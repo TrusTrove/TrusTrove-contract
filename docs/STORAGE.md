@@ -381,6 +381,7 @@ Cancelled = 8   // issuer cancelled before listing
 | `UsdcAsset` | `Address` | USDC token contract address | `initialize()` |
 | `Paused` | `bool` | Emergency circuit-breaker flag, via `trusttrove_pause::PauseState::Paused` (issue #716). Absent means not paused. | `pause()` / `unpause()` |
 | `TimeoutWindow` | `u64` | Seconds after `locked_at` before `release_after_timeout` may permissionlessly return a lock to the pool. Absent means the 30-day default; capped at 365 days. | `set_timeout_window()` |
+| `MinLockAmount` | `u128` | Minimum amount accepted by future `lock` calls (#1297). Absent means `0`, preserving the previous any-non-zero-amount behaviour. Applies only to new locks; existing locks stay releasable. | `set_min_lock_amount()` |
 
 ### Persistent Storage
 
@@ -391,6 +392,7 @@ Cancelled = 8   // issuer cancelled before listing
 | `Locked(BytesN<32>)` | `EscrowRecord` | Lock record keyed by invoice ID. Created by `lock()` and removed by `release_to_pool()` (full release), `handle_default()`, or when the residual is fully repaid. |
 | `LockedLedger(BytesN<32>)` | `u64` | Ledger sequence in which the lock was created (#1196). Written by `lock()` and removed when the `Locked` record is removed. Absent for locks created before ledger tracking existed; `get_locked_ledger()` returns `0` for those records. A partial `release_to_pool` preserves it. |
 | `IssuerReleased(BytesN<32>)` | `u128` | Durable payout evidence written by `release_to_issuer` when it consumes the `Locked` record (issue #819); consumed by exactly one `release_to_pool` and read by `was_released_to_issuer` for `pool.handle_default`. Written when the `Locked` record is removed during `release_to_issuer`. |
+| `LastReleaseRecipient(BytesN<32>)` | `Address` | Recipient of the most recent successful release/default for the invoice (#1296). Written after the token transfer succeeds by `release_to_issuer` (issuer), `release_to_pool`, `handle_default`, and `release_after_timeout` (pool). A failed transfer reverts before the write, so it never overwrites the previous recipient. Read with `get_last_release_recipient()`. |
 
 ```
 EscrowRecord {
@@ -429,6 +431,32 @@ EscrowEvent {
 ```
 
 The read-only `get_history_count(invoice_id)` view returns the number of history events recorded for an invoice (or `0` when absent), enabling callers to plan paginated reads via `get_history_page` without loading the full event vector into memory. History events and their count remain accessible even after the invoice's active lock is removed.
+
+#### Last Release Recipient
+
+The read-only `get_last_release_recipient(invoice_id)` view returns the address
+that received the most recent successful release or default for the invoice, or
+`None` when no release has succeeded yet (#1296). It is recorded for
+`release_to_issuer`, `release_to_pool`, `handle_default`, and
+`release_after_timeout`, and only after the token transfer succeeds. It lives
+in its own key (`LastReleaseRecipient`) rather than on `EscrowRecord`, so
+existing deployed lock records keep decoding unchanged and a new lock does not
+inherit a stale recipient from a previous lock on the same invoice.
+
+#### Custody Coverage Preflight
+
+The read-only `get_custody_coverage(invoice_id)` view (#1298) returns a
+`CustodyCoverage { tracked_amount, token_balance, can_release }`:
+
+* `tracked_amount` is the invoice's active `Locked.amount` (or `0`).
+* `token_balance` is the escrow contract's actual balance of the configured
+  asset, including unsolicited transfers and residual dust.
+* `can_release` is `true` only when a lock exists, its amount is representable
+  as a token amount, and `token_balance >= tracked_amount`.
+
+The view performs no transfer, writes no storage, and does not extend TTL, so
+it is safe to call as a preflight (including while paused) before submitting a
+release that might otherwise fail for insufficient custody.
 
 #### Partial Release and Residual Lock
 
@@ -621,6 +649,25 @@ unchanged, and an `upgraded` event carrying the new Wasm hash is emitted. Calls
 from any address other than the stored admin fail authorization. Protect the admin
 with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
 document for the redeployment rollback procedure.
+
+### Storage compatibility check (issue #1207)
+
+Before every upgrade, prove that state written by the Wasm currently on-chain
+still decodes under the new Wasm. `scripts/migration_fixture.sh` builds the
+baseline and candidate contracts, writes representative registry, invoice,
+escrow and pool state through the baseline, upgrades each contract with
+`upgrade`, and asserts that every read returns the same decoded value and that
+the upgraded contracts still accept writes. See "Pre-upgrade storage migration
+check" in [DEPLOYMENT.md](../DEPLOYMENT.md).
+
+### Escrow token recovery (issue #1201)
+
+`recover_token(token, to, amount)` lets the admin move a token that was sent to
+the escrow by mistake. It reads only the `Admin` and `UsdcAsset` instance keys
+and never reads or writes `Locked`, `LockedLedger`, `History` or
+`IssuerReleased` entries. The funding asset (`UsdcAsset`) is rejected with
+`InvalidToken`, because every active lock is collateral in that asset. No new
+storage key was added, so existing entries decode unchanged.
 
 ### Construction vs. upgrade (issue #827)
 
