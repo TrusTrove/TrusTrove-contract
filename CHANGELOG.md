@@ -7,6 +7,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `invoice`: `get_amount_due(invoice_id) -> u128`, the amount the buyer owes
+  now for every status: `0` for invoices that were never funded (`Created`,
+  `Listed`, `Expired`, `Cancelled`) and once `Repaid`; `remaining_balance`
+  while `Funded`, `Active` or `Confirmed`, including after partial
+  repayments; and the unpaid `remaining_balance` after `Defaulted`. Unlike
+  `get_remaining_balance`, it does not report the face value before funding.
+  Read-only, no authorization, no storage change (#1134)
+
 ### Changed
 
 - `escrow`: `default_resolved` audit event data payload updated to `(u128, u64)`
@@ -36,6 +46,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `escrow`: `get_last_release_recipient(invoice_id)` view returning the address
+  that received the most recent successful release or default for an invoice,
+  recorded only after the token transfer succeeds. Failed transfers never
+  update it, and the recipient lives in a new appended storage key so existing
+  records still decode (#1296)
+- `escrow`: admin-settable minimum lock amount via `set_min_lock_amount` and
+  `get_min_lock_amount`, with a `min_lock_amount_set` event. The default `0`
+  preserves the previous any-non-zero-amount behaviour, future locks below the
+  minimum fail with `AmountBelowMinimum`, and existing locks remain releasable
+  (#1297)
+- `escrow`: `get_custody_coverage(invoice_id)` preflight view returning
+  `CustodyCoverage { tracked_amount, token_balance, can_release }` without
+  transferring funds or changing storage (#1298)
+- `tooling`: `scripts/check_deployed_hashes.py`, run by both deploy scripts
+  before the first reference-setting call. It compares each deployed
+  contract's on-chain code hash with the intended release manifest (or the
+  locally built WASM) and aborts wiring on any mismatch (#1299)
 - `escrow`: `get_history_count(invoice_id)` view, returning the number of
   history events recorded for an invoice (`u32`) or `0` when absent. Preserves
   access after active lock removal and enables planning paginated reads

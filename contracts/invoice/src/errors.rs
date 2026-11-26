@@ -57,4 +57,11 @@ pub enum InvoiceError {
     InvalidRiskScore = 31,
     /// The signature recovery byte is outside Soroban's supported range.
     InvalidRecoveryId = 32,
+    /// A proof-of-delivery evidence hash was the all-zero placeholder rather
+    /// than a real 32-byte commitment (issue #1162).
+    InvalidEvidenceHash = 33,
+    /// A proof-of-delivery evidence hash was already attached to this
+    /// invoice. Evidence is write-once; a second attachment is rejected
+    /// (issue #1162).
+    EvidenceAlreadyRecorded = 34,
 }

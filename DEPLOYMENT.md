@@ -140,6 +140,32 @@ The registry must be deployed first because the invoice constructor wires it
 and pool flows call `is_verified()` on it, so the deploy script passes its
 address as a constructor argument.
 
+### Deployed Code Hash Preflight (`#1299`)
+
+Before the first reference-setting call, `deploy.sh` / `deploy.ps1` run
+`scripts/check_deployed_hashes.py` against every contract ID they are about to
+wire. The checker reads each contract's on-chain WASM through Soroban RPC and
+compares its SHA-256 with the intended release, failing without making a single
+wiring call on any mismatch. The intended release is:
+
+* the `wasm_hashes` map of `$RELEASE_MANIFEST` when that environment variable
+  points at a manifest from `verify_release.py --generate-manifest`, or
+* the freshly built `target/wasm32v1-none/release/*.wasm` artifacts otherwise.
+
+```bash
+# Optional: pin the preflight to an audited release manifest
+RELEASE_MANIFEST=release-manifest.json ./scripts/deploy.sh
+
+# Standalone, read-only check
+python3 scripts/check_deployed_hashes.py \
+  --manifest release-manifest.json \
+  --network testnet \
+  --contract registry=$REGISTRY_ID \
+  --contract invoice=$INVOICE_ID \
+  --contract escrow_usdc=$ESCROW_USDC_ID \
+  --contract pool_usdc=$POOL_USDC_ID
+```
+
 ### Post-Deploy Verification
 
 After `deploy.sh` completes, verify all stored references are correctly

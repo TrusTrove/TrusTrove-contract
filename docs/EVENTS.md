@@ -92,6 +92,22 @@ Emitted when either the issuer or buyer confirms delivery.
 
 ---
 
+### `delivery_evidence_recorded`
+
+Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery evidence hash after shipment (issue #1162). Only the hash is published — the delivery documents themselves stay off-chain.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"delivery_evidence_recorded"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Actor (buyer or issuer) that attached the hash |
+| **Data** | `BytesN<32>` | Evidence hash |
+
+**Emitted by:** `record_delivery_evidence()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `both_confirmed`
 
 Emitted when both issuer and buyer have confirmed delivery (invoice advances to Confirmed).
@@ -785,6 +801,14 @@ Emitted when locked funds are released to the issuer.
 
 **Emitted by:** `release_to_issuer()` in `contracts/escrow/src/lib.rs:184`
 
+#### Last release recipient
+
+After the token transfer succeeds, `release_to_issuer` also records the issuer
+as the invoice's most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. The event shape is unchanged. A
+failed transfer reverts the call before the write, so it never updates the
+stored recipient.
+
 ---
 
 ### `released_to_pool`
@@ -800,6 +824,13 @@ Emitted when locked funds are released back to the pool (on repayment).
 | **Data** | `u128` | Released amount (repayment amount) |
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
+
+#### Last release recipient
+
+After a successful transfer, the pool address is recorded as the invoice's
+most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. Failed transfers revert before the
+write and leave any earlier recipient untouched.
 
 #### Partial Release and Residual Lock
 
@@ -833,6 +864,29 @@ Emitted when default is resolved and funds returned to pool.
 
 **Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs`
 **Source:** `contracts/escrow/src/events.rs:69`
+
+#### Last release recipient
+
+A successful default records the pool address as the invoice's most recent
+release recipient (#1296). All funds always go to the pool, whatever address
+triggered the default.
+
+---
+
+### `min_lock_amount_set`
+
+Emitted by `set_min_lock_amount()` when the admin changes the minimum accepted
+by future `lock` calls (#1297). Existing locks are unaffected and remain
+releasable.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_lock_amount_set"` |
+| `topic[1]` | `Address` | Admin who set the minimum |
+| **Data** | `u128` | New minimum in USDC stroops (`0` disables it) |
+
+**Emitted by:** `set_min_lock_amount()` in `contracts/escrow/src/lib.rs`
 
 ---
 

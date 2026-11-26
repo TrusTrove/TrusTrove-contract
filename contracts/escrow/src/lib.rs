@@ -17,6 +17,9 @@ pub use errors::*;
 pub use types::*;
 
 const DEFAULT_MIN_LOCK_SECONDS: u64 = 60;
+/// Default minimum lock amount. `0` preserves the pre-#1297 behaviour where
+/// any non-zero amount was accepted.
+const DEFAULT_MIN_LOCK_AMOUNT: u128 = 0;
 const MAX_HISTORY_PAGE_SIZE: u32 = 100;
 /// Default `release_after_timeout` window (30 days) used until the admin sets one.
 pub const DEFAULT_TIMEOUT_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
@@ -317,7 +320,11 @@ impl EscrowContract {
     ///
     /// # Panics
     /// * `NotInitialized` if the contract has not been initialized.
-    /// * `InvalidAmount` if the amount is zero.
+    /// * `InvalidAmount` if the amount is zero or exceeds `i128::MAX`.
+    /// * `AmountBelowMinimum` if the amount is below the admin-configured
+    ///   minimum lock amount (#1297). The default minimum is `0`, so existing
+    ///   deployments keep accepting any non-zero amount until the admin sets
+    ///   one.
     /// * `AlreadyLocked` if the invoice is already locked.
     ///
     /// # Returns
@@ -333,6 +340,11 @@ impl EscrowContract {
 
         if amount == 0 || amount > i128::MAX as u128 {
             panic_with_error!(&env, EscrowError::InvalidAmount);
+        }
+        // #1297: future locks must meet the admin-configured minimum. Existing
+        // locks are untouched and stay releasable.
+        if amount < Self::min_lock_amount(&env) {
+            panic_with_error!(&env, EscrowError::AmountBelowMinimum);
         }
 
         let key = DataKey::Locked(invoice_id.clone());
@@ -443,6 +455,10 @@ impl EscrowContract {
         // Pay from the locked invoice record, never from the caller-supplied
         // address after it has merely passed validation.
         usdc.transfer(&env.current_contract_address(), &recorded_issuer, &amount);
+        // #1296: record the recipient only after the transfer succeeds. A
+        // failed transfer reverts this transaction, so the previous recipient
+        // is preserved.
+        Self::record_last_release_recipient(&env, &invoice_id, &recorded_issuer);
 
         Self::append_history(
             &env,
@@ -590,6 +606,7 @@ impl EscrowContract {
             &pool,
             &(repayment_amount as i128),
         );
+        Self::record_last_release_recipient(&env, &invoice_id, &pool);
 
         Self::append_history(
             &env,
@@ -735,6 +752,7 @@ impl EscrowContract {
             &pool,
             &(record.amount as i128),
         );
+        Self::record_last_release_recipient(&env, &invoice_id, &pool);
 
         Self::append_history(
             &env,
@@ -797,6 +815,157 @@ impl EscrowContract {
             .unwrap_or(DEFAULT_TIMEOUT_WINDOW_SECONDS)
     }
 
+    /// Sets the minimum amount, in USDC stroops, that future [`Self::lock`]
+    /// calls must meet (issue #1297).
+    ///
+    /// The default is `0`, which preserves the previous behaviour of accepting
+    /// any non-zero amount. The policy only applies to future locks: records
+    /// created before it was set remain unchanged and releasable through
+    /// [`Self::release_to_issuer`], [`Self::release_to_pool`],
+    /// [`Self::handle_default`], and [`Self::release_after_timeout`].
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `min_amount` - The minimum accepted by subsequent `lock` calls. `0`
+    ///   disables the minimum.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the contract has not been initialized.
+    ///
+    /// # Returns
+    /// * `()` - No value is returned. Emits `min_lock_amount_set`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_min_lock_amount(&1_000_000); // 0.1 USDC
+    /// ```
+    pub fn set_min_lock_amount(env: Env, min_amount: u128) {
+        require_not_paused(&env);
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::MinLockAmount, &min_amount);
+        events::min_lock_amount_set(&env, &admin, min_amount);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the minimum amount accepted by future [`Self::lock`] calls.
+    ///
+    /// # Auth
+    /// No authorization is required. This is a read-only view.
+    ///
+    /// # Returns
+    /// * `u128` - The configured minimum in USDC stroops, or `0` when unset.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let minimum = client.get_min_lock_amount();
+    /// ```
+    pub fn get_min_lock_amount(env: Env) -> u128 {
+        Self::min_lock_amount(&env)
+    }
+
+    /// Returns the recipient of the most recent successful release or default
+    /// for an invoice (issue #1296).
+    ///
+    /// The recipient is recorded after the token transfer succeeds by
+    /// [`Self::release_to_issuer`] (the issuer),
+    /// [`Self::release_to_pool`] (the pool),
+    /// [`Self::handle_default`] (the pool), and
+    /// [`Self::release_after_timeout`] (the pool). A failed transfer reverts
+    /// the whole call, so it never overwrites the previously recorded
+    /// recipient.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Option<Address>` - The last recipient, or `None` when no successful
+    ///   release/default has been recorded for the invoice.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let recipient = client.get_last_release_recipient(&invoice_id);
+    /// ```
+    pub fn get_last_release_recipient(env: Env, invoice_id: BytesN<32>) -> Option<Address> {
+        let key = DataKey::LastReleaseRecipient(invoice_id);
+        match env.storage().persistent().get::<_, Address>(&key) {
+            Some(recipient) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                Some(recipient)
+            }
+            None => None,
+        }
+    }
+
+    /// Returns a custody coverage preview for one invoice (issue #1298).
+    ///
+    /// Reports the amount tracked by the invoice's active [`DataKey::Locked`]
+    /// record, the escrow contract's actual balance of the configured asset,
+    /// and whether that balance covers the tracked amount. A caller can use it
+    /// to decide whether a proposed release can succeed before submitting a
+    /// transaction that would fail.
+    ///
+    /// The comparison is against the tracked lock amount, not a caller-supplied
+    /// amount. `can_release` is `false` when no lock exists, when the tracked
+    /// amount cannot be represented as a token amount, or when the balance is
+    /// short. A tracked amount of `0` therefore previews as not releasable.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to inspect.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Storage
+    /// Read-only: no transfer, no storage write and no TTL extension. The only
+    /// external call is the asset's `balance` view.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the USDC asset address is unset.
+    ///
+    /// # Returns
+    /// * `CustodyCoverage` - Tracked amount, token balance, and coverage flag.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let coverage = client.get_custody_coverage(&invoice_id);
+    /// if coverage.can_release {
+    ///     // safe to submit the release
+    /// }
+    /// ```
+    pub fn get_custody_coverage(env: Env, invoice_id: BytesN<32>) -> CustodyCoverage {
+        let tracked_amount = env
+            .storage()
+            .persistent()
+            .get::<_, EscrowRecord>(&DataKey::Locked(invoice_id))
+            .map(|record| record.amount)
+            .unwrap_or(0);
+        let token_balance = Self::usdc_client(&env).balance(&env.current_contract_address());
+        let can_release = tracked_amount > 0
+            && tracked_amount <= i128::MAX as u128
+            && token_balance >= tracked_amount as i128;
+        CustodyCoverage {
+            tracked_amount,
+            token_balance,
+            can_release,
+        }
+    }
+
     /// Permissionlessly returns a stale lock to the pool once
     /// `now >= locked_at + timeout_window`.
     ///
@@ -850,6 +1019,7 @@ impl EscrowContract {
             &pool,
             &(record.amount as i128),
         );
+        Self::record_last_release_recipient(&env, &invoice_id, &pool);
 
         Self::append_history(
             &env,
@@ -1067,6 +1237,24 @@ impl EscrowContract {
             .instance()
             .get(&DataKey::MinLockSeconds)
             .unwrap_or(DEFAULT_MIN_LOCK_SECONDS)
+    }
+
+    fn min_lock_amount(env: &Env) -> u128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinLockAmount)
+            .unwrap_or(DEFAULT_MIN_LOCK_AMOUNT)
+    }
+
+    /// Persists the recipient of a successful release/default (#1296). Called
+    /// only after the token transfer succeeds, so a reverted transfer cannot
+    /// change the stored recipient.
+    fn record_last_release_recipient(env: &Env, invoice_id: &BytesN<32>, recipient: &Address) {
+        let key = DataKey::LastReleaseRecipient(invoice_id.clone());
+        env.storage().persistent().set(&key, recipient);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
     /// Returns the first timestamp at which the minimum lock no longer blocks
