@@ -6,7 +6,7 @@
 //! equals `100%` and `1` bp equals `0.01%`. For example, a
 //! `utilization_rate_bps` value of `7500` represents a utilization of `75%`.
 
-use soroban_sdk::{contracttype, Address, BytesN};
+use soroban_sdk::{contracttype, Address, BytesN, Vec};
 
 /// Aggregate, pool-wide accounting snapshot returned by `get_pool_stats`.
 #[contracttype]
@@ -137,4 +137,109 @@ pub enum DataKey {
     /// no-re-entry rule forbids reading `get_buyer` at that point.
     /// Appended after `MinDiscountBps` to keep existing discriminants stable.
     FundedInvoiceBuyer(BytesN<32>),
+    /// Admin-configured maximum remaining time to maturity, in seconds, that
+    /// an invoice may have when `fund_invoice` funds it (issue #1184).
+    /// `0` (the default when never set) means unrestricted. Appended after
+    /// `FundedInvoiceBuyer` to keep existing discriminants stable.
+    MaxTimeToMaturity,
+    /// Lifetime principal successfully deployed by this pool. Never decremented
+    /// on repayment or default; used as the realized-loss ratio denominator.
+    /// Appended to preserve existing key encoding.
+    CumulativeFunded,
+    /// Lifetime gross USDC (funding-asset base units) deposited by LPs across
+    /// all successful `deposit` calls. Never reduced by withdrawals and stored
+    /// in persistent storage so the instance footprint stays unchanged (#1172).
+    LifetimeDepositedVolume,
+    /// Lifetime gross USDC (funding-asset base units) withdrawn by LPs across
+    /// all successful `withdraw` calls. Internal funding transfers do not
+    /// touch it, and the counter lives in persistent storage (#1173).
+    LifetimeWithdrawnVolume,
+    /// Lifetime gross USDC (funding-asset base units) repaid by buyers across
+    /// all successful `receive_repayment` / `receive_repayment_with_refund`
+    /// calls, before any buyer refund is netted out. Stored in persistent
+    /// storage (#1174).
+    LifetimeRepaidVolume,
+}
+
+/// Read-only snapshot of a pool's contract references and funding policy,
+/// returned by `get_pool_config` (issue #1188).
+///
+/// Every value is read from the existing instance-storage keys; nothing about
+/// the storage layout changes. Policy values that an older instance may not
+/// have stored are reported with the same fallback the write paths apply, so
+/// the snapshot always describes the configuration actually in force.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PoolConfig {
+    /// Admin address authorised for upgrades, pausing and policy changes.
+    pub admin: Address,
+    /// Token contract this pool accepts as LP deposits and uses to fund
+    /// invoices (same value as `get_funding_asset`).
+    pub funding_asset: Address,
+    /// Invoice contract the pool funds and receives repayments from.
+    pub invoice_contract: Address,
+    /// Escrow contract the pool locks and releases funded principal through.
+    pub escrow_contract: Address,
+    /// Registry contract `fund_invoice` re-verifies issuers and buyers against.
+    pub registry_contract: Address,
+    /// Address that receives the protocol fee cut on repayment, or `None` when
+    /// no treasury is stored, in which case no fee is transferred out.
+    pub treasury: Option<Address>,
+    /// Utilization cap in basis points above which `fund_invoice` rejects new
+    /// funding. Falls back to `DEFAULT_MAX_UTILIZATION_BPS` when unset.
+    pub max_utilization_bps: u32,
+    /// Protocol fee taken from repayment yield, in basis points. Falls back to
+    /// `0` when unset.
+    pub protocol_fee_bps: u32,
+    /// Minimum invoice discount (yield floor) `fund_invoice` enforces, in
+    /// basis points. Falls back to `0` (no floor) when unset.
+    pub min_discount_bps: u32,
+    /// Smallest first deposit accepted into an empty pool, in funding-asset
+    /// base units. Falls back to `DEFAULT_MIN_INITIAL_DEPOSIT` when unset.
+    pub min_initial_deposit: u128,
+    /// Maximum number of invoices accepted by one `batch_fund_invoice` call
+    /// (`MAX_BATCH_SIZE`).
+    pub max_batch_size: u32,
+}
+
+/// Why a listed invoice would currently be rejected by `fund_invoice`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FundingRejectionReason {
+    ContractPaused,
+    AlreadyFunded,
+    InvoiceNotListed,
+    IssuerNotVerified,
+    BuyerNotVerified,
+    AssetMismatch,
+    InvalidAmount,
+    DiscountBelowMinimum,
+    MaturityTooLong,
+    InsufficientLiquidity,
+    UtilizationCapExceeded,
+    Overflow,
+}
+
+/// Read-only snapshot of an invoice's current funding eligibility.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct FundingEligibility {
+    /// Invoice status discriminant; `1` means `Listed`.
+    pub invoice_status: u32,
+    /// Whether the invoice funding asset matches this pool.
+    pub funding_asset_matches: bool,
+    /// Computed principal in funding-asset base units, or `0` when invalid.
+    pub funded_amount: u128,
+    /// Pool liquidity currently available for funding.
+    pub available_liquidity: u128,
+    /// Largest additional principal the pool can fund under current capacity.
+    pub max_fundable_amount: u128,
+    /// Current utilization in basis points.
+    pub utilization_rate_bps: u32,
+    /// Configured utilization cap in basis points.
+    pub max_utilization_bps: u32,
+    /// True when no funding rejection reasons apply.
+    pub is_eligible: bool,
+    /// Every currently applicable funding rejection reason.
+    pub rejection_reasons: Vec<FundingRejectionReason>,
 }

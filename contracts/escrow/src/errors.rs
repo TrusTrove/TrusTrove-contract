@@ -29,4 +29,7 @@ pub enum EscrowError {
     TimeoutNotElapsed = 10,
     /// Returned when `locked_at + timeout_window` overflows `u64`.
     MathOverflow = 11,
+    /// Returned when `lock` is called with a non-zero amount below the
+    /// configured minimum lock amount (#1297).
+    AmountBelowMinimum = 12,
 }

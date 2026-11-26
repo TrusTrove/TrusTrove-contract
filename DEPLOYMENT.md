@@ -58,6 +58,23 @@ contracts. Deployed addresses are saved to `.deployed-addresses`.
 | `--only <contract>` | Redeploy a single contract (hotfix mode) |
 | `--help` | Show usage |
 
+Successful deployments write `deployments.json` with the contract IDs, testnet
+passphrase, source commit, and SHA-256 hashes of the four local release WASMs.
+Both scripts require Python 3 to write the manifest. To verify release files
+from the repository root, run:
+
+```sh
+python3 scripts/deployment_manifest.py verify deployments.json
+```
+
+This verifies the local build files. A resumed deployment may reuse existing
+network addresses, so this check does not establish their on-chain code hashes.
+
+Run `bash scripts/deploy.sh --dry-run` or `pwsh -File scripts/deploy.ps1 -DryRun`
+to inspect the planned deployment and wiring. Preview needs no Stellar CLI.
+It leaves `.deployed-addresses`, `.env.deployed`, and `deployments.json` intact.
+With fresh mode, it plans against an empty address list without clearing it.
+
 #### Single-Contract Hotfix Redeploys
 
 To hotfix a single contract without rerunning the full pipeline, pass
@@ -135,6 +152,32 @@ The registry must be deployed first because the invoice constructor wires it
 and pool flows call `is_verified()` on it, so the deploy script passes its
 address as a constructor argument.
 
+### Deployed Code Hash Preflight (`#1299`)
+
+Before the first reference-setting call, `deploy.sh` / `deploy.ps1` run
+`scripts/check_deployed_hashes.py` against every contract ID they are about to
+wire. The checker reads each contract's on-chain WASM through Soroban RPC and
+compares its SHA-256 with the intended release, failing without making a single
+wiring call on any mismatch. The intended release is:
+
+* the `wasm_hashes` map of `$RELEASE_MANIFEST` when that environment variable
+  points at a manifest from `verify_release.py --generate-manifest`, or
+* the freshly built `target/wasm32v1-none/release/*.wasm` artifacts otherwise.
+
+```bash
+# Optional: pin the preflight to an audited release manifest
+RELEASE_MANIFEST=release-manifest.json ./scripts/deploy.sh
+
+# Standalone, read-only check
+python3 scripts/check_deployed_hashes.py \
+  --manifest release-manifest.json \
+  --network testnet \
+  --contract registry=$REGISTRY_ID \
+  --contract invoice=$INVOICE_ID \
+  --contract escrow_usdc=$ESCROW_USDC_ID \
+  --contract pool_usdc=$POOL_USDC_ID
+```
+
 ### Post-Deploy Verification
 
 After `deploy.sh` completes, verify all stored references are correctly
@@ -203,6 +246,30 @@ This checks each contract responds to a read-only query
 invoice contract's post-deploy wiring is in place
 (`get_escrow_contract`, `get_agent_registry_contract`,
 `is_supported_asset`).
+
+### Release Checklist, Bindings, and ABI Verification
+
+Before announcing a release or rotating testnet/mainnet addresses, run the
+read-only tooling checks documented in [docs/TOOLING.md](./docs/TOOLING.md):
+
+1. **Verify TypeScript client bindings match compiled WASM specs (`#1205`):**
+   ```bash
+   python3 scripts/generate_ts_bindings.py --check
+   ```
+2. **Run ABI compatibility check against deployed testnet contracts (`#1206`):**
+   ```bash
+   python3 scripts/check_abi_compat.py --network testnet --mode rpc
+   ```
+3. **Validate release manifest, WASM SHA-256 hashes, target network, and contract references (`#1212`):**
+   ```bash
+   python3 scripts/verify_release.py \
+     --manifest release-manifest.json \
+     --network testnet \
+     --env-file .env \
+     --env-deployed .env.deployed \
+     --deployments-json deployments.json \
+     --check-onchain
+   ```
 
 ### Contract Address Lifecycle & Rotation Policy
 

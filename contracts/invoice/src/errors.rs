@@ -36,6 +36,8 @@ pub enum InvoiceError {
     /// A paginated `get_by_*` query was given a `page_size` larger than
     /// [`MAX_PAGE_SIZE`](crate::MAX_PAGE_SIZE), which would defeat the
     /// per-call gas bound pagination exists to provide.
+    /// `get_invoice_ids_by_status`, `get_issuer_invoice_ids`, and
+    /// `get_buyer_invoice_ids` also raise it for `page_size == 0`.
     InvalidPageSize = 27,
     /// A batch entry point was given more entries than
     /// [`MAX_BATCH_SIZE`](crate::MAX_BATCH_SIZE), which would defeat the
@@ -55,4 +57,11 @@ pub enum InvoiceError {
     InvalidRiskScore = 31,
     /// The signature recovery byte is outside Soroban's supported range.
     InvalidRecoveryId = 32,
+    /// A proof-of-delivery evidence hash was the all-zero placeholder rather
+    /// than a real 32-byte commitment (issue #1162).
+    InvalidEvidenceHash = 33,
+    /// A proof-of-delivery evidence hash was already attached to this
+    /// invoice. Evidence is write-once; a second attachment is rejected
+    /// (issue #1162).
+    EvidenceAlreadyRecorded = 34,
 }

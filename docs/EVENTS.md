@@ -92,6 +92,22 @@ Emitted when either the issuer or buyer confirms delivery.
 
 ---
 
+### `delivery_evidence_recorded`
+
+Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery evidence hash after shipment (issue #1162). Only the hash is published — the delivery documents themselves stay off-chain.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"delivery_evidence_recorded"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Actor (buyer or issuer) that attached the hash |
+| **Data** | `BytesN<32>` | Evidence hash |
+
+**Emitted by:** `record_delivery_evidence()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `both_confirmed`
 
 Emitted when both issuer and buyer have confirmed delivery (invoice advances to Confirmed).
@@ -498,6 +514,26 @@ When an invoice is repaid early via `receive_repayment_with_refund()`, part of t
 
 ---
 
+### `share_price_updated`
+
+Emitted by the pool when a successful repayment credits non-zero LP yield and therefore changes the value of one LP share (issue #1171). It lets indexers track realised-yield repricing without replaying every settlement.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"share_price_updated"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID whose repayment moved the price |
+| **Data** | `(u128, u128)` | `(old_price, new_price)`, both 18-decimal fixed-point values |
+
+- Both prices are `TotalDeposits / TotalShares` scaled by `SHARE_PRICE_SCALE` (`1_000_000_000_000_000_000` = 1.0), matching the `get_share_price()` view. For example, `1_050_000_000_000_000_000` represents 1.05 funding-asset base units of value per share.
+- Only the LP yield slice is priced: protocol fee cuts and buyer refunds are excluded. Failed settlements revert and emit nothing; exact-funded or fully-refunded repayments with zero LP yield emit no price event.
+- The event is published immediately before `repayment_received`, so the canonical settlement event remains the last pool event of the invocation.
+
+**Emitted by:** `settle_repayment()` called by `receive_repayment()` and `receive_repayment_with_refund()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:91`
+
+---
+
 ### `invoice_defaulted`
 
 Emitted when the pool handles a defaulted invoice via `handle_default()`. Topics index the event name and the defaulted `invoice_id`. The data payload is the defaulted funded principal (`funded_amount`).
@@ -603,6 +639,25 @@ it changed to. A rejected call (non-admin, or floor above
 
 ---
 
+### `max_maturity_updated`
+
+Emitted when the admin changes the maximum remaining time to maturity that
+`fund_invoice` accepts for newly funded invoices, via
+`set_max_time_to_maturity` (issue #1184). Like `min_discount_updated`, the old
+value is included. `0` means unrestricted. A rejected call (non-admin) emits
+nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"max_maturity_updated"` |
+| **Data** | `(u64, u64)` | `(old_max_seconds, new_max_seconds)` |
+
+**Emitted by:** `set_max_time_to_maturity()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:184`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
@@ -704,6 +759,14 @@ Emitted when funds are locked in escrow for an invoice.
 
 **Emitted by:** `lock()` in `contracts/escrow/src/lib.rs:118`
 
+#### Lock Creation Ledger
+
+`funds_locked` keeps its existing shape for backwards compatibility. The
+ledger sequence in which the lock was created is stored separately and read
+with `get_locked_ledger(invoice_id)`. It returns `0` for locks created before
+this view existed. A partial `release_to_pool` keeps the original sequence;
+removing the lock clears it.
+
 ---
 
 ### `released_to_issuer`
@@ -719,6 +782,14 @@ Emitted when locked funds are released to the issuer.
 | **Data** | `u128` | Released amount |
 
 **Emitted by:** `release_to_issuer()` in `contracts/escrow/src/lib.rs:184`
+
+#### Last release recipient
+
+After the token transfer succeeds, `release_to_issuer` also records the issuer
+as the invoice's most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. The event shape is unchanged. A
+failed transfer reverts the call before the write, so it never updates the
+stored recipient.
 
 ---
 
@@ -736,6 +807,13 @@ Emitted when locked funds are released back to the pool (on repayment).
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
 
+#### Last release recipient
+
+After a successful transfer, the pool address is recorded as the invoice's
+most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. Failed transfers revert before the
+write and leave any earlier recipient untouched.
+
 #### Partial Release and Residual Lock
 
 When `release_to_pool` is called with an amount less than the total locked amount, the following occurs:
@@ -746,6 +824,10 @@ When `release_to_pool` is called with an amount less than the total locked amoun
 4. A subsequent `release_to_pool` call can repay the remaining amount, at which point the `Locked` record is fully removed.
 
 This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time.
+
+`get_total_returned_to_pool(invoice_id)` returns that running total on-chain:
+it sums `ReleasedToPool` and `DefaultHandled` amounts with checked `u128`
+arithmetic and excludes issuer and timeout releases.
 
 ---
 
@@ -759,9 +841,34 @@ Emitted when default is resolved and funds returned to pool.
 | `topic[0]` | `Symbol` | `"default_resolved"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
 | `topic[2]` | `Address` | Pool contract address |
-| **Data** | `u128` | Returned amount |
+| `topic[3]` | `Address` | Caller address that triggered the default resolution |
+| **Data** | `(u128, u64)` | `(returned_amount, lock_age)` where `lock_age` is elapsed seconds funds remained in escrow before default handling |
 
-**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs:311`
+**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs`
+**Source:** `contracts/escrow/src/events.rs:69`
+
+#### Last release recipient
+
+A successful default records the pool address as the invoice's most recent
+release recipient (#1296). All funds always go to the pool, whatever address
+triggered the default.
+
+---
+
+### `min_lock_amount_set`
+
+Emitted by `set_min_lock_amount()` when the admin changes the minimum accepted
+by future `lock` calls (#1297). Existing locks are unaffected and remain
+releasable.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_lock_amount_set"` |
+| `topic[1]` | `Address` | Admin who set the minimum |
+| **Data** | `u128` | New minimum in USDC stroops (`0` disables it) |
+
+**Emitted by:** `set_min_lock_amount()` in `contracts/escrow/src/lib.rs`
 
 ---
 
@@ -872,7 +979,22 @@ Emitted when an account profile's details or metadata are updated.
 | `topic[1]` | `Address` | Profile address |
 | **Data** | `()` | None |
 
-**Emitted by:** `update_profile()` in `contracts/registry/src/lib.rs:323` and `update_metadata()` at line 363
+**Emitted by:** `update_profile()` and `update_metadata()` in `contracts/registry/src/lib.rs`
+
+---
+
+### `metadata_key_removed`
+
+Emitted when a profile owner removes one metadata key.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_removed"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `String` | Metadata key removed |
+
+**Emitted by:** `remove_metadata_key()` in `contracts/registry/src/lib.rs`
 
 ---
 
@@ -1027,6 +1149,150 @@ Emitted when the admin disengages the emergency circuit breaker.
 
 ---
 
+### `profile_version`
+
+Emitted whenever a profile's update sequence number changes (#1128): `1` on registration, then once per write that actually changes the stored profile. A consumer that sees the version for an address jump by more than one has missed an update and should re-read the profile with `get_profile`. No-op calls (identical metadata, idempotent `revoke`/`reinstate`, `verify_profile` with the value already held) do not emit it.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"profile_version"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `u64` | New version |
+
+**Emitted by:** every `register_*` / `batch_register_*` (new profiles only), `update_profile`, `update_metadata`, `verify_profile`, `revoke`, `reinstate` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_proposed`
+
+Emitted when the admin proposes a delayed admin transfer (#1124). The current admin stays in control until the proposal is accepted.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_proposed"` |
+| `topic[1]` | `Address` | Current admin |
+| **Data** | `(Address, u64)` | `(new_admin, activates_at)` |
+
+**Emitted by:** `propose_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_accepted`
+
+Emitted when the proposed admin accepts a delayed transfer at or after `activates_at`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_accepted"` |
+| `topic[1]` | `Address` | Previous admin |
+| **Data** | `Address` | New admin |
+
+**Emitted by:** `accept_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_cancelled`
+
+Emitted when the admin or the guardian cancels a pending delayed transfer.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_cancelled"` |
+| `topic[1]` | `Address` | Caller (admin or guardian) |
+| **Data** | `Address` | The `new_admin` that was proposed |
+
+**Emitted by:** `cancel_admin_transfer()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `guardian_set`
+
+Emitted when the admin configures the emergency guardian (#1125).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"guardian_set"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `Address` | Guardian |
+
+**Emitted by:** `set_guardian()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `guardian_removed`
+
+Emitted when the admin removes the emergency guardian.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"guardian_removed"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `()` | None |
+
+**Emitted by:** `remove_guardian()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_frozen`
+
+Emitted when the guardian freezes admin-only writes. Not emitted when already frozen.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_frozen"` |
+| `topic[1]` | `Address` | Guardian |
+| **Data** | `()` | None |
+
+**Emitted by:** `freeze_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_unfrozen`
+
+Emitted when the guardian lifts the admin freeze. Not emitted when not frozen.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_unfrozen"` |
+| `topic[1]` | `Address` | Guardian |
+| **Data** | `()` | None |
+
+**Emitted by:** `unfreeze_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `metadata_key_policy_set`
+
+Emitted when the admin changes the metadata key policy (#1120).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_policy_set"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `MetadataKeyPolicy` | `Unrestricted` or `AllowlistV1` |
+
+**Emitted by:** `set_metadata_key_policy()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
 ## Pool Factory Contract
 
 **Contract:** `pool_factory_contract`
@@ -1097,7 +1363,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 2. **Use topics for filtering** — `topic[0]` is always the event name (Symbol)
 3. **Data decoding** — payloads use Soroban SDK xdr encoding; decode based on the schemas above
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
-5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `invoice_defaulted` tracks defaulted funded principal
+5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `share_price_updated` tracks the 1e18 fixed-point LP share price before and after a yield-bearing repayment; `invoice_defaulted` tracks defaulted funded principal
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`
 7. **Batch events** — `batch_invoices_created` and `batch_invoices_listed` are summary events emitted after the per-invoice events of the same call. `pool::batch_fund_invoice` has no summary event; reconcile it from the individual `invoice_funded` events instead, which is also what tells you which entries a capacity stop skipped.
 

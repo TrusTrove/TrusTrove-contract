@@ -65,6 +65,18 @@ jobs:
       - name: Test contract API generator
         run: python3 -m unittest discover -s scripts -p 'test_generate_contract_api.py'
 
+      - name: Test TypeScript bindings generator
+        run: python3 -m unittest discover -s scripts -p 'test_generate_ts_bindings.py'
+
+      - name: Test ABI compatibility checker
+        run: python3 -m unittest discover -s scripts -p 'test_check_abi_compat.py'
+
+      - name: Test release checklist verifier
+        run: python3 -m unittest discover -s scripts -p 'test_verify_release.py'
+
+      - name: Test deployed code hash preflight
+        run: python3 -m unittest discover -s scripts -p 'test_check_deployed_hashes.py'
+
       - name: Check formatting
         run: cargo fmt --all --check
 
@@ -76,6 +88,19 @@ jobs:
 
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
+
+      - name: Verify deployment manifest against release WASMs
+        run: |
+          # Use placeholder addresses to check local build provenance without a deployment.
+          python3 scripts/deployment_manifest.py write deployments.json \
+            ci-registry ci-invoice ci-escrow-usdc ci-escrow-xlm ci-pool-usdc ci-pool-xlm
+          python3 scripts/deployment_manifest.py verify deployments.json
+
+      - name: Verify generated TypeScript client bindings match WASM specs
+        run: python3 scripts/generate_ts_bindings.py --check
+
+      - name: Verify compiled WASM release artifacts
+        run: python3 scripts/verify_release.py --check-wasm-only
 
       - name: Test (default features)
         run: cargo test --workspace

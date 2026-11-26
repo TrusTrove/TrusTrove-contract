@@ -172,6 +172,12 @@ The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta
   per-ledger resource limit.
 - Read-only view functions (`get_stats`, `get`, `get_profile`, etc.) incur
   minimal cost as they only read from storage.
+- `get_invoice_ids_by_status` lets indexers walk a status without decoding
+  invoices (#1152): at most `page_size` (`1..=MAX_PAGE_SIZE`) index rows and
+  markers per call, with a `next` cursor. The status index has no stable
+  order (removals swap the last row into the hole), so if invoices change
+  status mid-walk, the walk can return an invoice twice. It never skips one
+  that stayed in the status. Indexers must de-duplicate by ID.
 - Index enumeration functions (`get_by_status`, `get_by_issuer`,
   `get_by_buyer`) are paginated (`page`, `page_size`, capped at
   `MAX_PAGE_SIZE`), so each call hydrates a bounded number of invoices no
@@ -179,10 +185,19 @@ The benchmark demonstrates negligible gas overhead (~0.25% CPU instruction delta
   empty result is returned. The status index is append-only, so a page can
   return fewer than `page_size` invoices when it contains stale entries whose
   invoice has since moved to another status.
+- `get_issuer_invoice_ids` is the cheaper ID-only view of the issuer index
+  (#1150): same paging, `page_size` in `1..=MAX_PAGE_SIZE`, but it reads at
+  most `page_size` index entries and no `Invoice` records. Prolific issuers
+  should page IDs with it and fetch full records only as needed.
 - `get_invoice_count_by_issuer` and `get_invoice_count_by_buyer` avoid that
   cost entirely: they read a single stored counter (`u32`) in O(1), so
   pagination and badge UIs should prefer them over `.len()` on the
   full-fetch views.
+- `get_buyer_invoice_ids` is the cheaper ID-only view of the buyer index
+  (#1151): same paging as `get_by_buyer`, `page_size` in `1..=MAX_PAGE_SIZE`,
+  but it reads at most `page_size` index entries and no `Invoice` records.
+  Buyers with many invoices should page IDs with it and fetch full records
+  only as needed.
 - `registry::list_profiles` is bounded per call: it returns at most 50
   addresses (`PageSizeExceeded` above that, mirroring the 50-entry batch cap)
   and costs O(1) in `limit`, not in the total number of registered profiles.

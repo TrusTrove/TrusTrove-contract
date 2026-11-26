@@ -725,6 +725,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "MinLockSeconds"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u64": "60"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "PoolContract"
                             }
                           ]
