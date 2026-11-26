@@ -253,7 +253,7 @@ let status = if !profile_exists {
 
 | DataKey | Type | Description |
 |---------|------|-------------|
-| `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
+| `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID. Never deleted; `exists(invoice_id)` checks its presence without reading, writing or TTL-bumping it |
 
 #### Supported Asset Allow-List
 
@@ -313,10 +313,10 @@ Cancelled = 8   // issuer cancelled before listing
 
 | DataKey | Type | Description | TTL extended |
 |---------|------|-------------|--------------|
-| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
-| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`) |
-| `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
-| `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`) |
+| `IssuerIndexCount(Address)` | `u32` | Number of invoices for this issuer | On write (`extend_issuer_index`) and on read (`get_by_issuer`, `get_issuer_invoice_ids`) |
+| `IssuerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by issuer + index | On write (`extend_issuer_index`) and on read (`get_by_issuer`, `get_issuer_invoice_ids`) |
+| `BuyerIndexCount(Address)` | `u32` | Number of invoices for this buyer | On write (`extend_buyer_index`) and on read (`get_by_buyer`, `get_buyer_invoice_ids`) |
+| `BuyerIndexEntry(Address, u32)` | `BytesN<32>` | Invoice ID by buyer + index | On write (`extend_buyer_index`) and on read (`get_by_buyer`, `get_buyer_invoice_ids`) |
 | `StatusIndexCount(u32)` | `u32` | Number of invoices in this status | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
 | `StatusIndexEntry(u32, u32)` | `BytesN<32>` | Invoice ID by status + index | On write (`extend_status_index` / `remove_from_status_index`) and on read (`get_by_status`, `get_invoice_ids_by_status`) |
 | `StatusCount(u32)` | `u64` | Count of invoices in each status | On write (`increment_status_count` / `decrement_status_count`, issue #830) |
@@ -337,9 +337,17 @@ Cancelled = 8   // issuer cancelled before listing
 - `get_by_status()`, `get_by_issuer()`, and `get_by_buyer()` are paginated
   (`page`, `page_size`, capped at `MAX_PAGE_SIZE`). Each call reads at most
   `page_size` index entries, so cost is bounded regardless of index size.
+- `get_issuer_invoice_ids()` uses the same `page`/`page_size` paging over
+  the issuer index (`page_size` in `1..=MAX_PAGE_SIZE`) but returns only the
+  `IssuerIndexEntry` IDs. It never reads `Invoice` records, so its cost does
+  not depend on invoice size either (#1150).
 - `get_by_status()` still filters each page to entries whose current
   `invoice.status` matches (to handle stale index entries), so a page may
   contain fewer than `page_size` results.
+- `get_buyer_invoice_ids()` uses the same `page`/`page_size` paging over the
+  buyer index (`page_size` in `1..=MAX_PAGE_SIZE`) but returns only the
+  `BuyerIndexEntry` IDs. It never reads `Invoice` records, so its cost does
+  not depend on invoice size either (#1151).
 
 ### Storage Key Count
 
@@ -410,6 +418,8 @@ EscrowEvent {
     caller:     Option<Address>, // Set for `DefaultHandled` events
 }
 ```
+
+The read-only `get_history_count(invoice_id)` view returns the number of history events recorded for an invoice (or `0` when absent), enabling callers to plan paginated reads via `get_history_page` without loading the full event vector into memory. History events and their count remain accessible even after the invoice's active lock is removed.
 
 #### Partial Release and Residual Lock
 

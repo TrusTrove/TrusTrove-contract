@@ -828,9 +828,11 @@ Emitted when default is resolved and funds returned to pool.
 | `topic[0]` | `Symbol` | `"default_resolved"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
 | `topic[2]` | `Address` | Pool contract address |
-| **Data** | `u128` | Returned amount |
+| `topic[3]` | `Address` | Caller address that triggered the default resolution |
+| **Data** | `(u128, u64)` | `(returned_amount, lock_age)` where `lock_age` is elapsed seconds funds remained in escrow before default handling |
 
-**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs:311`
+**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs`
+**Source:** `contracts/escrow/src/events.rs:69`
 
 ---
 
