@@ -1,7 +1,8 @@
 #![no_std]
 
 use soroban_sdk::{
-    contract, contractimpl, panic_with_error, Address, BytesN, Env, Map, String, Vec,
+    contract, contractimpl, panic_with_error, xdr::ToXdr, Address, Bytes, BytesN, Env, Map, String,
+    Vec,
 };
 use trusttrove_pause::{require_not_paused, set_paused};
 
@@ -572,6 +573,50 @@ impl RegistryContract {
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
         Self::extend_instance_ttl(&env);
         profile.metadata.len()
+    }
+
+    /// Returns a deterministic SHA-256 digest of the canonical key/value
+    /// encoding of `address`'s profile metadata.
+    ///
+    /// Clients can compute the same digest locally to verify whether their
+    /// off-chain metadata copy matches the on-chain record without fetching
+    /// the full map.
+    ///
+    /// # Canonical Encoding
+    /// The preimage is encoded as:
+    /// 1. `count`: 4-byte big-endian `u32` number of entries.
+    /// 2. For each `(key, value)` pair in ascending key order (the canonical
+    ///    iteration order of Soroban `Map<String, String>`): `key.to_xdr(env)`
+    ///    followed by `value.to_xdr(env)`.
+    ///
+    /// Because entries are ordered by key and each string is length-prefixed
+    /// by XDR, map insertion order does not affect the digest and distinct
+    /// key/value splits cannot collide.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    /// * `RegistryError::NotFound` if no profile exists for `address`.
+    pub fn get_profile_metadata_hash(env: Env, address: Address) -> BytesN<32> {
+        Self::require_initialized(&env);
+        let key = DataKey::Profile(address);
+        let profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        Self::extend_instance_ttl(&env);
+
+        let mut payload = Bytes::new(&env);
+        payload.extend_from_array(&profile.metadata.len().to_be_bytes());
+        for (k, v) in profile.metadata.iter() {
+            payload.append(&k.to_xdr(&env));
+            payload.append(&v.to_xdr(&env));
+        }
+        env.crypto().sha256(&payload).into()
     }
 
     /// Retrieves a registered profile by address.
