@@ -1,3 +1,5 @@
+#![no_std]
+
 //! Storage-migration fixture for contract upgrades (#1207).
 //!
 //! The fixture lives in `tests/storage_migration.rs`. It deploys the
