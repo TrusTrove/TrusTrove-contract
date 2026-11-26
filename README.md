@@ -615,6 +615,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_treasury` | `get_treasury() -> Address` |
 | Pool | `set_max_time_to_maturity` | `set_max_time_to_maturity(max_seconds: u64) -> bool` |
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
+| Pool | `set_max_loss_threshold` | `set_max_loss_threshold(threshold_bps: Option<u32>) -> bool` |
+| Pool | `get_max_loss_threshold` | `get_max_loss_threshold() -> Option<u32>` |
+| Pool | `get_asset_balance_reconciliation` | `get_asset_balance_reconciliation() -> AssetBalanceReconciliation` |
+| Pool | `reconcile_donation` | `reconcile_donation() -> u128` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
 | Pool | `get_pool_config` | `get_pool_config() -> PoolConfig` |
@@ -625,7 +629,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 221 public entry points across five deployable contracts.**
+**Total: 225 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->

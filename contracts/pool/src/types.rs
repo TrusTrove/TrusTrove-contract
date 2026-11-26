@@ -122,7 +122,7 @@ pub enum DataKey {
     /// `docs/SEP41_DESIGN.md` requires shares to carry the funding asset's
     /// decimals, and under the factory model each instance has its own.
     ShareDecimals,
-    /// Admin-configured minimum invoice discount discount (yield floor), in
+    /// Admin-configured minimum invoice discount floor (yield floor), in
     /// basis points, enforced by `fund_invoice` (issue #829). Defaults to `0`
     /// — no floor — so behavior is unchanged until an admin opts in.
     /// Appended after `ShareDecimals`, per the comment above
@@ -159,7 +159,10 @@ pub enum DataKey {
     /// calls, before any buyer refund is netted out. Stored in persistent
     /// storage (#1174).
     LifetimeRepaidVolume,
-    /// Optional maximum loss threshold in basis points, compared against cumulative realized loss vs cumulative funded volume (#1289).
+    /// Optional maximum realised-loss threshold in basis points, compared
+    /// against cumulative realised loss over cumulative funded volume before
+    /// new funding is allowed (issue #1289). Unset means disabled. Appended
+    /// after `LifetimeRepaidVolume` to keep existing discriminants stable.
     MaxLossThresholdBps,
 }
 
@@ -202,19 +205,23 @@ pub struct PoolConfig {
     /// Maximum number of invoices accepted by one `batch_fund_invoice` call
     /// (`MAX_BATCH_SIZE`).
     pub max_batch_size: u32,
-    /// Optional maximum loss threshold in basis points (issue #1289).
+    /// Maximum realised-loss threshold in basis points enforced before new
+    /// funding, or `None` when unset (no threshold, issue #1289).
     pub max_loss_threshold_bps: Option<u32>,
 }
 
-/// Asset balance reconciliation view returned by `get_asset_balance_reconciliation` (issue #1288).
+/// Read-only asset balance reconciliation snapshot returned by
+/// `get_asset_balance_reconciliation` (issue #1288).
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AssetBalanceReconciliation {
-    /// Recorded available liquidity (`total_deposits - total_funded`).
+    /// Recorded available liquidity (`TotalDeposits - TotalFunded`) in
+    /// funding-asset base units.
     pub recorded_available_liquidity: u128,
-    /// Actual token balance held by the pool contract.
+    /// Actual funding-asset balance held by the pool contract.
     pub actual_token_balance: u128,
-    /// Signed difference: `actual_token_balance` minus `recorded_available_liquidity` (positive if surplus, negative if deficit).
+    /// `actual_token_balance - recorded_available_liquidity`, negative when
+    /// the pool holds less than its books report.
     pub signed_difference: i128,
 }
 
@@ -233,6 +240,8 @@ pub enum FundingRejectionReason {
     MaturityTooLong,
     InsufficientLiquidity,
     UtilizationCapExceeded,
+    /// Cumulative realised loss exceeds the admin-configured maximum loss
+    /// threshold (issue #1289).
     MaxLossExceeded,
     Overflow,
 }
@@ -258,5 +267,5 @@ pub struct FundingEligibility {
     /// True when no funding rejection reasons apply.
     pub is_eligible: bool,
     /// Every currently applicable funding rejection reason.
-    pub rejection_reasons: Vec<FundingRejectionReason},
+    pub rejection_reasons: Vec<FundingRejectionReason>,
 }

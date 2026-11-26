@@ -513,6 +513,7 @@ The `History` vector entries are never removed — they form an append-only log 
 | `ShareDecimals` | `u32` | SEP-41 `decimals()` of this pool's LP share token (falls back to 7 when unset) | `initialize()` |
 | `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 | `MaxTimeToMaturity` | `u64` | Admin-settable maximum remaining time to maturity (`due_date - now`, seconds) accepted by `fund_invoice` for newly funded invoices; `0` means unrestricted (issue #1184) | not set (reads as `0`) |
+| `MaxLossThresholdBps` | `Option<u32>` | Optional maximum realised-loss threshold in basis points (loss / cumulative funded volume) that gates new funding; `None` disables the check (issue #1289) | `initialize() = None` |
 
 ### Persistent Storage
 
