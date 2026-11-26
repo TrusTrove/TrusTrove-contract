@@ -89,6 +89,13 @@ jobs:
       - name: Build wasm (release)
         run: cargo build --workspace --release --target wasm32v1-none
 
+      - name: Verify deployment manifest against release WASMs
+        run: |
+          # Use placeholder addresses to check local build provenance without a deployment.
+          python3 scripts/deployment_manifest.py write deployments.json \
+            ci-registry ci-invoice ci-escrow-usdc ci-escrow-xlm ci-pool-usdc ci-pool-xlm
+          python3 scripts/deployment_manifest.py verify deployments.json
+
       - name: Verify generated TypeScript client bindings match WASM specs
         run: python3 scripts/generate_ts_bindings.py --check
 

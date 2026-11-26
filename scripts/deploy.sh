@@ -939,17 +939,8 @@ NEXT_PUBLIC_POOL_XLM_CONTRACT_ID=$POOL_XLM_ID # EXPERIMENTAL
 EOF
 
 JSON_OUT="deployments.json"
-cat > "$JSON_OUT" <<EOF
-{
-  "registry": "$REGISTRY_ID",
-  "invoice": "$INVOICE_ID",
-  "escrow_usdc": "$ESCROW_USDC_ID",
-  "escrow_xlm": "$ESCROW_XLM_ID",
-  "pool_usdc": "$POOL_USDC_ID",
-  "pool_xlm": "$POOL_XLM_ID",
-  "updated_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-}
-EOF
+python3 "$SCRIPT_DIR/deployment_manifest.py" write "$JSON_OUT" \
+  "$REGISTRY_ID" "$INVOICE_ID" "$ESCROW_USDC_ID" "$ESCROW_XLM_ID" "$POOL_USDC_ID" "$POOL_XLM_ID"
 
 if [ -f "scripts/maintainer/update-readme-addresses.sh" ]; then
   bash scripts/maintainer/update-readme-addresses.sh
