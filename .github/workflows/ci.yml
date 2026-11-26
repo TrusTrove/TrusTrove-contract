@@ -30,6 +30,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      - name: Test malware scanner
+        run: python3 -m unittest discover -s scripts/security -p 'test_*.py' -v
+
       # Issue #804: lint this workflow file (and every other workflow) so a
       # malformed step, invalid action pin, or unreachable `if:` surfaces here
       # instead of breaking a real run. Runs before the Rust setup because it
