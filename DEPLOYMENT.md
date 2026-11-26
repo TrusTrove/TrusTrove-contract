@@ -58,6 +58,18 @@ contracts. Deployed addresses are saved to `.deployed-addresses`.
 | `--only <contract>` | Redeploy a single contract (hotfix mode) |
 | `--help` | Show usage |
 
+Successful deployments write `deployments.json` with the contract IDs, testnet
+passphrase, source commit, and SHA-256 hashes of the four local release WASMs.
+Both scripts require Python 3 to write the manifest. To verify release files
+from the repository root, run:
+
+```sh
+python3 scripts/deployment_manifest.py verify deployments.json
+```
+
+This verifies the local build files. A resumed deployment may reuse existing
+network addresses, so this check does not establish their on-chain code hashes.
+
 Run `bash scripts/deploy.sh --dry-run` or `pwsh -File scripts/deploy.ps1 -DryRun`
 to inspect the planned deployment and wiring. Preview needs no Stellar CLI.
 It leaves `.deployed-addresses`, `.env.deployed`, and `deployments.json` intact.
