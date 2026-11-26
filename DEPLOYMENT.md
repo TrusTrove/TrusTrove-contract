@@ -445,6 +445,41 @@ Integrators and contributors should:
 2. Regularly pull the latest changes from the `main` branch to synchronize with the current testnet environment.
 3. Check `README.md` for the current canonical testnet addresses rather than hardcoding them in local environments.
 
+## Pre-upgrade storage migration check
+
+Before calling `upgrade` on a live registry, invoice, escrow or pool, run the
+storage migration fixture (#1207). It deploys the **baseline** Wasm, writes
+representative state through it, upgrades every contract to the **candidate**
+Wasm, and checks that registry profiles, invoices and their indexes, escrow
+locks and history, and pool LP positions all decode to the same values and stay
+writable.
+
+```bash
+# Baseline = the commit or tag that is deployed on-chain right now.
+bash scripts/migration_fixture.sh --base-ref <deployed-commit-or-tag>
+```
+
+The script needs the `wasm32v1-none` Rust target. It builds the baseline in a
+temporary git worktree, builds the candidate from the current checkout, and
+runs `tests/migration` with `TRUSTTROVE_REQUIRE_MIGRATION=1` so missing inputs
+fail instead of skipping. CI runs the same script on every pull request against
+the pull request's base commit.
+
+What it covers, and what it does not:
+
+* It covers persistent and instance entries written through the baseline's
+  public entry points, plus authorization (a non-admin upgrade is rejected),
+  invalid input (an unknown Wasm hash is rejected) and idempotency (upgrading
+  twice with the same Wasm changes nothing).
+* It writes through entry points whose signatures are unchanged between
+  baseline and candidate. If a change alters one of them, update
+  `tests/migration/tests/storage_migration.rs` in the same pull request.
+* It does not replace reading the diff for new `DataKey` variants: variants
+  must be appended at the end of the enum, never inserted, or deployed keys are
+  orphaned.
+
+Record the baseline reference you tested against in the upgrade ticket.
+
 ## Rollback
 
 There is no automated rollback. To redeploy from scratch:

@@ -10,6 +10,7 @@ members = [
     "contracts/ttl",
     "contracts/pause",
     "tests/integration",
+    "tests/migration",
 ]
 
 [workspace.package]

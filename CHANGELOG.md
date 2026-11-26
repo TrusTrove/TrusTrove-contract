@@ -67,6 +67,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   history events recorded for an invoice (`u32`) or `0` when absent. Preserves
   access after active lock removal and enables planning paginated reads
   without loading full history vectors into memory (#1195)
+- `escrow`: admin-only `recover_token(token, to, amount)` for tokens sent to
+  the escrow by mistake. The configured funding asset is rejected with the new
+  `EscrowError::InvalidToken` (code 13), so active lock collateral is never
+  touched; zero or oversized amounts, the escrow as recipient, a non-admin
+  signer and the emergency pause are also rejected. Each recovery emits a
+  `token_recovered` audit event with the admin, token, recipient and amount
+  (#1201)
+- `tooling`: storage migration fixture (`tests/migration`,
+  `scripts/migration_fixture.sh`, CI job `storage migration fixture`). It
+  deploys the baseline Wasm, writes registry, invoice, escrow and pool state,
+  upgrades every contract to the candidate Wasm, and verifies the reads still
+  decode and stay writable, plus non-admin and unknown-hash rejection and
+  upgrade idempotency. Procedure documented in `DEPLOYMENT.md` (#1207)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
