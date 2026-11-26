@@ -122,7 +122,7 @@ pub enum DataKey {
     /// `docs/SEP41_DESIGN.md` requires shares to carry the funding asset's
     /// decimals, and under the factory model each instance has its own.
     ShareDecimals,
-    /// Admin-configured minimum invoice discount floor (yield floor), in
+    /// Admin-configured minimum invoice discount discount (yield floor), in
     /// basis points, enforced by `fund_invoice` (issue #829). Defaults to `0`
     /// — no floor — so behavior is unchanged until an admin opts in.
     /// Appended after `ShareDecimals`, per the comment above
@@ -159,6 +159,8 @@ pub enum DataKey {
     /// calls, before any buyer refund is netted out. Stored in persistent
     /// storage (#1174).
     LifetimeRepaidVolume,
+    /// Optional maximum loss threshold in basis points, compared against cumulative realized loss vs cumulative funded volume (#1289).
+    MaxLossThresholdBps,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,
@@ -200,6 +202,20 @@ pub struct PoolConfig {
     /// Maximum number of invoices accepted by one `batch_fund_invoice` call
     /// (`MAX_BATCH_SIZE`).
     pub max_batch_size: u32,
+    /// Optional maximum loss threshold in basis points (issue #1289).
+    pub max_loss_threshold_bps: Option<u32>,
+}
+
+/// Asset balance reconciliation view returned by `get_asset_balance_reconciliation` (issue #1288).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetBalanceReconciliation {
+    /// Recorded available liquidity (`total_deposits - total_funded`).
+    pub recorded_available_liquidity: u128,
+    /// Actual token balance held by the pool contract.
+    pub actual_token_balance: u128,
+    /// Signed difference: `actual_token_balance` minus `recorded_available_liquidity` (positive if surplus, negative if deficit).
+    pub signed_difference: i128,
 }
 
 /// Why a listed invoice would currently be rejected by `fund_invoice`.
@@ -217,6 +233,7 @@ pub enum FundingRejectionReason {
     MaturityTooLong,
     InsufficientLiquidity,
     UtilizationCapExceeded,
+    MaxLossExceeded,
     Overflow,
 }
 
@@ -241,5 +258,5 @@ pub struct FundingEligibility {
     /// True when no funding rejection reasons apply.
     pub is_eligible: bool,
     /// Every currently applicable funding rejection reason.
-    pub rejection_reasons: Vec<FundingRejectionReason>,
+    pub rejection_reasons: Vec<FundingRejectionReason},
 }

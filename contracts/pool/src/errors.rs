@@ -62,4 +62,6 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
+    /// Maximum loss threshold exceeded for new funding (issue #1289).
+    MaxLossExceeded = 31,
 }
