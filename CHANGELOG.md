@@ -7,6 +7,37 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `invoice`: `get_amount_due(invoice_id) -> u128`, the amount the buyer owes
+  now for every status: `0` for invoices that were never funded (`Created`,
+  `Listed`, `Expired`, `Cancelled`) and once `Repaid`; `remaining_balance`
+  while `Funded`, `Active` or `Confirmed`, including after partial
+  repayments; and the unpaid `remaining_balance` after `Defaulted`. Unlike
+  `get_remaining_balance`, it does not report the face value before funding.
+  Read-only, no authorization, no storage change (#1134)
+
+### Changed
+
+- `escrow`: `default_resolved` audit event data payload updated to `(u128, u64)`
+  representing `(amount, lock_age)` to record elapsed lock seconds alongside
+  the invoice ID, pool, caller, and resolved amount. Failed default attempts
+  produce no event (#1193)
+- `pool`: `get_share_price` now documents its rounding. The 1e18 fixed-point
+  price is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` truncated toward
+  zero, so it is deterministic and never overstates a share. Tests pin the
+  value for an empty pool (`0`), after the first deposit (exactly 1.0), after
+  yield (`1_006_666_666_666_666_666` for 30.2e9 over 30e9) and after a default
+  (`673_333_333_333_333_333`), the truncation against round-to-nearest, that
+  the view needs no authorization, and the `Overflow` boundary (#1166)
+- `invoice`: `list_for_financing` and `batch_list_for_financing` now require
+  `discount_bps` in `1..=5000`. A zero discount is rejected with
+  `InvoiceError::InvalidDiscount` (the batch path reports it as a failed
+  entry), and values above 5000 keep failing with `DiscountTooHigh`. Adds a
+  proptest over the rejected range (`0` and `5001..=u32::MAX`) that checks the
+  exact error and that the invoice and `get_counts()` are unchanged, plus
+  pinned boundary cases for 1, 5000 and 5001 (#849)
+
 ### Fixed
 
 - `invoice`: cap repayment yield at the full discount at maturity, including
@@ -15,6 +46,39 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- `escrow`: `get_last_release_recipient(invoice_id)` view returning the address
+  that received the most recent successful release or default for an invoice,
+  recorded only after the token transfer succeeds. Failed transfers never
+  update it, and the recipient lives in a new appended storage key so existing
+  records still decode (#1296)
+- `escrow`: admin-settable minimum lock amount via `set_min_lock_amount` and
+  `get_min_lock_amount`, with a `min_lock_amount_set` event. The default `0`
+  preserves the previous any-non-zero-amount behaviour, future locks below the
+  minimum fail with `AmountBelowMinimum`, and existing locks remain releasable
+  (#1297)
+- `escrow`: `get_custody_coverage(invoice_id)` preflight view returning
+  `CustodyCoverage { tracked_amount, token_balance, can_release }` without
+  transferring funds or changing storage (#1298)
+- `tooling`: `scripts/check_deployed_hashes.py`, run by both deploy scripts
+  before the first reference-setting call. It compares each deployed
+  contract's on-chain code hash with the intended release manifest (or the
+  locally built WASM) and aborts wiring on any mismatch (#1299)
+- `escrow`: `get_history_count(invoice_id)` view, returning the number of
+  history events recorded for an invoice (`u32`) or `0` when absent. Preserves
+  access after active lock removal and enables planning paginated reads
+  without loading full history vectors into memory (#1195)
+- `escrow`: `get_release_authorization(caller)` view, returning a
+  `ReleaseAuthorization` that reports which escrow write entry points
+  (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
+  `release_after_timeout`) the address may call under the current
+  configuration, including the pinned invoice reference and the pause state.
+  Read-only, needs no auth, and never replaces the write paths' own
+  `require_auth` checks (#1198)
+- `invoice`: `get_issuer_invoice_ids(address, page, page_size)` view returning
+  a bounded page of one issuer's invoice IDs in creation order without loading
+  any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
+  otherwise it panics with `InvalidPageSize`. Out-of-range pages return empty.
+  `get_by_issuer` and the storage layout are unchanged (#1150)
 - `pool`: `share_price_updated` event emitted on successful yield-bearing
   repayments with the invoice ID and the old/new 18-decimal fixed-point share
   prices, plus the `get_share_price()` view using the same encoding. Failed and
@@ -33,6 +97,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pool`: `get_lifetime_withdrawn_volume()` view backed by a cumulative counter
   incremented only by successful LP `withdraw` amounts. Failed calls and
   internal funding transfers leave it unchanged (#1173)
+- `invoice`: `exists(invoice_id) -> bool` view, so callers can check an ID
+  without trapping `NotFound` from `get`. It is a pure presence check on the
+  invoice record: checking a missing ID creates no storage, and checking an
+  existing one does not extend its TTL. Invoices in every status, including
+  cancelled and repaid ones, exist (#1153)
 - `pool`: `get_lifetime_repaid_volume()` view backed by a cumulative counter of
   the full amount received by successful `receive_repayment` /
   `receive_repayment_with_refund` calls, including early repayments. Replayed
@@ -84,6 +153,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`__constructor` since #827, formerly `initialize`: `funding_asset`,
   `registry_contract`, `treasury`, `min_initial_deposit`,
   `share_name`, `share_symbol`, `share_decimals`)
+- `invoice`: `get_buyer_invoice_ids(address, page, page_size)` view returning
+  a bounded page of one buyer's invoice IDs in creation order without loading
+  any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
+  otherwise it panics with `InvalidPageSize`. Out-of-range pages return empty.
+  `get_by_buyer` and the storage layout are unchanged (#1151)
 
 ### Changed
 

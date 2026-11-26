@@ -92,6 +92,22 @@ Emitted when either the issuer or buyer confirms delivery.
 
 ---
 
+### `delivery_evidence_recorded`
+
+Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery evidence hash after shipment (issue #1162). Only the hash is published — the delivery documents themselves stay off-chain.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"delivery_evidence_recorded"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Actor (buyer or issuer) that attached the hash |
+| **Data** | `BytesN<32>` | Evidence hash |
+
+**Emitted by:** `record_delivery_evidence()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `both_confirmed`
 
 Emitted when both issuer and buyer have confirmed delivery (invoice advances to Confirmed).
@@ -767,6 +783,14 @@ Emitted when locked funds are released to the issuer.
 
 **Emitted by:** `release_to_issuer()` in `contracts/escrow/src/lib.rs:184`
 
+#### Last release recipient
+
+After the token transfer succeeds, `release_to_issuer` also records the issuer
+as the invoice's most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. The event shape is unchanged. A
+failed transfer reverts the call before the write, so it never updates the
+stored recipient.
+
 ---
 
 ### `released_to_pool`
@@ -782,6 +806,13 @@ Emitted when locked funds are released back to the pool (on repayment).
 | **Data** | `u128` | Released amount (repayment amount) |
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
+
+#### Last release recipient
+
+After a successful transfer, the pool address is recorded as the invoice's
+most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. Failed transfers revert before the
+write and leave any earlier recipient untouched.
 
 #### Partial Release and Residual Lock
 
@@ -810,9 +841,34 @@ Emitted when default is resolved and funds returned to pool.
 | `topic[0]` | `Symbol` | `"default_resolved"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
 | `topic[2]` | `Address` | Pool contract address |
-| **Data** | `u128` | Returned amount |
+| `topic[3]` | `Address` | Caller address that triggered the default resolution |
+| **Data** | `(u128, u64)` | `(returned_amount, lock_age)` where `lock_age` is elapsed seconds funds remained in escrow before default handling |
 
-**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs:311`
+**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs`
+**Source:** `contracts/escrow/src/events.rs:69`
+
+#### Last release recipient
+
+A successful default records the pool address as the invoice's most recent
+release recipient (#1296). All funds always go to the pool, whatever address
+triggered the default.
+
+---
+
+### `min_lock_amount_set`
+
+Emitted by `set_min_lock_amount()` when the admin changes the minimum accepted
+by future `lock` calls (#1297). Existing locks are unaffected and remain
+releasable.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_lock_amount_set"` |
+| `topic[1]` | `Address` | Admin who set the minimum |
+| **Data** | `u128` | New minimum in USDC stroops (`0` disables it) |
+
+**Emitted by:** `set_min_lock_amount()` in `contracts/escrow/src/lib.rs`
 
 ---
 
@@ -923,7 +979,22 @@ Emitted when an account profile's details or metadata are updated.
 | `topic[1]` | `Address` | Profile address |
 | **Data** | `()` | None |
 
-**Emitted by:** `update_profile()` in `contracts/registry/src/lib.rs:323` and `update_metadata()` at line 363
+**Emitted by:** `update_profile()` and `update_metadata()` in `contracts/registry/src/lib.rs`
+
+---
+
+### `metadata_key_removed`
+
+Emitted when a profile owner removes one metadata key.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_removed"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `String` | Metadata key removed |
+
+**Emitted by:** `remove_metadata_key()` in `contracts/registry/src/lib.rs`
 
 ---
 
@@ -1074,6 +1145,150 @@ Emitted when the admin disengages the emergency circuit breaker.
 | **Data** | `()` | None |
 
 **Emitted by:** `unpause()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `profile_version`
+
+Emitted whenever a profile's update sequence number changes (#1128): `1` on registration, then once per write that actually changes the stored profile. A consumer that sees the version for an address jump by more than one has missed an update and should re-read the profile with `get_profile`. No-op calls (identical metadata, idempotent `revoke`/`reinstate`, `verify_profile` with the value already held) do not emit it.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"profile_version"` |
+| `topic[1]` | `Address` | Profile address |
+| **Data** | `u64` | New version |
+
+**Emitted by:** every `register_*` / `batch_register_*` (new profiles only), `update_profile`, `update_metadata`, `verify_profile`, `revoke`, `reinstate` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_proposed`
+
+Emitted when the admin proposes a delayed admin transfer (#1124). The current admin stays in control until the proposal is accepted.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_proposed"` |
+| `topic[1]` | `Address` | Current admin |
+| **Data** | `(Address, u64)` | `(new_admin, activates_at)` |
+
+**Emitted by:** `propose_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_accepted`
+
+Emitted when the proposed admin accepts a delayed transfer at or after `activates_at`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_accepted"` |
+| `topic[1]` | `Address` | Previous admin |
+| **Data** | `Address` | New admin |
+
+**Emitted by:** `accept_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_transfer_cancelled`
+
+Emitted when the admin or the guardian cancels a pending delayed transfer.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_transfer_cancelled"` |
+| `topic[1]` | `Address` | Caller (admin or guardian) |
+| **Data** | `Address` | The `new_admin` that was proposed |
+
+**Emitted by:** `cancel_admin_transfer()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `guardian_set`
+
+Emitted when the admin configures the emergency guardian (#1125).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"guardian_set"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `Address` | Guardian |
+
+**Emitted by:** `set_guardian()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `guardian_removed`
+
+Emitted when the admin removes the emergency guardian.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"guardian_removed"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `()` | None |
+
+**Emitted by:** `remove_guardian()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_frozen`
+
+Emitted when the guardian freezes admin-only writes. Not emitted when already frozen.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_frozen"` |
+| `topic[1]` | `Address` | Guardian |
+| **Data** | `()` | None |
+
+**Emitted by:** `freeze_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `admin_unfrozen`
+
+Emitted when the guardian lifts the admin freeze. Not emitted when not frozen.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"admin_unfrozen"` |
+| `topic[1]` | `Address` | Guardian |
+| **Data** | `()` | None |
+
+**Emitted by:** `unfreeze_admin()` in `contracts/registry/src/lib.rs`  
+**Source:** `contracts/registry/src/events.rs`
+
+---
+
+### `metadata_key_policy_set`
+
+Emitted when the admin changes the metadata key policy (#1120).
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"metadata_key_policy_set"` |
+| `topic[1]` | `Address` | Admin |
+| **Data** | `MetadataKeyPolicy` | `Unrestricted` or `AllowlistV1` |
+
+**Emitted by:** `set_metadata_key_policy()` in `contracts/registry/src/lib.rs`  
 **Source:** `contracts/registry/src/events.rs`
 
 ---
