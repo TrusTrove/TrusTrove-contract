@@ -31,8 +31,20 @@ permissions:
   contents: read
 
 jobs:
+  pr-malware-preflight:
+    name: abi-pr-malware-preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Scan repository before running ABI code
+        run: python3 scripts/security/scan_repo.py .
+
   unit-tests:
     name: unit-tests
+    needs: pr-malware-preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -42,6 +54,7 @@ jobs:
 
   testnet-abi-check:
     name: testnet-abi-check
+    needs: pr-malware-preflight
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7

@@ -65,6 +65,38 @@ TrusTrove smart contracts have not been formally audited.
 Users interact with testnet contracts at their own risk.
 A security audit is planned prior to any mainnet deployment.
 
+## Repository malware guard
+
+The `malware-guard` GitHub Actions check scans every tracked file on each pull
+request and on pushes to `main`. For pull requests it runs the scanner from the
+trusted base branch against a separate checkout of the proposed commit. It does
+not build, import, or execute files from the pull request. CI and ABI jobs also
+run a preflight scan before their build and test steps.
+
+The guard blocks editor startup configuration (`.vscode/` and similar executable
+workspace settings), new build entry points in this Rust repository, known
+PolinRider payload hashes and markers, disguised font files, hidden code after
+long whitespace runs, and the reported `node api.js &&` build hook. This is a
+targeted static check; a clean result is not proof that arbitrary code or the
+developer's machine is malware-free.
+
+The trusted check also rejects pull requests that modify its scanner or workflow
+file. A maintainer must use a reviewed administrative procedure to update those
+controls deliberately.
+
+Repository admins should make **`malware-guard`** a required status check for
+`main` in branch protection. The existing `build-and-test` check remains
+required. Reviewers should scan an unfamiliar clone before opening it in VS
+Code and use [Restricted Mode](https://code.visualstudio.com/docs/editing/workspaces/workspace-trust)
+until they trust it. VS Code can run a task marked `runOn: folderOpen` in a
+trusted workspace.
+
+Run the same read-only scan locally with
+`python3 scripts/security/scan_repo.py .`. The guard checks tracked files, so
+also inspect untracked local files and any unusual editor configuration before
+trusting a workspace. The campaign patterns are documented in
+[StepSecurity's PolinRider analysis](https://www.stepsecurity.io/blog/polinrider-malware-open-source-pull-requests).
+
 ## Further Reading
 
 - [Threat Model](./docs/THREAT_MODEL.md) — detailed trust assumptions, auth gates, and attack vectors
