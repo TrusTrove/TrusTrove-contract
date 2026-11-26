@@ -286,6 +286,47 @@ function Invoke-Init {
 }
 
 # ---------------------------------------------------------------------------
+# 4d. Deployed code hash preflight (issue #1299)
+# ---------------------------------------------------------------------------
+
+# Before any reference-setting call, compare each deployed contract's on-chain
+# code hash with the intended release: the wasm_hashes map in
+# $env:RELEASE_MANIFEST when set, otherwise the freshly built local WASM.
+function Assert-DeployedCodeHashes {
+    param([string[]]$contracts)
+
+    if ($dryRun) {
+        Write-Host "  [DRY-RUN] Would verify deployed code hashes before wiring: $($contracts -join ', ')"
+        return
+    }
+
+    $scriptDir = Split-Path -Parent $PSCommandPath
+    $sourceArgs = @()
+    if ($env:RELEASE_MANIFEST) {
+        if (-not (Test-Path $env:RELEASE_MANIFEST)) {
+            Write-Host "ERROR: RELEASE_MANIFEST is set but not found: $env:RELEASE_MANIFEST"
+            exit 1
+        }
+        $sourceArgs = @('--manifest', $env:RELEASE_MANIFEST)
+        Write-Host "=== Preflight: comparing deployed code hashes with $env:RELEASE_MANIFEST ==="
+    } else {
+        $sourceArgs = @('--wasm-dir', 'target/wasm32v1-none/release')
+        Write-Host "=== Preflight: comparing deployed code hashes with locally built WASM ==="
+    }
+
+    $checkArgs = $sourceArgs + @('--network', 'testnet')
+    foreach ($contract in $contracts) {
+        $checkArgs += @('--contract', $contract)
+    }
+    & python (Join-Path $scriptDir 'check_deployed_hashes.py') @checkArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: deployed code does not match the intended release."
+        Write-Host "       Refusing to set contract references. No wiring call was made."
+        exit 1
+    }
+}
+
+# ---------------------------------------------------------------------------
 # 5. Pre-flight checks
 # ---------------------------------------------------------------------------
 
@@ -446,6 +487,13 @@ if (-not $dryRun -and $poolXlmId -ne $poolXlmTargetId) {
 }
 Write-Host "XLM Pool: $poolXlmId"
 
+# Issue #1299: verify every contract ID about to be wired is running the WASM
+# this release intends, before the first reference-setting call.
+$preflightContracts = @("registry=$registryId", "invoice=$invoiceId", "escrow_usdc=$escrowUsdcId", "pool_usdc=$poolUsdcId")
+if ($escrowXlmId) { $preflightContracts += "escrow_xlm=$escrowXlmId" }
+if ($poolXlmId) { $preflightContracts += "pool_xlm=$poolXlmId" }
+Assert-DeployedCodeHashes $preflightContracts
+
 Write-Host "`n=== Wiring USDC pool_contract into invoice_contract ==="
 Invoke-Init "invoice_set_pool" $invoiceId @("--", "set_pool_contract", "--pool_contract", $poolUsdcId)
 
@@ -496,6 +544,10 @@ NEXT_PUBLIC_ESCROW_XLM_CONTRACT_ID=$escrowXlmId # EXPERIMENTAL
 NEXT_PUBLIC_POOL_USDC_CONTRACT_ID=$poolUsdcId
 NEXT_PUBLIC_POOL_XLM_CONTRACT_ID=$poolXlmId # EXPERIMENTAL
 "@ | Set-Content $envOut
+
+python (Join-Path $PSScriptRoot 'deployment_manifest.py') write deployments.json `
+    $registryId $invoiceId $escrowUsdcId $escrowXlmId $poolUsdcId $poolXlmId
+if ($LASTEXITCODE -ne 0) { throw 'Could not write the deployment manifest' }
 
 Write-Host "`n==========================================="
 Write-Host "Deployment complete."

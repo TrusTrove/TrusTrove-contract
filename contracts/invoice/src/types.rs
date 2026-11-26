@@ -151,6 +151,11 @@ pub enum DataKey {
     // O(1) buyer-index position marker. Added separately from the legacy
     // boolean membership marker to preserve its stored value type.
     BuyerIndexPosition(Address, u64),
+    // 32-byte proof-of-delivery evidence hash attached by the buyer or issuer
+    // after shipment, keyed by invoice id (issue #1162). Only the hash is
+    // stored; the underlying documents stay off-chain. Appended after every
+    // existing variant so already-deployed key discriminants stay stable.
+    DeliveryEvidence(BytesN<32>),
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).
@@ -472,4 +477,32 @@ pub struct RepaymentEligibility {
     pub is_eligible: bool,
     /// Every currently applicable invoice-level rejection reason.
     pub rejection_reasons: Vec<RepaymentRejectionReason>,
+}
+
+/// Why an invoice currently can or cannot be defaulted, as returned by
+/// [`InvoiceContract::get_default_eligibility`](crate::InvoiceContract::get_default_eligibility)
+/// (issue #1149).
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum DefaultEligibilityReason {
+    /// Default is permitted: the invoice is in a defaultable status and the
+    /// configured grace period after its due date has fully elapsed.
+    Eligible,
+    /// Default is blocked because the invoice is not `Funded`, `Active`, or
+    /// `Confirmed` — it has not been funded yet or is already terminal.
+    InvalidStatus,
+    /// Default is blocked because
+    /// `now <= due_date + default_grace_seconds`, exactly the boundary
+    /// `trigger_default` rejects with `DueDateNotPassed`.
+    DueDateNotPassed,
+}
+
+/// Result of the [`InvoiceContract::get_default_eligibility`](crate::InvoiceContract::get_default_eligibility)
+/// view: whether `trigger_default` would succeed right now, plus the reason
+/// when it would not (issue #1149).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct DefaultEligibility {
+    pub eligible: bool,
+    pub reason: DefaultEligibilityReason,
 }

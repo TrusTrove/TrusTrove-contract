@@ -49,7 +49,14 @@ export enum InvoiceError {
   AttestationExpired = 30,
   InvalidRiskScore = 31,
   InvalidRecoveryId = 32,
+  InvalidEvidenceHash = 33,
+  EvidenceAlreadyRecorded = 34,
 }
+
+export type DefaultEligibilityReason =
+  | { tag: "DueDateNotPassed"; values?: void }
+  | { tag: "Eligible"; values?: void }
+  | { tag: "InvalidStatus"; values?: void };
 
 export type InvoiceFundingRejectionReason =
   | { tag: "AttestationExpired"; values?: void }
@@ -99,6 +106,11 @@ export interface Attestation {
 export interface AttestationAge {
   age_seconds: u64;
   submitted_at: u64;
+}
+
+export interface DefaultEligibility {
+  eligible: boolean;
+  reason: DefaultEligibilityReason;
 }
 
 export interface FinancingTerms {
@@ -209,21 +221,26 @@ export interface InvoiceClient {
   create(args: { issuer: Address; buyer: Address; face_value: u128; due_date: u64; funding_asset: Address }): Promise<BytesN<32>>;
   create_with_purchase_order_hash(args: { issuer: Address; buyer: Address; face_value: u128; due_date: u64; funding_asset: Address; purchase_order_hash: Option<BytesN<32>> }): Promise<BytesN<32>>;
   delist(args: { invoice_id: BytesN<32>; cancel_invoice: boolean }): Promise<boolean>;
+  exists(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   expire_listing(args: { invoice_id: BytesN<32>; caller: Address }): Promise<boolean>;
   get(args: { invoice_id: BytesN<32> }): Promise<Invoice>;
   get_admin(): Promise<Option<Address>>;
   get_agent_registry_contract(): Promise<Option<Address>>;
+  get_amount_due(args: { invoice_id: BytesN<32> }): Promise<u128>;
   get_asset_metadata(args: { asset: Address }): Promise<Option<AssetMetadata>>;
   get_attestation(args: { invoice_id: BytesN<32> }): Promise<Option<Attestation>>;
   get_attestation_age(args: { invoice_id: BytesN<32> }): Promise<Option<AttestationAge>>;
   get_attestation_evidence_hash(args: { invoice_id: BytesN<32> }): Promise<Option<BytesN<32>>>;
   get_buyer(args: { invoice_id: BytesN<32> }): Promise<Address>;
+  get_buyer_invoice_ids(args: { address: Address; page: u32; page_size: u32 }): Promise<Array<BytesN<32>>>;
   get_by_buyer(args: { address: Address; page: u32; page_size: u32 }): Promise<Array<Invoice>>;
   get_by_issuer(args: { address: Address; page: u32; page_size: u32 }): Promise<Array<Invoice>>;
   get_by_status(args: { status: InvoiceStatus; page: u32; page_size: u32 }): Promise<Array<Invoice>>;
   get_counts(): Promise<Map<string, u64>>;
   get_created_at_range(args: { start_time: u64; end_time: u64; cursor: Option<u32>; page_size: u32 }): Promise<InvoiceIdPage>;
+  get_default_eligibility(args: { invoice_id: BytesN<32> }): Promise<DefaultEligibility>;
   get_default_grace_seconds(): Promise<u64>;
+  get_delivery_evidence(args: { invoice_id: BytesN<32> }): Promise<Option<BytesN<32>>>;
   get_discount_bps(args: { invoice_id: BytesN<32> }): Promise<u32>;
   get_due_date(args: { invoice_id: BytesN<32> }): Promise<u64>;
   get_escrow_contract(): Promise<Option<Address>>;
@@ -240,6 +257,8 @@ export interface InvoiceClient {
   get_invoice_count_by_issuer(args: { address: Address }): Promise<u32>;
   get_invoice_ids_by_status(args: { status: InvoiceStatus; cursor: Option<u32>; page_size: u32 }): Promise<InvoiceIdPage>;
   get_issuer(args: { invoice_id: BytesN<32> }): Promise<Address>;
+  get_issuer_confirmed_at(args: { invoice_id: BytesN<32> }): Promise<Option<u64>>;
+  get_issuer_invoice_ids(args: { address: Address; page: u32; page_size: u32 }): Promise<Array<BytesN<32>>>;
   get_lifecycle_timestamps(args: { invoice_id: BytesN<32> }): Promise<LifecycleTimestamps>;
   get_listing_expiry_preview(args: { invoice_id: BytesN<32> }): Promise<ListingExpiryPreview>;
   get_max_invoice_lifetime(): Promise<u64>;
@@ -263,6 +282,7 @@ export interface InvoiceClient {
   mark_funded(args: { invoice_id: BytesN<32>; pool_address: Address; asset_address: Address; funded_amount: u128 }): Promise<boolean>;
   mark_shipped(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   pause(): Promise<void>;
+  record_delivery_evidence(args: { invoice_id: BytesN<32>; actor: Address; evidence_hash: BytesN<32> }): Promise<boolean>;
   remove_supported_asset(args: { asset: Address }): Promise<void>;
   repay(args: { invoice_id: BytesN<32> }): Promise<boolean>;
   repay_early(args: { invoice_id: BytesN<32> }): Promise<boolean>;
@@ -283,3 +303,4 @@ export interface InvoiceClient {
 }
 
 export const INVOICE_METHODS = ["__constructor", "add_supported_asset", "batch_create", "batch_list_for_financing", "cancel", "confirm_delivery", "correct_invoice", "create", "create_with_purchase_order_hash", "delist", "expire_listing", "get", "get_admin", "get_agent_registry_contract", "get_asset_metadata", "get_attestation", "get_attestation_age", "get_attestation_evidence_hash", "get_buyer", "get_by_buyer", "get_by_issuer", "get_by_status", "get_counts", "get_created_at_range", "get_default_grace_seconds", "get_discount_bps", "get_due_date", "get_escrow_contract", "get_expiry_window", "get_face_value", "get_financing_terms", "get_funded_amount", "get_funding_asset", "get_funding_context", "get_funding_eligibility", "get_funding_terms", "get_ids_by_created_at_range", "get_invoice_count_by_buyer", "get_invoice_count_by_issuer", "get_invoice_ids_by_status", "get_issuer", "get_lifecycle_timestamps", "get_listing_expiry_preview", "get_max_invoice_lifetime", "get_pool_contract", "get_purchase_order_hash", "get_registry_contract", "get_remaining_balance", "get_repaid_amount", "get_repayment_eligibility", "get_seconds_to_maturity", "get_settlement_summary", "get_status", "get_supported_asset_count", "get_supported_asset_ids", "get_supported_assets", "get_supported_assets_page", "has_status_membership", "is_supported_asset", "list_for_financing", "mark_defaulted", "mark_funded", "mark_shipped", "pause", "remove_supported_asset", "repay", "repay_early", "repay_partial", "set_agent_registry_contract", "set_asset_metadata", "set_default_grace_seconds", "set_escrow_contract", "set_expiry_window", "set_max_invoice_lifetime", "set_pool_contract", "submit_attestation", "transfer_ownership", "trigger_default", "unpause", "update_listing_terms", "upgrade"] as const;
+export const INVOICE_METHODS = ["__constructor", "add_supported_asset", "batch_create", "batch_list_for_financing", "cancel", "confirm_delivery", "create", "exists", "expire_listing", "get", "get_admin", "get_agent_registry_contract", "get_amount_due", "get_asset_metadata", "get_attestation", "get_attestation_age", "get_attestation_evidence_hash", "get_buyer", "get_buyer_invoice_ids", "get_by_buyer", "get_by_issuer", "get_by_status", "get_counts", "get_created_at_range", "get_default_eligibility", "get_default_grace_seconds", "get_delivery_evidence", "get_discount_bps", "get_due_date", "get_escrow_contract", "get_expiry_window", "get_face_value", "get_financing_terms", "get_funded_amount", "get_funding_asset", "get_funding_context", "get_funding_eligibility", "get_funding_terms", "get_ids_by_created_at_range", "get_invoice_count_by_buyer", "get_invoice_count_by_issuer", "get_invoice_ids_by_status", "get_issuer", "get_issuer_confirmed_at", "get_issuer_invoice_ids", "get_lifecycle_timestamps", "get_listing_expiry_preview", "get_max_invoice_lifetime", "get_pool_contract", "get_registry_contract", "get_remaining_balance", "get_repaid_amount", "get_repayment_eligibility", "get_seconds_to_maturity", "get_settlement_summary", "get_status", "get_supported_asset_count", "get_supported_asset_ids", "get_supported_assets", "get_supported_assets_page", "has_status_membership", "is_supported_asset", "list_for_financing", "mark_defaulted", "mark_funded", "mark_shipped", "pause", "record_delivery_evidence", "remove_supported_asset", "repay", "repay_early", "repay_partial", "set_agent_registry_contract", "set_asset_metadata", "set_default_grace_seconds", "set_escrow_contract", "set_expiry_window", "set_max_invoice_lifetime", "set_pool_contract", "submit_attestation", "transfer_ownership", "trigger_default", "unpause", "upgrade"] as const;
