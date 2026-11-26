@@ -33,6 +33,17 @@ pub fn address_revoked(env: &Env, address: &Address) {
         .publish((Symbol::new(env, "address_revoked"), address.clone()), ());
 }
 
+pub fn revocation_reason_recorded(
+    env: &Env,
+    address: &Address,
+    reason_hash: &soroban_sdk::BytesN<32>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "revocation_reason_recorded"), address.clone()),
+        reason_hash.clone(),
+    );
+}
+
 pub fn batch_registered(env: &Env, registered: u32, skipped: u32) {
     env.events().publish(
         (Symbol::new(env, "batch_registered"),),
