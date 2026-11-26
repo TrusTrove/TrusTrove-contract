@@ -19,8 +19,8 @@ use soroban_sdk::{
 };
 
 use crate::{
-    DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent, EscrowRecord,
-    ReleaseAuthorization, DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
+    CustodyCoverage, DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent,
+    EscrowRecord, ReleaseAuthorization, DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
     TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
@@ -3856,4 +3856,279 @@ fn test_default_resolved_failed_attempts_produce_no_event() {
     // 6. Idempotent second call on now-consumed record -> returns false, produces no event
     assert!(!client.handle_default(&invoice_id, &pool));
     assert!(env.events().all().is_empty());
+}
+
+// ============================================================================
+// Last release recipient (issue #1296)
+// ============================================================================
+
+#[test]
+fn test_last_release_recipient_is_absent_until_a_release_succeeds() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1296);
+
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+    assert_eq!(client.get_last_release_recipient(&invoice_id), None);
+}
+
+#[test]
+fn test_last_release_recipient_tracks_issuer_release() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1296);
+
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+    assert!(client.release_to_issuer(&invoice_id, &issuer));
+
+    assert_eq!(
+        client.get_last_release_recipient(&invoice_id),
+        Some(issuer.clone())
+    );
+}
+
+#[test]
+fn test_last_release_recipient_tracks_repayment_default_and_timeout_to_pool() {
+    let (env, client, admin, pool, issuer, _usdc_id) = setup();
+
+    let repaid_id = generate_invoice_id(&env, 1296);
+    client.lock(&repaid_id, &1_000_000_000, &issuer);
+    assert!(client.release_to_pool(&repaid_id, &1_000_000_000));
+    assert_eq!(
+        client.get_last_release_recipient(&repaid_id),
+        Some(pool.clone())
+    );
+
+    let default_id = generate_invoice_id(&env, 1297);
+    client.lock(&default_id, &1_000_000_000, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 60);
+    assert!(client.handle_default(&default_id, &admin));
+    assert_eq!(
+        client.get_last_release_recipient(&default_id),
+        Some(pool.clone())
+    );
+
+    let timeout_id = generate_invoice_id(&env, 1298);
+    client.lock(&timeout_id, &1_000_000_000, &issuer);
+    client.set_timeout_window(&3600);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3600);
+    assert!(client.release_after_timeout(&timeout_id));
+    assert_eq!(
+        client.get_last_release_recipient(&timeout_id),
+        Some(pool.clone())
+    );
+}
+
+/// A rejected transfer must not record the attempted recipient: the write
+/// happens after the token call, so the invoice keeps no recipient at all.
+#[test]
+fn test_last_release_recipient_not_updated_when_transfer_fails() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let admin = env.register(MockCaller, ());
+    let pool = env.register(MockCaller, ());
+    let issuer = env.register(MockCaller, ());
+    let token_id = env.register(reject::RecipientRejectMockToken, ());
+    let token = reject::RecipientRejectMockTokenClient::new(&env, &token_id);
+
+    env.as_contract(&token_id, || {
+        env.storage()
+            .persistent()
+            .set(&BalanceKey(pool.clone()), &10_000_000_000_000i128);
+    });
+
+    let contract_id = env.register(
+        EscrowContract,
+        (admin.clone(), pool.clone(), token_id.clone()),
+    );
+    let client = EscrowContractClient::new(&env, &contract_id);
+
+    let invoice_id = generate_invoice_id(&env, 1299);
+    let amount: u128 = 1_000_000_000;
+    assert!(client.lock(&invoice_id, &amount, &issuer));
+
+    // Reject the escrow→issuer leg, then attempt the release.
+    token.set_reject_to(&issuer.clone());
+    let issuer_before = token.balance(&issuer);
+    assert!(client.try_release_to_issuer(&invoice_id, &issuer).is_err());
+
+    assert_eq!(client.get_last_release_recipient(&invoice_id), None);
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(token.balance(&issuer), issuer_before);
+}
+
+// ============================================================================
+// Minimum lock amount (issue #1297)
+// ============================================================================
+
+#[test]
+fn test_min_lock_amount_defaults_to_zero_and_allows_small_locks() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1297);
+
+    assert_eq!(client.get_min_lock_amount(), 0);
+    assert!(client.lock(&invoice_id, &1, &issuer));
+}
+
+#[test]
+fn test_set_min_lock_amount_updates_view_and_emits_event() {
+    let (env, client, admin, _pool, _issuer, _usdc_id) = setup();
+    let min_amount: u128 = 5_000_000;
+
+    client.set_min_lock_amount(&min_amount);
+    let events = env.events().all();
+
+    assert_eq!(client.get_min_lock_amount(), min_amount);
+    let (_, topics, data) = events.last().expect("expected min_lock_amount_set");
+    let name: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    let event_admin: Address = Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    let emitted: u128 = u128::try_from_val(&env, &data).unwrap();
+    assert_eq!(name, Symbol::new(&env, "min_lock_amount_set"));
+    assert_eq!(event_admin, admin);
+    assert_eq!(emitted, min_amount);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #12)")]
+fn test_lock_below_configured_minimum_panics() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1297);
+
+    client.set_min_lock_amount(&5_000_000);
+    client.lock(&invoice_id, &4_999_999, &issuer);
+}
+
+#[test]
+fn test_lock_below_minimum_leaves_balances_and_storage_unchanged() {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1297);
+    let token = MockTokenClient::new(&env, &usdc_id);
+
+    client.set_min_lock_amount(&5_000_000);
+    let pool_before = token.balance(&pool);
+    let escrow_before = token.balance(&client.address);
+
+    assert_eq!(
+        client.try_lock(&invoice_id, &1, &issuer),
+        Err(Ok(soroban_sdk::Error::from_contract_error(
+            crate::EscrowError::AmountBelowMinimum as u32
+        )))
+    );
+
+    assert!(!client.has_lock(&invoice_id));
+    assert!(client.get_history(&invoice_id).is_empty());
+    assert_eq!(token.balance(&pool), pool_before);
+    assert_eq!(token.balance(&client.address), escrow_before);
+}
+
+#[test]
+fn test_lock_at_configured_minimum_succeeds() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1297);
+    let min_amount: u128 = 5_000_000;
+
+    client.set_min_lock_amount(&min_amount);
+    assert!(client.lock(&invoice_id, &min_amount, &issuer));
+    assert_eq!(client.get_locked(&invoice_id), min_amount);
+}
+
+#[test]
+fn test_existing_lock_below_new_minimum_remains_releasable() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1297);
+    let amount: u128 = 1_000;
+    let token = MockTokenClient::new(&env, &usdc_id);
+
+    assert!(client.lock(&invoice_id, &amount, &issuer));
+    client.set_min_lock_amount(&1_000_000);
+
+    let issuer_before = token.balance(&issuer);
+    assert!(client.release_to_issuer(&invoice_id, &issuer));
+    assert_eq!(token.balance(&issuer) - issuer_before, amount as i128);
+    assert_eq!(client.get_locked(&invoice_id), 0);
+}
+
+#[test]
+#[should_panic]
+fn test_set_min_lock_amount_requires_admin_auth() {
+    let (_env, client, _admin, _pool, _issuer, _usdc_id) = setup_without_auths();
+    client.set_min_lock_amount(&1_000_000);
+}
+
+// ============================================================================
+// Custody coverage preflight view (issue #1298)
+// ============================================================================
+
+#[test]
+fn test_custody_coverage_without_lock_is_not_releasable() {
+    let (env, client, _admin, _pool, _issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1298);
+    let token = MockTokenClient::new(&env, &usdc_id);
+
+    let coverage = client.get_custody_coverage(&invoice_id);
+    assert_eq!(
+        coverage,
+        CustodyCoverage {
+            tracked_amount: 0,
+            token_balance: token.balance(&client.address),
+            can_release: false,
+        }
+    );
+}
+
+#[test]
+fn test_custody_coverage_reports_tracked_amount_balance_and_releasability() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1298);
+    let amount: u128 = 1_000_000_000;
+
+    client.lock(&invoice_id, &amount, &issuer);
+    let coverage = client.get_custody_coverage(&invoice_id);
+
+    assert_eq!(coverage.tracked_amount, amount);
+    assert_eq!(coverage.token_balance, amount as i128);
+    assert!(coverage.can_release);
+}
+
+#[test]
+fn test_custody_coverage_detects_shortfall_without_mutating_state() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1298);
+    let amount: u128 = 1_000_000_000;
+    let token = MockTokenClient::new(&env, &usdc_id);
+    let beneficiary = Address::generate(&env);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    // Simulate an out-of-band drain of the escrow balance.
+    token.transfer(&client.address, &beneficiary, &(amount as i128 / 2));
+
+    let locked_before = client.get_locked(&invoice_id);
+    let balance_before = token.balance(&client.address);
+    let history_before = client.get_history(&invoice_id);
+
+    let coverage = client.get_custody_coverage(&invoice_id);
+    assert_eq!(coverage.tracked_amount, amount);
+    assert_eq!(coverage.token_balance, amount as i128 / 2);
+    assert!(!coverage.can_release);
+
+    // The preflight view transfers nothing and changes no state.
+    assert_eq!(client.get_locked(&invoice_id), locked_before);
+    assert_eq!(token.balance(&client.address), balance_before);
+    assert_eq!(client.get_history(&invoice_id), history_before);
+}
+
+#[test]
+fn test_custody_coverage_counts_unsolicited_transfers_as_cover() {
+    let (env, client, _admin, _pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1298);
+    let amount: u128 = 1_000_000_000;
+    let token = MockTokenClient::new(&env, &usdc_id);
+    let donor = Address::generate(&env);
+
+    client.lock(&invoice_id, &amount, &issuer);
+    token.transfer(&donor, &client.address, &1i128);
+
+    let coverage = client.get_custody_coverage(&invoice_id);
+    assert_eq!(coverage.tracked_amount, amount);
+    assert_eq!(coverage.token_balance, amount as i128 + 1);
+    assert!(coverage.can_release);
 }

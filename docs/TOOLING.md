@@ -150,6 +150,40 @@ python3 scripts/verify_release.py --check-wasm-only
 
 ---
 
+## 4. Deployed Code Hash Preflight (`#1299`)
+
+`scripts/check_deployed_hashes.py` is a read-only gate that runs from the
+deploy scripts before any reference-setting call. It fetches each deployed
+contract's WASM hash from Soroban RPC and compares it with the intended
+release: the `wasm_hashes` map of a `--manifest`, or the local
+`target/wasm32v1-none/release/*.wasm` artifacts when no manifest is given. Any
+mismatch, missing artifact, or unreadable contract makes the script exit `1`,
+so the deploy script aborts before wiring a contract ID that is running
+unexpected code.
+
+```bash
+# Compare deployed IDs with an audited release manifest
+python3 scripts/check_deployed_hashes.py \
+  --manifest release-manifest.json \
+  --network testnet \
+  --contract registry=$REGISTRY_ID \
+  --contract invoice=$INVOICE_ID \
+  --contract escrow_usdc=$ESCROW_USDC_ID \
+  --contract pool_usdc=$POOL_USDC_ID
+
+# Compare against the locally built WASM instead
+python3 scripts/check_deployed_hashes.py \
+  --wasm-dir target/wasm32v1-none/release \
+  --network testnet \
+  --contract pool_usdc=$POOL_USDC_ID
+```
+
+Set `RELEASE_MANIFEST=/path/to/release-manifest.json` when running
+`scripts/deploy.sh` or `scripts/deploy.ps1` to pin the preflight to the audited
+release hashes.
+
+---
+
 ## Unit Tests
 
 Run all tooling unit tests without chain access or `stellar` CLI:
@@ -158,4 +192,5 @@ Run all tooling unit tests without chain access or `stellar` CLI:
 python3 -m unittest discover -s scripts -p 'test_generate_ts_bindings.py' -v
 python3 -m unittest discover -s scripts -p 'test_check_abi_compat.py' -v
 python3 -m unittest discover -s scripts -p 'test_verify_release.py' -v
+python3 -m unittest discover -s scripts -p 'test_check_deployed_hashes.py' -v
 ```
