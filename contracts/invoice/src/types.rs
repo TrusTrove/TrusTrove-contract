@@ -139,6 +139,15 @@ pub enum DataKey {
     StatusRevision(BytesN<32>),
     BuyerListingAcknowledgement(BytesN<32>),
     BuyerAcknowledgementRequired,
+    /// Confirmation that the issuer has delivered the goods/services.
+    /// Used with `issuer_confirmed` to advance the invoice to `Confirmed` status.
+    IssuerConfirmedAt(BytesN<32>),
+    /// Confirmation that the buyer has received/accepted the goods/services.
+    /// Used with `issuer_confirmed` to advance the invoice to `Confirmed` status.
+    BuyerConfirmedAt(BytesN<32>),
+    /// Evidence that delivery has been recorded for this invoice.
+    /// The inner `BytesN<32>` is the invoice ID. Value type: `u8` (index 13).
+    DeliveryEvidence(u8),
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).

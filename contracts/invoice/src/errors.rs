@@ -59,4 +59,8 @@ pub enum InvoiceError {
     InvalidRecoveryId = 32,
     /// Listing is disabled until the buyer acknowledges it.
     BuyerAcknowledgementRequired = 33,
+    /// The evidence hash for this invoice was found to be invalid.
+    InvalidEvidenceHash = 34,
+    /// The evidence hash for this invoice has already been recorded.
+    EvidenceAlreadyRecorded = 35,
 }
