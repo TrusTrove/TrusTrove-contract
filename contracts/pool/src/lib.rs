@@ -2917,8 +2917,15 @@ impl PoolContract {
     /// # Auth
     /// Requires authorization from the stored `admin`.
     ///
+    /// # Validation
+    /// * `0` removes the cap (uncapped).
+    /// * Values above `i128::MAX` are rejected with `InvalidDepositCap`.
+    ///   Pool token transfers use signed `i128` amounts, so accepting a larger
+    ///   cap would advertise a limit the funding asset cannot transfer.
+    ///
     /// # Panics
     /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidDepositCap` if `cap` exceeds `i128::MAX`.
     ///
     /// # Returns
     /// * `bool` - `true` when the cap is updated. Emits `deposit_cap_updated`
@@ -2934,6 +2941,12 @@ impl PoolContract {
         let admin =
             Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         admin.require_auth();
+        // Token transfers in this contract use signed i128 amounts. Reject a
+        // larger cap rather than accepting a configuration deposits cannot
+        // reach or safely transfer.
+        if cap > i128::MAX as u128 {
+            panic_with_error!(&env, PoolError::InvalidDepositCap);
+        }
         let old_cap = Self::deposit_cap(&env);
         env.storage()
             .instance()
