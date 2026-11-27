@@ -62,4 +62,10 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
+    /// The discounted principal that would be funded is below the
+    /// admin-configured minimum funding amount (`DataKey::MinFundPrincipal`,
+    /// set via `set_min_fund_principal`). Checked before any escrow
+    /// interaction so dust advances never consume storage or event budget
+    /// (issue #1293).
+    UnderMinimumFunding = 31,
 }

@@ -159,6 +159,11 @@ pub enum DataKey {
     /// calls, before any buyer refund is netted out. Stored in persistent
     /// storage (#1174).
     LifetimeRepaidVolume,
+    /// Admin-configured minimum discounted principal, in funding-asset base
+    /// units, that `fund_invoice` will advance (issue #1293). Defaults to `0`
+    /// (no floor). Appended after `LifetimeRepaidVolume` so existing storage
+    /// key encodings stay stable.
+    MinFundPrincipal,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,

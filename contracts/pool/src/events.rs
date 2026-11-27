@@ -127,6 +127,30 @@ pub fn invoice_defaulted(env: &Env, invoice_id: &BytesN<32>, loss_amount: u128) 
 /// Emitted by `set_max_utilization` when the admin updates the pool utilization cap.
 ///
 /// Topic: `max_utilization_updated`; data: `(old_cap_bps, new_cap_bps)`.
+/// Emitted whenever a successful pool operation changes utilization
+/// (deposit, withdrawal, funding, repayment, or default). Topics index the
+/// event name; the data payload is `(old_bps, new_bps)` so an indexer can
+/// follow utilization without recomputing it from other events (issue #1290).
+///
+/// Only emitted when the value actually changes; rejected calls revert
+/// entirely and emit nothing.
+pub fn utilization_updated(env: &Env, old_bps: u32, new_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "utilization_updated"),),
+        (old_bps, new_bps),
+    );
+}
+
+/// Emitted by `set_min_fund_principal` when the minimum funding policy
+/// changes (issue #1293). Data payload is `(old_min, new_min)` in
+/// funding-asset base units.
+pub fn min_fund_principal_updated(env: &Env, old_min: u128, new_min: u128) {
+    env.events().publish(
+        (Symbol::new(env, "min_fund_principal_updated"),),
+        (old_min, new_min),
+    );
+}
+
 pub fn max_utilization_updated(env: &Env, old_cap_bps: u32, new_cap_bps: u32) {
     env.events().publish(
         (Symbol::new(env, "max_utilization_updated"),),
