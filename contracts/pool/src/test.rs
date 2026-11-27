@@ -9698,6 +9698,27 @@ fn test_set_deposit_cap_succeeds_and_reads_back() {
     assert_eq!(te.pool.get_deposit_cap(), 500_000_000);
 }
 
+/// The largest representable token transfer amount is a valid cap.
+#[test]
+fn test_set_deposit_cap_accepts_i128_max() {
+    let te = setup();
+    let cap = i128::MAX as u128;
+    assert!(te.pool.set_deposit_cap(&cap));
+    assert_eq!(te.pool.get_deposit_cap(), cap);
+}
+
+/// Caps outside the funding token's signed transfer range are rejected and
+/// must not overwrite the previous valid configuration.
+#[test]
+fn test_set_deposit_cap_rejects_values_above_i128_max() {
+    let te = setup();
+    te.pool.set_deposit_cap(&500_000_000);
+    let invalid_cap = i128::MAX as u128 + 1;
+
+    assert!(te.pool.try_set_deposit_cap(&invalid_cap).is_err());
+    assert_eq!(te.pool.get_deposit_cap(), 500_000_000);
+}
+
 #[test]
 fn test_set_deposit_cap_zero_removes_cap() {
     let te = setup();
