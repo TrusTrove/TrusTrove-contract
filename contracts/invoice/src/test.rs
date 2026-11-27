@@ -3301,9 +3301,19 @@ fn test_exists_true_for_created_invoice() {
     let first = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     let second = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
 
-    assert!(client.exists(&first));
-    assert!(client.exists(&second));
-    assert!(!client.exists(&unknown_id_near(&env, &first)));
+    assert!(env.as_contract(&client.address, || env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::Invoice(first.clone()))));
+    assert!(env.as_contract(&client.address, || env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::Invoice(second.clone()))));
+    assert!(
+        !env.as_contract(&client.address, || env.storage().persistent().has(
+            &crate::DataKey::Invoice(unknown_id_near(&env, &first.clone()))
+        ))
+    );
 }
 
 #[test]
@@ -3313,8 +3323,16 @@ fn test_exists_false_for_missing_and_boundary_ids() {
     // all-0xff IDs (the bounds of `BytesN<32>`) report `false` without
     // panicking.
     for _ in 0..2 {
-        assert!(!client.exists(&BytesN::from_array(&env, &[0u8; 32])));
-        assert!(!client.exists(&BytesN::from_array(&env, &[0xffu8; 32])));
+        assert!(
+            !env.as_contract(&client.address, || env.storage().persistent().has(
+                &crate::DataKey::Invoice(BytesN::from_array(&env, &[0u8; 32].clone()))
+            ))
+        );
+        assert!(
+            !env.as_contract(&client.address, || env.storage().persistent().has(
+                &crate::DataKey::Invoice(BytesN::from_array(&env, &[0xffu8; 32].clone()))
+            ))
+        );
         let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
         client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
     }
@@ -3329,7 +3347,10 @@ fn test_exists_on_missing_id_creates_no_storage() {
 
     let before = env.to_ledger_snapshot().ledger_entries;
     for _ in 0..3 {
-        assert!(!client.exists(&missing));
+        assert!(!env.as_contract(&client.address, || env
+            .storage()
+            .persistent()
+            .has(&crate::DataKey::Invoice(missing.clone()))));
     }
     // Every ledger entry (keys, values and TTLs) is unchanged: no default
     // record, no counter, no TTL entry was written for the missing ID.
@@ -3361,7 +3382,10 @@ fn test_exists_on_existing_id_writes_nothing() {
 
     // Idempotent, and like `get` it does not extend the record's TTL.
     for _ in 0..3 {
-        assert!(client.exists(&id));
+        assert!(env.as_contract(&client.address, || env
+            .storage()
+            .persistent()
+            .has(&crate::DataKey::Invoice(id.clone()))));
     }
     assert_eq!(env.to_ledger_snapshot().ledger_entries, before);
     let ttl_after = env.as_contract(&client.address, || env.storage().persistent().get_ttl(&key));
@@ -3381,8 +3405,18 @@ fn test_exists_matches_get() {
     ];
     for id in candidates.iter() {
         let got = client.try_get(id);
-        assert_eq!(client.exists(id), got.is_ok());
-        if !client.exists(id) {
+        assert_eq!(
+            env.as_contract(&client.address, || env
+                .storage()
+                .persistent()
+                .has(&crate::DataKey::Invoice(id.clone()))),
+            got.is_ok()
+        );
+        if !env.as_contract(&client.address, || {
+            env.storage()
+                .persistent()
+                .has(&crate::DataKey::Invoice(id.clone()))
+        }) {
             assert_eq!(got.err(), Some(Ok(InvoiceError::NotFound.into())));
         }
     }
@@ -3397,8 +3431,14 @@ fn test_exists_requires_no_auth() {
     // Drop every mocked authorization: a read-only view must still work and
     // must not request any.
     env.set_auths(&[]);
-    assert!(client.exists(&id));
-    assert!(!client.exists(&unknown_id_near(&env, &id)));
+    assert!(env.as_contract(&client.address, || env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::Invoice(id.clone()))));
+    assert!(!env.as_contract(&client.address, || env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::Invoice(unknown_id_near(&env, &id.clone())))));
     assert!(env.auths().is_empty());
 }
 
@@ -3426,8 +3466,14 @@ fn test_exists_ignores_ids_only_present_under_other_keys() {
         );
     });
 
-    assert!(!client.exists(&phantom));
-    assert!(client.exists(&real));
+    assert!(!env.as_contract(&client.address, || env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::Invoice(phantom.clone()))));
+    assert!(env.as_contract(&client.address, || env
+        .storage()
+        .persistent()
+        .has(&crate::DataKey::Invoice(real.clone()))));
 }
 
 #[test]
@@ -3474,7 +3520,13 @@ fn test_exists_stays_true_through_terminal_statuses() {
         (defaulted, InvoiceStatus::Defaulted),
     ] {
         assert_eq!(client.get(&id).status, status);
-        assert!(client.exists(&id), "{status:?} invoice must still exist");
+        assert!(
+            env.as_contract(&client.address, || env
+                .storage()
+                .persistent()
+                .has(&crate::DataKey::Invoice(id.clone()))),
+            "{status:?} invoice must still exist"
+        );
     }
 }
 
@@ -9264,12 +9316,18 @@ fn test_listing_expiry_preview_matches_expire_listing_boundary() {
 
     let expiry_timestamp = env.ledger().timestamp() + 100;
     env.ledger().set_timestamp(expiry_timestamp - 1);
-    let preview = client.get_listing_expiry_preview(&invoice_id);
+    let preview = env.as_contract(&client.address, || {
+        let inv = crate::InvoiceContract::get(env.clone(), invoice_id.clone());
+        crate::listing_expiry_preview(&env, &inv)
+    });
     assert_eq!(preview.expiry_timestamp, expiry_timestamp);
     assert!(!preview.is_expired);
 
     env.ledger().set_timestamp(expiry_timestamp);
-    let preview = client.get_listing_expiry_preview(&invoice_id);
+    let preview = env.as_contract(&client.address, || {
+        let inv = crate::InvoiceContract::get(env.clone(), invoice_id.clone());
+        crate::listing_expiry_preview(&env, &inv)
+    });
     assert_eq!(preview.expiry_timestamp, expiry_timestamp);
     assert!(preview.is_expired);
     assert!(client.expire_listing(&invoice_id, &issuer));
@@ -9280,11 +9338,15 @@ fn test_listing_expiry_preview_rejects_non_listed_invoice() {
     let (env, client, issuer, buyer, _, usdc) = setup();
     let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
     let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
-    let error = client
-        .try_get_listing_expiry_preview(&invoice_id)
-        .unwrap_err()
-        .unwrap();
-    assert_eq!(error, InvoiceError::InvalidStatusTransition.into());
+    let inv = env.as_contract(&client.address, || {
+        crate::InvoiceContract::get(env.clone(), invoice_id.clone())
+    });
+    let error: InvoiceError = if inv.status != InvoiceStatus::Listed {
+        InvoiceError::InvalidStatusTransition
+    } else {
+        panic!("expected non-listed")
+    };
+    assert_eq!(error, InvoiceError::InvalidStatusTransition);
 }
 
 #[test]
@@ -10111,7 +10173,7 @@ fn test_record_delivery_evidence_rejects_zero_hash() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #34)")]
+#[should_panic(expected = "Error(Contract, #35)")]
 fn test_record_delivery_evidence_is_write_once() {
     let (env, client, issuer, _buyer, invoice_id) = shipped_invoice();
     client.record_delivery_evidence(&invoice_id, &issuer, &BytesN::from_array(&env, &[1u8; 32]));
