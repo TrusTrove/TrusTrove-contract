@@ -62,4 +62,10 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
+    /// The invoice's funded amount exceeds the admin-configured per-invoice
+    /// exposure limit (`DataKey::MaxInvoiceExposureBps`, set via
+    /// `set_max_invoice_exposure`) as a percentage of `TotalDeposits`. Only
+    /// checked when an invoice is newly funded, and never while the limit is
+    /// at its default of `0` (unrestricted) (issue #1180).
+    InvoiceExposureLimitExceeded = 31,
 }
