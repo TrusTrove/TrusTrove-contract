@@ -126,6 +126,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   minimum discount, minimum initial deposit, batch size cap) in one read-only
   call. Unset policy keys report the same defaults the write paths use, and
   storage is unchanged (#1188)
+- `pool`: admin-settable per-invoice exposure limit for newly funded invoices.
+  `set_max_invoice_exposure(max_bps)` (stored admin only, max `10_000` bps,
+  emits `max_invoice_exposure_updated(old, new)`) and
+  `get_max_invoice_exposure_bps()`, stored as `DataKey::MaxInvoiceExposureBps`.
+  `fund_invoice` and `batch_fund_invoice` reject an invoice whose
+  `funded_amount` exceeds `total_deposits * max_bps / 10_000` with the new
+  `PoolError::InvoiceExposureLimitExceeded` (#31); an invoice exactly at the
+  limit is accepted. The default `0` means unrestricted, and already-funded
+  invoices remain valid (#1180)
 - `pool`: admin-settable maximum time to maturity for newly funded invoices.
   `set_max_time_to_maturity(max_seconds)` (stored admin only, emits
   `max_maturity_updated(old, new)`) and `get_max_time_to_maturity()`, stored
