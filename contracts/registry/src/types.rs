@@ -113,10 +113,57 @@ pub enum DataKey {
     /// Ledger timestamp when the address most recently became verified. Cleared
     /// on revocation and set again on reinstatement or verification.
     VerifiedSince(Address),
-    /// Schema version for a profile. Missing entries on existing profiles
-    /// are interpreted as version 1 to preserve their original encoding.
+    /// Per-profile update sequence number (#1128), stored beside — not inside
+    /// — `Profile` so existing `Profile` entries keep decoding unchanged.
     ///
-    /// Keep this variant last so the serialized discriminants of existing
-    /// storage keys remain unchanged.
-    ProfileSchemaVersion(Address),
+    /// Set to `1` when the profile is registered and incremented by one every
+    /// time a write actually changes the stored profile (metadata or
+    /// role/verification flags). Calls that leave the profile unchanged
+    /// (idempotent `revoke` / `reinstate`, re-verifying with the same value,
+    /// re-submitting identical metadata) do not bump it. Profiles registered
+    /// before this key existed have no entry and report `0` until their first
+    /// change.
+    ProfileVersion(Address),
+    /// Optional emergency guardian (#1125). The only address that may
+    /// freeze / unfreeze admin-only writes. Set via `set_guardian`, cleared
+    /// via `remove_guardian`; it holds no other power.
+    Guardian,
+    /// `true` while the guardian has frozen admin-only writes (#1125).
+    /// Absent / `false` means admin writes are live.
+    AdminFrozen,
+    /// Pending delayed admin transfer (#1124); see
+    /// [`PendingAdminTransfer`]. Absent when no transfer is proposed.
+    PendingAdmin,
+    /// Active metadata key policy (#1120); see [`MetadataKeyPolicy`]. Absent
+    /// means [`MetadataKeyPolicy::Unrestricted`].
+    MetadataKeyPolicy,
+}
+
+/// A proposed admin change waiting out its delay (#1124).
+///
+/// The current admin keeps full control until `new_admin` calls
+/// `accept_admin` at or after `activates_at` (ledger timestamp, seconds).
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PendingAdminTransfer {
+    pub new_admin: Address,
+    pub activates_at: u64,
+}
+
+/// Versioned policy for which metadata keys registration and update paths
+/// accept (#1120).
+///
+/// * `Unrestricted` — legacy behaviour and the default: any key that passes
+///   the length / count bounds is accepted.
+/// * `AllowlistV1` — only the keys in `METADATA_KEYS_V1` are accepted; any
+///   other key is rejected with `RegistryError::UnknownMetadataKey`.
+///
+/// New allowlists are added as new variants (`AllowlistV2`, ...) rather than by
+/// editing an existing one, so a given policy version always means the same
+/// key set.
+#[contracttype]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MetadataKeyPolicy {
+    Unrestricted,
+    AllowlistV1,
 }

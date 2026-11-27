@@ -9,6 +9,9 @@ mod constants;
 mod errors;
 mod events;
 mod test;
+#[cfg(test)]
+#[path = "tests/governance.rs"]
+mod test_governance;
 mod types;
 
 pub use constants::*;
@@ -28,6 +31,44 @@ const MAX_METADATA_VALUE_LEN: u32 = 512;
 /// matter how many profiles a role accumulates. Callers page through the index
 /// with `start` / `limit` instead of asking for everything at once.
 const MAX_LIST_LIMIT: u32 = 50;
+/// Minimum delay, in seconds of ledger time, between `propose_admin` and the
+/// earliest `accept_admin` (#1124). One day gives operators time to notice a
+/// proposal made with a compromised key and cancel it (or have the guardian
+/// freeze admin writes) before it can take effect.
+pub const MIN_ADMIN_TRANSFER_DELAY: u64 = 86_400;
+/// Metadata keys accepted under [`MetadataKeyPolicy::AllowlistV1`] (#1120).
+///
+/// | Key | Intended content |
+/// |---|---|
+/// | `name` | Display / trading name |
+/// | `legal_name` | Registered legal entity name |
+/// | `email` | Business contact email |
+/// | `phone` | Business contact phone number |
+/// | `website` | Public website URL |
+/// | `country` | ISO 3166-1 alpha-2 country code |
+/// | `jurisdiction` | Jurisdiction of incorporation |
+/// | `registration_number` | Company registration number |
+/// | `tax_id` | Tax identifier |
+/// | `industry` | Industry / sector |
+/// | `description` | Free-text business description |
+/// | `logo_url` | Logo image URL |
+///
+/// This list is frozen for V1. Supporting another key means adding a new
+/// policy version, never editing this array.
+pub const METADATA_KEYS_V1: [&str; 12] = [
+    "name",
+    "legal_name",
+    "email",
+    "phone",
+    "website",
+    "country",
+    "jurisdiction",
+    "registration_number",
+    "tax_id",
+    "industry",
+    "description",
+    "logo_url",
+];
 
 #[contract]
 pub struct RegistryContract;
@@ -78,7 +119,10 @@ impl RegistryContract {
     ///
     /// # Panics
     /// * `RegistryError::NotInitialized` if no admin is stored.
+    /// * `RegistryError::AdminFrozen` while the guardian has frozen admin
+    ///   writes (#1125).
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        Self::require_not_frozen(&env);
         let admin: Address = env
             .storage()
             .instance()
@@ -115,6 +159,8 @@ impl RegistryContract {
     ///   `MAX_METADATA_SIZE` entries, contains an empty key or value, or has a
     ///   key longer than `MAX_METADATA_KEY_LEN` or a value longer than
     ///   `MAX_METADATA_VALUE_LEN`.
+    /// * `RegistryError::UnknownMetadataKey` if a key is not allowed by the
+    ///   active `MetadataKeyPolicy` (#1120).
     /// * `RegistryError::AlreadyRegistered` if a profile is already stored
     ///   for `address`.
     ///
@@ -142,6 +188,7 @@ impl RegistryContract {
         Self::store_new_profile(&env, &address, &profile);
         Self::index_profile(&env, &Role::Issuer, &address);
         events::issuer_registered(&env, &address);
+        Self::bump_profile_version(&env, &address);
         Self::extend_instance_ttl(&env);
         true
     }
@@ -197,7 +244,7 @@ impl RegistryContract {
             panic_with_error!(&env, RegistryError::BatchSizeExceeded);
         }
 
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
 
         // Pre-validate ALL entries' metadata before processing any of them.
@@ -224,6 +271,7 @@ impl RegistryContract {
             Self::store_new_profile(&env, &address, &profile);
             Self::index_profile(&env, &Role::Issuer, &address);
             events::issuer_registered(&env, &address);
+            Self::bump_profile_version(&env, &address);
             registered += 1;
         }
 
@@ -271,7 +319,7 @@ impl RegistryContract {
             panic_with_error!(&env, RegistryError::BatchSizeExceeded);
         }
 
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
 
         let mut skipped: Vec<Address> = Vec::new(&env);
@@ -291,6 +339,7 @@ impl RegistryContract {
             Self::store_new_profile(&env, &address, &profile);
             Self::index_profile(&env, &Role::Buyer, &address);
             events::buyer_registered(&env, &address);
+            Self::bump_profile_version(&env, &address);
             registered += 1;
         }
 
@@ -325,6 +374,8 @@ impl RegistryContract {
     ///   `MAX_METADATA_SIZE` entries, contains an empty key or value, or has a
     ///   key longer than `MAX_METADATA_KEY_LEN` or a value longer than
     ///   `MAX_METADATA_VALUE_LEN`.
+    /// * `RegistryError::UnknownMetadataKey` if a key is not allowed by the
+    ///   active `MetadataKeyPolicy` (#1120).
     /// * `RegistryError::AlreadyRegistered` if a profile is already stored
     ///   for `address`.
     ///
@@ -352,6 +403,7 @@ impl RegistryContract {
         Self::store_new_profile(&env, &address, &profile);
         Self::index_profile(&env, &Role::Buyer, &address);
         events::buyer_registered(&env, &address);
+        Self::bump_profile_version(&env, &address);
         Self::extend_instance_ttl(&env);
         true
     }
@@ -376,6 +428,8 @@ impl RegistryContract {
     ///   `MAX_METADATA_SIZE` entries, contains an empty key or value, or has a
     ///   key longer than `MAX_METADATA_KEY_LEN` or a value longer than
     ///   `MAX_METADATA_VALUE_LEN`.
+    /// * `RegistryError::UnknownMetadataKey` if a key is not allowed by the
+    ///   active `MetadataKeyPolicy` (#1120).
     /// * `RegistryError::NotRegistered` if no profile exists for `address`.
     ///
     /// # Returns
@@ -395,10 +449,14 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotRegistered));
+        let changed = profile.metadata != metadata;
         profile.metadata = metadata;
         env.storage().persistent().set(&key, &profile);
         Self::extend_profile_ttl(&env, &address);
         events::profile_updated(&env, &address);
+        if changed {
+            Self::bump_profile_version(&env, &address);
+        }
         Self::extend_instance_ttl(&env);
         true
     }
@@ -418,6 +476,8 @@ impl RegistryContract {
     ///   `MAX_METADATA_SIZE` entries, contains an empty key or value, or has a
     ///   key longer than `MAX_METADATA_KEY_LEN` or a value longer than
     ///   `MAX_METADATA_VALUE_LEN`.
+    /// * `RegistryError::UnknownMetadataKey` if a key is not allowed by the
+    ///   active `MetadataKeyPolicy` (#1120).
     /// * `RegistryError::NotRegistered` if the address is not registered.
     ///
     /// # Example
@@ -434,10 +494,14 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotRegistered));
+        let changed = profile.metadata != metadata;
         profile.metadata = metadata;
         env.storage().persistent().set(&key, &profile);
         Self::extend_profile_ttl(&env, &address);
         events::profile_updated(&env, &address);
+        if changed {
+            Self::bump_profile_version(&env, &address);
+        }
         Self::extend_instance_ttl(&env);
         true
     }
@@ -466,6 +530,7 @@ impl RegistryContract {
         env.storage().persistent().set(&key, &profile);
         Self::extend_profile_ttl(&env, &address);
         events::metadata_key_removed(&env, &address, &metadata_key);
+        Self::bump_profile_version(&env, &address);
         Self::extend_instance_ttl(&env);
         true
     }
@@ -838,7 +903,7 @@ impl RegistryContract {
     /// ```
     pub fn revoke(env: Env, address: Address) -> bool {
         require_not_paused(&env);
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         let key = DataKey::Profile(address.clone());
         let mut profile: Profile = env
@@ -868,6 +933,7 @@ impl RegistryContract {
         env.storage().persistent().set(&key, &profile);
         Self::extend_profile_ttl(&env, &address);
         events::address_revoked(&env, &address);
+        Self::bump_profile_version(&env, &address);
         Self::extend_instance_ttl(&env);
         true
     }
@@ -914,7 +980,7 @@ impl RegistryContract {
     /// ```
     pub fn reinstate(env: Env, address: Address) -> bool {
         require_not_paused(&env);
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         let key = DataKey::Profile(address.clone());
         let mut profile: Profile = env
@@ -937,6 +1003,7 @@ impl RegistryContract {
         env.storage().persistent().set(&key, &profile);
         Self::extend_profile_ttl(&env, &address);
         events::address_reinstated(&env, &address);
+        Self::bump_profile_version(&env, &address);
         Self::extend_instance_ttl(&env);
         true
     }
@@ -980,6 +1047,7 @@ impl RegistryContract {
     /// ```
     pub fn verify_profile(env: Env, caller: Address, address: Address, verify: bool) -> bool {
         require_not_paused(&env);
+        Self::require_not_frozen(&env);
         Self::require_admin_or_verifier(&env, &caller);
         caller.require_auth();
         let key = DataKey::Profile(address.clone());
@@ -988,6 +1056,7 @@ impl RegistryContract {
             .persistent()
             .get(&key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        let flags_before = profile.packed_flags;
         let verified_since_key = DataKey::VerifiedSince(address.clone());
         profile.set_verified(verify);
         if verify {
@@ -1007,6 +1076,9 @@ impl RegistryContract {
         env.storage().persistent().set(&key, &profile);
         Self::extend_profile_ttl(&env, &address);
         events::profile_verified(&env, &address, verify);
+        if profile.packed_flags != flags_before {
+            Self::bump_profile_version(&env, &address);
+        }
         Self::extend_instance_ttl(&env);
         true
     }
@@ -1026,10 +1098,12 @@ impl RegistryContract {
     /// * `RegistryError::NotInitialized` if the contract has not been initialized.
     pub fn transfer_ownership(env: Env, new_admin: Address) {
         require_not_paused(&env);
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         new_admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        // A proposal made by the outgoing admin must not outlive it.
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         events::ownership_transferred(&env, &admin, &new_admin);
         Self::extend_instance_ttl(&env);
     }
@@ -1066,9 +1140,11 @@ impl RegistryContract {
     /// ```
     pub fn transfer_admin(env: Env, new_admin: Address) {
         require_not_paused(&env);
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &new_admin);
+        // A proposal made by the outgoing admin must not outlive it.
+        env.storage().instance().remove(&DataKey::PendingAdmin);
         events::admin_transferred(&env, &admin, &new_admin);
         Self::extend_instance_ttl(&env);
     }
@@ -1099,7 +1175,7 @@ impl RegistryContract {
     /// ```
     pub fn set_verifier(env: Env, verifier: Address) {
         require_not_paused(&env);
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         env.storage().instance().set(&DataKey::Verifier, &verifier);
         events::verifier_set(&env, &admin, &verifier);
@@ -1119,7 +1195,7 @@ impl RegistryContract {
     ///   initialized.
     pub fn remove_verifier(env: Env) {
         require_not_paused(&env);
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         env.storage().instance().remove(&DataKey::Verifier);
         events::verifier_removed(&env, &admin);
@@ -1160,7 +1236,7 @@ impl RegistryContract {
     /// client.pause();
     /// ```
     pub fn pause(env: Env) {
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         set_paused(&env, true);
         events::paused(&env, &admin);
@@ -1170,7 +1246,9 @@ impl RegistryContract {
     /// Disengages the emergency circuit breaker, restoring state-changing calls.
     ///
     /// Deliberately *not* guarded by `require_not_paused`: otherwise a paused
-    /// registry could never be resumed. Emits `unpaused`.
+    /// registry could never be resumed. It is still rejected with
+    /// `AdminFrozen` while the guardian has frozen admin writes (#1125).
+    /// Emits `unpaused`.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -1187,11 +1265,314 @@ impl RegistryContract {
     /// client.unpause();
     /// ```
     pub fn unpause(env: Env) {
-        let admin = Self::require_admin(&env);
+        let admin = Self::require_admin_unfrozen(&env);
         admin.require_auth();
         set_paused(&env, false);
         events::unpaused(&env, &admin);
         Self::extend_instance_ttl(&env);
+    }
+
+    // ------------------------------------------------------------------
+    // Delayed admin transfer (#1124)
+    // ------------------------------------------------------------------
+
+    /// Proposes `new_admin` as the next admin, effective no earlier than
+    /// `delay` seconds from now.
+    ///
+    /// This is the optional delayed alternative to the immediate
+    /// `transfer_ownership` /
+    /// `transfer_admin` paths. The current admin stays
+    /// fully in control until `new_admin` calls
+    /// `accept_admin` at or after
+    /// `activates_at = now + delay`, which leaves a window to spot a proposal
+    /// made with a compromised key and cancel it, or have the guardian freeze
+    /// admin writes. A new proposal replaces any pending one.
+    ///
+    /// # Auth
+    /// * Requires the current admin's authorization.
+    ///
+    /// # Panics
+    /// * `ContractPaused` while paused.
+    /// * `RegistryError::AdminFrozen` while admin writes are frozen.
+    /// * `RegistryError::InvalidAdminTransfer` if `delay` is below
+    ///   `MIN_ADMIN_TRANSFER_DELAY`, `now + delay` overflows, or `new_admin`
+    ///   is already the admin.
+    ///
+    /// # Returns
+    /// * `u64` - The `activates_at` ledger timestamp.
+    ///
+    /// Emits `admin_transfer_proposed(admin) -> (new_admin, activates_at)`.
+    pub fn propose_admin(env: Env, new_admin: Address, delay: u64) -> u64 {
+        require_not_paused(&env);
+        let admin = Self::require_admin_unfrozen(&env);
+        admin.require_auth();
+        if delay < MIN_ADMIN_TRANSFER_DELAY || new_admin == admin {
+            panic_with_error!(&env, RegistryError::InvalidAdminTransfer);
+        }
+        let activates_at = env
+            .ledger()
+            .timestamp()
+            .checked_add(delay)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::InvalidAdminTransfer));
+        let pending = PendingAdminTransfer {
+            new_admin: new_admin.clone(),
+            activates_at,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &pending);
+        events::admin_transfer_proposed(&env, &admin, &new_admin, activates_at);
+        Self::extend_instance_ttl(&env);
+        activates_at
+    }
+
+    /// Completes a pending delayed admin transfer.
+    ///
+    /// # Auth
+    /// * Requires authorization from the proposed `new_admin`, proving the
+    ///   incoming key is controlled.
+    ///
+    /// # Panics
+    /// * `ContractPaused` while paused.
+    /// * `RegistryError::AdminFrozen` while admin writes are frozen.
+    /// * `RegistryError::NoPendingAdminTransfer` if nothing is proposed.
+    /// * `RegistryError::AdminTransferNotReady` before `activates_at`.
+    ///
+    /// Emits `admin_transfer_accepted(old_admin) -> new_admin`.
+    pub fn accept_admin(env: Env) {
+        require_not_paused(&env);
+        let old_admin = Self::require_admin_unfrozen(&env);
+        let pending: PendingAdminTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NoPendingAdminTransfer));
+        if env.ledger().timestamp() < pending.activates_at {
+            panic_with_error!(&env, RegistryError::AdminTransferNotReady);
+        }
+        pending.new_admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::Admin, &pending.new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        events::admin_transfer_accepted(&env, &old_admin, &pending.new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Cancels the pending delayed admin transfer.
+    ///
+    /// `caller` may be the admin or the guardian. The guardian path keeps
+    /// working while admin writes are frozen, so a proposal made with a
+    /// compromised admin key can be withdrawn during the freeze.
+    ///
+    /// # Auth
+    /// * Requires `caller.require_auth()`.
+    ///
+    /// # Panics
+    /// * `RegistryError::Unauthorized` if `caller` is neither admin nor
+    ///   guardian.
+    /// * `RegistryError::AdminFrozen` if the admin calls while frozen.
+    /// * `RegistryError::NoPendingAdminTransfer` if nothing is proposed.
+    ///
+    /// Emits `admin_transfer_cancelled(caller) -> new_admin`.
+    pub fn cancel_admin_transfer(env: Env, caller: Address) {
+        let admin = Self::require_admin(&env);
+        let guardian: Option<Address> = env.storage().instance().get(&DataKey::Guardian);
+        if guardian.as_ref() != Some(&caller) {
+            if caller != admin {
+                panic_with_error!(&env, RegistryError::Unauthorized);
+            }
+            Self::require_not_frozen(&env);
+        }
+        caller.require_auth();
+        let pending: PendingAdminTransfer = env
+            .storage()
+            .instance()
+            .get(&DataKey::PendingAdmin)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NoPendingAdminTransfer));
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        events::admin_transfer_cancelled(&env, &caller, &pending.new_admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the pending delayed admin transfer, if any.
+    pub fn get_pending_admin_transfer(env: Env) -> Option<PendingAdminTransfer> {
+        env.storage().instance().get(&DataKey::PendingAdmin)
+    }
+
+    // ------------------------------------------------------------------
+    // Emergency guardian freeze (#1125)
+    // ------------------------------------------------------------------
+
+    /// Configures the emergency guardian, replacing any previous one.
+    ///
+    /// The guardian is a second, preconfigured key whose only powers are
+    /// `freeze_admin`,
+    /// `unfreeze_admin` and cancelling a pending
+    /// delayed admin transfer. It must be set before an incident: once
+    /// frozen, the guardian cannot be changed until it unfreezes.
+    ///
+    /// # Auth
+    /// * Requires the admin's authorization.
+    ///
+    /// # Panics
+    /// * `ContractPaused` while paused.
+    /// * `RegistryError::AdminFrozen` while admin writes are frozen.
+    /// * `RegistryError::InvalidGuardian` if `guardian` is the admin.
+    pub fn set_guardian(env: Env, guardian: Address) {
+        require_not_paused(&env);
+        let admin = Self::require_admin_unfrozen(&env);
+        admin.require_auth();
+        if guardian == admin {
+            panic_with_error!(&env, RegistryError::InvalidGuardian);
+        }
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        events::guardian_set(&env, &admin, &guardian);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Removes the guardian. Admin-only; rejected while frozen.
+    pub fn remove_guardian(env: Env) {
+        require_not_paused(&env);
+        let admin = Self::require_admin_unfrozen(&env);
+        admin.require_auth();
+        env.storage().instance().remove(&DataKey::Guardian);
+        events::guardian_removed(&env, &admin);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the configured guardian, if any.
+    pub fn get_guardian(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Guardian)
+    }
+
+    /// Freezes every admin-only write (guardian only).
+    ///
+    /// While frozen, `upgrade`, `batch_register_*`, `revoke`, `reinstate`,
+    /// `verify_profile` (admin and verifier), `transfer_ownership`,
+    /// `transfer_admin`, `propose_admin`, `accept_admin`, `set_verifier`,
+    /// `remove_verifier`, `set_guardian`, `remove_guardian`,
+    /// `set_metadata_key_policy`, `pause` and `unpause` revert with
+    /// `AdminFrozen`, and an admin-initiated `cancel_admin_transfer` does too.
+    /// Existing verification results are untouched, every read stays
+    /// available, and users can still register and update their own
+    /// profiles.
+    ///
+    /// Unfreeze rules: only the guardian can lift the freeze, via
+    /// `unfreeze_admin`. The admin cannot, because the
+    /// freeze exists for when the admin key is suspected compromised. The
+    /// freeze works even while paused.
+    ///
+    /// Idempotent: freezing an already-frozen registry emits nothing.
+    ///
+    /// # Panics
+    /// * `RegistryError::GuardianNotSet` if no guardian is configured.
+    pub fn freeze_admin(env: Env) {
+        let guardian = Self::require_guardian(&env);
+        guardian.require_auth();
+        if !Self::is_admin_frozen(env.clone()) {
+            env.storage().instance().set(&DataKey::AdminFrozen, &true);
+            events::admin_frozen(&env, &guardian);
+        }
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Lifts the admin freeze (guardian only). Idempotent: unfreezing a
+    /// registry that is not frozen emits nothing.
+    ///
+    /// # Panics
+    /// * `RegistryError::GuardianNotSet` if no guardian is configured.
+    pub fn unfreeze_admin(env: Env) {
+        let guardian = Self::require_guardian(&env);
+        guardian.require_auth();
+        if Self::is_admin_frozen(env.clone()) {
+            env.storage().instance().remove(&DataKey::AdminFrozen);
+            events::admin_unfrozen(&env, &guardian);
+        }
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns `true` while admin-only writes are frozen.
+    pub fn is_admin_frozen(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::AdminFrozen)
+            .unwrap_or(false)
+    }
+
+    // ------------------------------------------------------------------
+    // Metadata key policy (#1120)
+    // ------------------------------------------------------------------
+
+    /// Selects which metadata keys the registration and update paths accept.
+    ///
+    /// The policy applies to every later `register_*`, `batch_register_*`,
+    /// `update_profile` and `update_metadata` call. Metadata already stored
+    /// is never rewritten or rejected on read. A profile holding keys the new
+    /// policy does not allow keeps them until its owner submits an update,
+    /// which must then use allowed keys only.
+    ///
+    /// # Auth
+    /// * Requires the admin's authorization.
+    ///
+    /// # Panics
+    /// * `ContractPaused` while paused.
+    /// * `RegistryError::AdminFrozen` while admin writes are frozen.
+    ///
+    /// Emits `metadata_key_policy_set(admin) -> policy`.
+    pub fn set_metadata_key_policy(env: Env, policy: MetadataKeyPolicy) {
+        require_not_paused(&env);
+        let admin = Self::require_admin_unfrozen(&env);
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::MetadataKeyPolicy, &policy);
+        events::metadata_key_policy_set(&env, &admin, policy);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns the active metadata key policy (`Unrestricted` by default).
+    pub fn get_metadata_key_policy(env: Env) -> MetadataKeyPolicy {
+        Self::metadata_key_policy(&env)
+    }
+
+    /// Returns the keys the active policy accepts, or `None` when any key
+    /// within the length and count bounds is accepted.
+    pub fn get_allowed_metadata_keys(env: Env) -> Option<Vec<String>> {
+        Self::allowed_keys(&env, Self::metadata_key_policy(&env))
+    }
+
+    // ------------------------------------------------------------------
+    // Profile update sequence numbers (#1128)
+    // ------------------------------------------------------------------
+
+    /// Returns `address`'s update sequence number.
+    ///
+    /// `1` right after registration, then incremented by exactly one for
+    /// every write that changes the stored profile: a metadata change through
+    /// `update_profile` / `update_metadata`, or a role/verification flag
+    /// change through `verify_profile`, `revoke` or `reinstate`. No-op calls
+    /// (re-submitting identical metadata, revoking an already revoked
+    /// profile, reinstating a profile that is not revoked, or `verify_profile`
+    /// with the value already held) leave it unchanged.
+    ///
+    /// Each bump also emits `profile_version(address) -> version`, so an event
+    /// consumer that sees a gap knows it missed an update and should re-read
+    /// the profile.
+    ///
+    /// Returns `0` for unregistered addresses and for profiles registered
+    /// before this feature that have not changed since.
+    pub fn get_profile_version(env: Env, address: Address) -> u64 {
+        let key = DataKey::ProfileVersion(address);
+        match env.storage().persistent().get::<_, u64>(&key) {
+            Some(version) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                version
+            }
+            None => 0,
+        }
     }
 
     /// Returns the stored contract admin address.
@@ -1300,6 +1681,78 @@ impl RegistryContract {
                 panic_with_error!(env, RegistryError::InvalidMetadata);
             }
         }
+        if let Some(allowed) = Self::allowed_keys(env, Self::metadata_key_policy(env)) {
+            for key in metadata.keys().iter() {
+                if !allowed.contains(&key) {
+                    panic_with_error!(env, RegistryError::UnknownMetadataKey);
+                }
+            }
+        }
+    }
+
+    fn metadata_key_policy(env: &Env) -> MetadataKeyPolicy {
+        env.storage()
+            .instance()
+            .get(&DataKey::MetadataKeyPolicy)
+            .unwrap_or(MetadataKeyPolicy::Unrestricted)
+    }
+
+    /// Keys accepted by `policy`, or `None` when the policy accepts any key.
+    fn allowed_keys(env: &Env, policy: MetadataKeyPolicy) -> Option<Vec<String>> {
+        match policy {
+            MetadataKeyPolicy::Unrestricted => None,
+            MetadataKeyPolicy::AllowlistV1 => {
+                let mut keys = Vec::new(env);
+                for key in METADATA_KEYS_V1.iter() {
+                    keys.push_back(String::from_str(env, key));
+                }
+                Some(keys)
+            }
+        }
+    }
+
+    /// Panics with `AdminFrozen` while the guardian has frozen admin writes.
+    fn require_not_frozen(env: &Env) {
+        if env
+            .storage()
+            .instance()
+            .get::<_, bool>(&DataKey::AdminFrozen)
+            .unwrap_or(false)
+        {
+            panic_with_error!(env, RegistryError::AdminFrozen);
+        }
+    }
+
+    /// `require_admin` for admin-only writes: also rejects while frozen.
+    fn require_admin_unfrozen(env: &Env) -> Address {
+        Self::require_not_frozen(env);
+        Self::require_admin(env)
+    }
+
+    fn require_guardian(env: &Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .unwrap_or_else(|| panic_with_error!(env, RegistryError::GuardianNotSet))
+    }
+
+    /// Increments `address`'s update sequence number, extends its TTL and
+    /// emits `profile_version`. Callers invoke it only when the stored
+    /// profile actually changed (or was just created).
+    fn bump_profile_version(env: &Env, address: &Address) -> u64 {
+        let key = DataKey::ProfileVersion(address.clone());
+        let version = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&key)
+            .unwrap_or(0)
+            .saturating_add(1);
+        env.storage().persistent().set(&key, &version);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::profile_version(env, address, version);
+        version
     }
 
     /// Appends `address` to the enumeration index for `role` and bumps that
