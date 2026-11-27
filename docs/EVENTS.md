@@ -712,6 +712,25 @@ nothing.
 
 ---
 
+### `max_invoice_exposure_updated`
+
+Emitted when the admin changes the maximum percentage of `TotalDeposits` (in
+basis points) that a single newly funded invoice may consume, via
+`set_max_invoice_exposure` (issue #1180). Carries both the old and new values;
+`0` means unrestricted. A rejected call (non-admin, or value above `10_000`
+bps) emits nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"max_invoice_exposure_updated"` |
+| **Data** | `(u32, u32)` | `(old_max_bps, new_max_bps)` |
+
+**Emitted by:** `set_max_invoice_exposure()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:195`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
