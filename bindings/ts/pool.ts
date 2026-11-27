@@ -107,6 +107,12 @@ export interface PoolStats {
   utilization_rate_bps: u32;
 }
 
+export interface WithdrawalBreakdown {
+  principal: u128;
+  usdc_amount: u128;
+  yield_amount: u128;
+}
+
 export interface PoolClient {
   __constructor(args: { admin: Address; invoice_contract: Address; escrow_contract: Address; funding_asset: Address; registry_contract: Address; treasury: Address; min_initial_deposit: u128; share_name: string; share_symbol: string; share_decimals: u32 }): Promise<void>;
   allowance(args: { from: Address; spender: Address }): Promise<i128>;
@@ -148,6 +154,7 @@ export interface PoolClient {
   pause(): Promise<void>;
   preview_deposit(args: { usdc_amount: u128 }): Promise<u128>;
   preview_withdraw(args: { shares: u128 }): Promise<u128>;
+  preview_withdraw_breakdown(args: { lp: Address; shares: u128 }): Promise<WithdrawalBreakdown>;
   receive_repayment(args: { invoice_id: BytesN<32>; amount: u128 }): Promise<boolean>;
   receive_repayment_with_refund(args: { invoice_id: BytesN<32>; amount: u128; refund: u128; buyer: Address }): Promise<boolean>;
   set_max_invoice_exposure(args: { max_bps: u32 }): Promise<boolean>;
@@ -166,4 +173,4 @@ export interface PoolClient {
   withdraw(args: { lp: Address; shares: u128 }): Promise<u128>;
 }
 
-export const POOL_METHODS = ["__constructor", "allowance", "approve", "backfill_cumulative_funded", "backfill_funded_invoice_buyer", "balance", "batch_fund_invoice", "decimals", "deposit", "fund_invoice", "get_admin", "get_escrow_contract", "get_fee_bps", "get_funded_amount", "get_funding_asset", "get_funding_eligibility", "get_invoice_contract", "get_lifetime_deposited_volume", "get_lifetime_repaid_volume", "get_lifetime_withdrawn_volume", "get_lp_position", "get_max_fundable_amount", "get_max_invoice_exposure_bps", "get_max_time_to_maturity", "get_min_discount_bps", "get_pool_config", "get_protocol_fee_bps", "get_realized_loss_ratio_bps", "get_share_price", "get_stats", "get_suggested_discount_bps", "get_treasury", "get_treasury_address", "get_usdc_asset", "get_utilization_rate", "handle_default", "name", "pause", "preview_deposit", "preview_withdraw", "receive_repayment", "receive_repayment_with_refund", "set_max_invoice_exposure", "set_max_time_to_maturity", "set_max_utilization", "set_min_discount", "set_protocol_fee", "symbol", "total_supply", "transfer", "transfer_from", "transfer_ownership", "transfer_shares", "unpause", "upgrade", "withdraw"] as const;
+export const POOL_METHODS = ["__constructor", "allowance", "approve", "backfill_cumulative_funded", "backfill_funded_invoice_buyer", "balance", "batch_fund_invoice", "decimals", "deposit", "fund_invoice", "get_admin", "get_escrow_contract", "get_fee_bps", "get_funded_amount", "get_funding_asset", "get_funding_eligibility", "get_invoice_contract", "get_lifetime_deposited_volume", "get_lifetime_repaid_volume", "get_lifetime_withdrawn_volume", "get_lp_position", "get_max_fundable_amount", "get_max_invoice_exposure_bps", "get_max_time_to_maturity", "get_min_discount_bps", "get_pool_config", "get_protocol_fee_bps", "get_realized_loss_ratio_bps", "get_share_price", "get_stats", "get_suggested_discount_bps", "get_treasury", "get_treasury_address", "get_usdc_asset", "get_utilization_rate", "handle_default", "name", "pause", "preview_deposit", "preview_withdraw", "preview_withdraw_breakdown", "receive_repayment", "receive_repayment_with_refund", "set_max_invoice_exposure", "set_max_time_to_maturity", "set_max_utilization", "set_min_discount", "set_protocol_fee", "symbol", "total_supply", "transfer", "transfer_from", "transfer_ownership", "transfer_shares", "unpause", "upgrade", "withdraw"] as const;

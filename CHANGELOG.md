@@ -143,6 +143,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `PoolError::MaturityTooLong` (#30); an invoice exactly at the maximum is
   accepted. The default `0` means unrestricted and skips the extra
   `get_due_date` read, and already-funded invoices are never re-checked (#1184)
+- `pool`: `preview_withdraw_breakdown(lp, shares)` view, returning a
+  `WithdrawalBreakdown { usdc_amount, principal, yield_amount }` so an LP can
+  see how much of a redemption is returned principal and how much is realised
+  yield before withdrawing. It shares its checks and truncating division with
+  `withdraw` through one internal helper, so the preview matches what
+  `withdraw` returns and records for the same state (#1185)
 - `registry`: `get_profile_count(role)` view, returning how many profiles are
   registered for `Role::Issuer` / `Role::Buyer` in O(1) from a single stored
   counter (#841)

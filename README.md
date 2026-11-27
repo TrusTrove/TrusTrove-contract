@@ -584,6 +584,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `deposit` | `deposit(lp: Address, usdc_amount: u128) -> u128` |
 | Pool | `preview_deposit` | `preview_deposit(usdc_amount: u128) -> u128` |
 | Pool | `preview_withdraw` | `preview_withdraw(shares: u128) -> u128` |
+| Pool | `preview_withdraw_breakdown` | `preview_withdraw_breakdown(lp: Address, shares: u128) -> WithdrawalBreakdown` |
 | Pool | `withdraw` | `withdraw(lp: Address, shares: u128) -> u128` |
 | Pool | `transfer` | `transfer(from: Address, to: Address, amount: i128) -> ()` |
 | Pool | `transfer_shares` | `transfer_shares(from: Address, to: Address, amount: i128) -> ()` |
@@ -629,7 +630,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 223 public entry points across five deployable contracts.**
+**Total: 224 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->

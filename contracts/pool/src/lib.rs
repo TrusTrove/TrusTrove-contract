@@ -784,6 +784,51 @@ impl PoolContract {
         Self::require_initialized(&env);
         Self::preview_withdraw_amount(&env, shares)
     }
+
+    /// Previews how a withdrawal of `shares` by `lp` splits into returned
+    /// principal and realised yield, without requiring authorization or
+    /// changing contract state (issue #1185).
+    ///
+    /// The checks, their order and the integer rounding are shared with
+    /// `withdraw` (both call the same internal helper), so the result is
+    /// exactly what a `withdraw(lp, shares)` submitted against the same state
+    /// would return and record. Like `preview_withdraw`, this view does not
+    /// check the pause flag: while the pool is paused it still returns the
+    /// estimate, but `withdraw` itself would fail.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `lp` - The liquidity provider whose position is previewed.
+    /// * `shares` - The number of pool shares to redeem.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool has not been initialized.
+    /// * `InvalidAmount` if `shares` is zero.
+    /// * `NoShares` if `lp` holds no shares.
+    /// * `InsufficientShares` if `lp` holds fewer than `shares`.
+    /// * `MinimumDeposit` if the redemption rounds down to zero.
+    /// * `InsufficientLiquidity` if available USDC is below the redemption
+    ///   amount.
+    /// * `Overflow` if `shares * total_deposits` or
+    ///   `shares * lp_initial_deposit` overflows `u128`.
+    ///
+    /// # Returns
+    /// * `WithdrawalBreakdown` - `usdc_amount` (what `withdraw` transfers),
+    ///   `principal` (what it deducts from the LP's tracked principal) and
+    ///   `yield_amount` (what it adds to the LP's realised yield).
+    ///
+    /// # Example
+    /// ```ignore
+    /// let split = client.preview_withdraw_breakdown(&lp, &500);
+    /// assert_eq!(split.usdc_amount, split.principal + split.yield_amount);
+    /// ```
+    pub fn preview_withdraw_breakdown(env: Env, lp: Address, shares: u128) -> WithdrawalBreakdown {
+        Self::require_initialized(&env);
+        Self::withdrawal_breakdown(&env, &lp, shares).0
+    }
     /// Withdraws shares from the pool and transfers USDC to the LP.
     ///
     /// # Arguments
@@ -847,22 +892,9 @@ impl PoolContract {
         require_not_paused(&env);
         Self::require_initialized(&env);
         lp.require_auth();
-        if shares == 0 {
-            panic_with_error!(&env, PoolError::InvalidAmount);
-        }
-
-        let lp_shares_key = DataKey::LPShares(lp.clone());
-        let lp_shares: u128 = env
-            .storage()
-            .persistent()
-            .get(&lp_shares_key)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NoShares));
-        if shares > lp_shares {
-            panic_with_error!(&env, PoolError::InsufficientShares);
-        }
-
+        let (breakdown, init_dep) = Self::withdrawal_breakdown(&env, &lp, shares);
+        let usdc_to_return = breakdown.usdc_amount;
         let total_deposits = Self::totals(&env).deposits;
-        let usdc_to_return = Self::preview_withdraw_amount(&env, shares);
 
         let usdc_id = Self::funding_asset(&env);
         let usdc = token::Client::new(&env, &usdc_id);
@@ -887,12 +919,8 @@ impl PoolContract {
         }
 
         let init_dep_key = DataKey::LPInitialDeposit(lp.clone());
-        let init_dep: u128 = env.storage().persistent().get(&init_dep_key).unwrap_or(0);
-        let principal_scaled = shares
-            .checked_mul(init_dep)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-        let principal_portion = principal_scaled / (lp_shares);
-        let yield_earned = usdc_to_return.saturating_sub(principal_portion);
+        let principal_portion = breakdown.principal;
+        let yield_earned = breakdown.yield_amount;
 
         let new_init_dep = init_dep.saturating_sub(principal_portion);
         if new_init_dep > 0 {
@@ -3276,6 +3304,47 @@ impl PoolContract {
         }
 
         shares_to_issue
+    }
+
+    /// Validates a withdrawal of `shares` by `lp` and computes its
+    /// principal/yield split. Shared by `withdraw` and
+    /// `preview_withdraw_breakdown` so both apply the same checks, in the same
+    /// order, with the same truncating integer division (issue #1185).
+    ///
+    /// Returns the breakdown together with the LP's current tracked principal
+    /// (`LPInitialDeposit`, `0` when absent), which `withdraw` needs to write
+    /// back the reduced principal.
+    fn withdrawal_breakdown(env: &Env, lp: &Address, shares: u128) -> (WithdrawalBreakdown, u128) {
+        if shares == 0 {
+            panic_with_error!(env, PoolError::InvalidAmount);
+        }
+        let lp_shares: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPShares(lp.clone()))
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::NoShares));
+        if shares > lp_shares {
+            panic_with_error!(env, PoolError::InsufficientShares);
+        }
+
+        let usdc_amount = Self::preview_withdraw_amount(env, shares);
+        let init_dep: u128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LPInitialDeposit(lp.clone()))
+            .unwrap_or(0);
+        let principal = shares
+            .checked_mul(init_dep)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow))
+            / lp_shares;
+        (
+            WithdrawalBreakdown {
+                usdc_amount,
+                principal,
+                yield_amount: usdc_amount.saturating_sub(principal),
+            },
+            init_dep,
+        )
     }
 
     fn preview_withdraw_amount(env: &Env, shares: u128) -> u128 {

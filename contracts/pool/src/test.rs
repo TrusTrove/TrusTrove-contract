@@ -1194,6 +1194,150 @@ fn test_preview_withdraw_fails_if_insufficient_liquidity() {
 
     te.pool.preview_withdraw(&300_000_000);
 }
+
+// ---------------------------------------------------------------------------
+//  ISSUE #1185: preview_withdraw_breakdown (principal / yield split)
+// ---------------------------------------------------------------------------
+
+fn lp_initial_deposit(te: &TestEnv, lp: &Address) -> u128 {
+    let key = DataKey::LPInitialDeposit(lp.clone());
+    te.env
+        .as_contract(&te.pool_id, || te.env.storage().persistent().get(&key))
+        .unwrap_or(0)
+}
+
+/// After a repayment raises the share price, a second deposit leaves the LP
+/// with more tracked principal than shares, so `shares * principal / lp_shares`
+/// truncates. The preview must report exactly what `withdraw` then returns
+/// and records, including that rounding.
+#[test]
+fn test_preview_withdraw_breakdown_matches_withdraw_with_rounding() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+    te.pool.deposit(&te.lp, &7_000_000_001);
+
+    let shares = 3_333_333_333u128;
+    let lp_shares = te.pool.get_lp_position(&te.lp).shares;
+    let principal_before = lp_initial_deposit(&te, &te.lp);
+    // The split really exercises truncation.
+    assert_ne!((shares * principal_before) % lp_shares, 0);
+
+    // A public read: it needs no authorization.
+    te.env.set_auths(&[]);
+    let preview = te.pool.preview_withdraw_breakdown(&te.lp, &shares);
+    te.env.mock_all_auths_allowing_non_root_auth();
+
+    assert!(preview.yield_amount > 0);
+    assert_eq!(
+        preview.usdc_amount,
+        preview.principal + preview.yield_amount
+    );
+    assert_eq!(preview.usdc_amount, te.pool.preview_withdraw(&shares));
+
+    let returned = te.pool.withdraw(&te.lp, &shares);
+    assert_eq!(returned, preview.usdc_amount);
+    assert_eq!(
+        lp_initial_deposit(&te, &te.lp),
+        principal_before - preview.principal
+    );
+    assert_eq!(
+        te.pool.get_lp_position(&te.lp).yield_earned,
+        preview.yield_amount
+    );
+}
+
+#[test]
+fn test_preview_withdraw_breakdown_without_yield_is_all_principal() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+
+    let preview = te.pool.preview_withdraw_breakdown(&te.lp, &4_000_000_000);
+    assert_eq!(preview.usdc_amount, 4_000_000_000);
+    assert_eq!(preview.principal, 4_000_000_000);
+    assert_eq!(preview.yield_amount, 0);
+}
+
+/// Boundary: redeeming every share returns all tracked principal, and the
+/// rest of the redemption is yield.
+#[test]
+fn test_preview_withdraw_breakdown_full_position() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    let shares = te.pool.get_lp_position(&te.lp).shares;
+    let principal_before = lp_initial_deposit(&te, &te.lp);
+    let preview = te.pool.preview_withdraw_breakdown(&te.lp, &shares);
+    assert_eq!(preview.principal, principal_before);
+    assert_eq!(preview.yield_amount, preview.usdc_amount - principal_before);
+
+    let returned = te.pool.withdraw(&te.lp, &shares);
+    assert_eq!(returned, preview.usdc_amount);
+    assert_eq!(lp_initial_deposit(&te, &te.lp), 0);
+    assert_eq!(
+        te.pool.get_lp_position(&te.lp).yield_earned,
+        preview.yield_amount
+    );
+}
+
+#[test]
+fn test_preview_withdraw_breakdown_is_read_only() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    fund_and_repay_invoice(&te);
+
+    let position_before = te.pool.get_lp_position(&te.lp);
+    let stats_before = te.pool.get_stats();
+    let principal_before = lp_initial_deposit(&te, &te.lp);
+
+    te.pool.preview_withdraw_breakdown(&te.lp, &5_000_000_000);
+    assert_eq!(te.env.events().all().len(), 0);
+
+    let position_after = te.pool.get_lp_position(&te.lp);
+    let stats_after = te.pool.get_stats();
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(position_after.yield_earned, position_before.yield_earned);
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+    assert_eq!(lp_initial_deposit(&te, &te.lp), principal_before);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #4)")]
+fn test_preview_withdraw_breakdown_rejects_zero_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.preview_withdraw_breakdown(&te.lp, &0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #6)")]
+fn test_preview_withdraw_breakdown_rejects_lp_without_shares() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let stranger = Address::generate(&te.env);
+    te.pool.preview_withdraw_breakdown(&stranger, &1_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #7)")]
+fn test_preview_withdraw_breakdown_rejects_more_than_owned() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.pool.preview_withdraw_breakdown(&te.lp, &10_000_000_001);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #5)")]
+fn test_preview_withdraw_breakdown_fails_if_insufficient_liquidity() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    let _ = te.pool.fund_invoice(&invoice_id);
+
+    te.pool.preview_withdraw_breakdown(&te.lp, &300_000_000);
+}
 //  TRANSFER TESTS
 #[test]
 fn test_transfer_succeeds() {
