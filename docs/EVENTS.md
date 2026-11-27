@@ -811,6 +811,27 @@ stored recipient.
 
 ---
 
+### `token_recovered`
+
+Emitted when the admin sweeps a stray, non-funding token out of the escrow with
+`recover_token` (#1201). One event is emitted per successful recovery; a
+rejected call (funding asset, zero amount, escrow as recipient, non-admin,
+paused) emits nothing. The configured funding asset is never recoverable, so
+the event never describes movement of lock collateral.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"token_recovered"` |
+| `topic[1]` | `Address` | Admin that authorized the recovery |
+| `topic[2]` | `Address` | Recovered token contract |
+| `topic[3]` | `Address` | Recipient of the recovered tokens |
+| **Data** | `u128` | Recovered amount, in the token's smallest unit |
+
+**Emitted by:** `recover_token()` in `contracts/escrow/src/lib.rs`
+
+---
+
 ### `released_to_pool`
 
 Emitted when locked funds are released back to the pool (on repayment).

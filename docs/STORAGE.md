@@ -644,6 +644,25 @@ from any address other than the stored admin fail authorization. Protect the adm
 with a multisig as described in [DEPLOYMENT.md](../DEPLOYMENT.md). See that
 document for the redeployment rollback procedure.
 
+### Storage compatibility check (issue #1207)
+
+Before every upgrade, prove that state written by the Wasm currently on-chain
+still decodes under the new Wasm. `scripts/migration_fixture.sh` builds the
+baseline and candidate contracts, writes representative registry, invoice,
+escrow and pool state through the baseline, upgrades each contract with
+`upgrade`, and asserts that every read returns the same decoded value and that
+the upgraded contracts still accept writes. See "Pre-upgrade storage migration
+check" in [DEPLOYMENT.md](../DEPLOYMENT.md).
+
+### Escrow token recovery (issue #1201)
+
+`recover_token(token, to, amount)` lets the admin move a token that was sent to
+the escrow by mistake. It reads only the `Admin` and `UsdcAsset` instance keys
+and never reads or writes `Locked`, `LockedLedger`, `History` or
+`IssuerReleased` entries. The funding asset (`UsdcAsset`) is rejected with
+`InvalidToken`, because every active lock is collateral in that asset. No new
+storage key was added, so existing entries decode unchanged.
+
 ### Construction vs. upgrade (issue #827)
 
 Initialization and upgrades are now distinct mechanisms:

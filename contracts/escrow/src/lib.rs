@@ -1097,6 +1097,74 @@ impl EscrowContract {
         Self::extend_instance_ttl(&env);
     }
 
+    /// Recovers a token that was sent to this escrow by mistake.
+    ///
+    /// Anyone can transfer an unrelated token to a contract address, and with
+    /// no exit path it would be stranded forever. This lets the admin sweep
+    /// such a token to `to`.
+    ///
+    /// The configured funding asset is **never** recoverable here. Every
+    /// active lock is collateral held in that asset, and a stray deposit of it
+    /// cannot be told apart from collateral without cumulative accounting, so
+    /// recovery of the funding asset is rejected outright. Because no other
+    /// token is ever recorded as collateral, active locks are never touched:
+    /// no `Locked`, `History` or `IssuerReleased` entry is read or written.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `token` - The stray token contract to recover. Must not be the funding asset.
+    /// * `to` - The recipient. Must not be this contract.
+    /// * `amount` - The amount to move, in the token's smallest unit.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `ContractPaused` if the emergency pause is engaged.
+    /// * `NotInitialized` if the contract has not been initialized.
+    /// * `InvalidAmount` if `amount` is zero or exceeds `i128::MAX`.
+    /// * `InvalidToken` if `token` is the configured funding asset.
+    /// * `InvalidRecipient` if `to` is this contract.
+    ///
+    /// # Events
+    /// Emits `token_recovered` with topics `(admin, token, to)` and the
+    /// amount as data.
+    ///
+    /// # Returns
+    /// * `bool` - Always `true` on success.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.recover_token(&stray_token, &treasury, &5_000_000);
+    /// ```
+    pub fn recover_token(env: Env, token: Address, to: Address, amount: u128) -> bool {
+        require_not_paused(&env);
+        let admin = Self::require_admin(&env);
+        admin.require_auth();
+        if amount == 0 || amount > i128::MAX as u128 {
+            panic_with_error!(&env, EscrowError::InvalidAmount);
+        }
+        let usdc: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::UsdcAsset)
+            .unwrap_or_else(|| panic_with_error!(&env, EscrowError::NotInitialized));
+        if token == usdc {
+            panic_with_error!(&env, EscrowError::InvalidToken);
+        }
+        if to == env.current_contract_address() {
+            panic_with_error!(&env, EscrowError::InvalidRecipient);
+        }
+        token::Client::new(&env, &token).transfer(
+            &env.current_contract_address(),
+            &to,
+            &(amount as i128),
+        );
+        events::token_recovered(&env, &admin, &token, &to, amount);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
     /// Returns the active escrow lock record for an invoice.
     ///
     /// This view reads the existing [`DataKey::Locked`] entry and returns the
