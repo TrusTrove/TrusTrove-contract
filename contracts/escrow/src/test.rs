@@ -1650,7 +1650,12 @@ fn test_handle_default_invoked_by_admin_succeeds() {
 
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
-    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
+    assert_last_event_four::<
+        soroban_sdk::BytesN<32>,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+    >(
         &env,
         &events_after_call,
         "default_resolved",
@@ -1677,7 +1682,12 @@ fn test_handle_default_admin_can_trigger() {
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
     // Funds are always returned to the pool address regardless of who triggered
-    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
+    assert_last_event_four::<
+        soroban_sdk::BytesN<32>,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+    >(
         &env,
         &events_after_call,
         "default_resolved",
@@ -1883,7 +1893,12 @@ fn test_handle_default_second_call_returns_false_without_side_effects() {
     assert!(result1);
     let events_after_call = env.events().all();
     assert_eq!(client.get_locked(&invoice_id), 0);
-    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
+    assert_last_event_four::<
+        soroban_sdk::BytesN<32>,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+    >(
         &env,
         &events_after_call,
         "default_resolved",
@@ -3922,7 +3937,12 @@ fn test_default_resolved_emits_elapsed_lock_age() {
     assert!(client.handle_default(&invoice_id, &admin));
 
     let events = env.events().all();
-    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
+    assert_last_event_four::<
+        soroban_sdk::BytesN<32>,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+    >(
         &env,
         &events,
         "default_resolved",
@@ -3967,7 +3987,12 @@ fn test_default_resolved_failed_attempts_produce_no_event() {
     env.ledger().set_timestamp(160);
     assert!(client.handle_default(&invoice_id, &pool));
     let events_after_success = env.events().all();
-    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
+    assert_last_event_four::<
+        soroban_sdk::BytesN<32>,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+        soroban_sdk::Address,
+    >(
         &env,
         &events_after_success,
         "default_resolved",
