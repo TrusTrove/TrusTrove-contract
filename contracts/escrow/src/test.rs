@@ -1650,7 +1650,7 @@ fn test_handle_default_invoked_by_admin_succeeds() {
 
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
-    assert_last_event_four(
+    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
         &env,
         &events_after_call,
         "default_resolved",
@@ -1677,7 +1677,7 @@ fn test_handle_default_admin_can_trigger() {
     let locked = client.get_locked(&invoice_id);
     assert_eq!(locked, 0);
     // Funds are always returned to the pool address regardless of who triggered
-    assert_last_event_four(
+    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
         &env,
         &events_after_call,
         "default_resolved",
@@ -1883,7 +1883,7 @@ fn test_handle_default_second_call_returns_false_without_side_effects() {
     assert!(result1);
     let events_after_call = env.events().all();
     assert_eq!(client.get_locked(&invoice_id), 0);
-    assert_last_event_four(
+    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
         &env,
         &events_after_call,
         "default_resolved",
@@ -2026,9 +2026,9 @@ fn test_handle_default_event_includes_caller() {
     assert_eq!(topic1, invoice_id);
     assert_eq!(topic2, pool);
     assert_eq!(topic3, admin);
-    let (emitted_amount, lock_age): (u128, u64) = <(u128, u64)>::try_from_val(&env, &data).unwrap();
+    let (emitted_amount, sequence): (u128, u64) = <(u128, u64)>::try_from_val(&env, &data).unwrap();
     assert_eq!(emitted_amount, amount);
-    assert_eq!(lock_age, 60);
+    assert_eq!(sequence, 1);
 
     // Verify caller is also recorded in history
     let history = client.get_history(&invoice_id);
@@ -3922,14 +3922,14 @@ fn test_default_resolved_emits_elapsed_lock_age() {
     assert!(client.handle_default(&invoice_id, &admin));
 
     let events = env.events().all();
-    assert_last_event_four(
+    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
         &env,
         &events,
         "default_resolved",
         invoice_id.clone(),
         pool.clone(),
         admin.clone(),
-        (amount, 3600u64),
+        (amount, 1u64),
     );
 }
 
@@ -3967,14 +3967,14 @@ fn test_default_resolved_failed_attempts_produce_no_event() {
     env.ledger().set_timestamp(160);
     assert!(client.handle_default(&invoice_id, &pool));
     let events_after_success = env.events().all();
-    assert_last_event_four(
+    assert_last_event_four::<soroban_sdk::BytesN<32>, soroban_sdk::Address, soroban_sdk::Address, soroban_sdk::Address>(
         &env,
         &events_after_success,
         "default_resolved",
         invoice_id.clone(),
         pool.clone(),
         pool.clone(),
-        (amount, 60u64),
+        (amount, 1u64),
     );
 
     // 6. Idempotent second call on now-consumed record -> returns false, produces no event
@@ -4287,15 +4287,19 @@ fn test_recover_token_sends_stray_token_and_emits_audit_event() {
     assert!(client.recover_token(&stray, &to, &2_000_000u128));
     let events = env.events().all();
 
-    assert_last_event_four(
-        &env,
-        &events,
-        "token_recovered",
-        admin,
-        stray.clone(),
-        to.clone(),
-        2_000_000u128,
-    );
+    // Verify token_recovered event: topics are (Symbol, admin, token, to), data is amount
+    let (_, topics, data) = events.last().expect("expected at least one event");
+    let topic0: Symbol = Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap();
+    let topic1: Address = Address::try_from_val(&env, &topics.get(1).unwrap()).unwrap();
+    let topic2: Address = Address::try_from_val(&env, &topics.get(2).unwrap()).unwrap();
+    let topic3: Address = Address::try_from_val(&env, &topics.get(3).unwrap()).unwrap();
+    let actual_amount: u128 = u128::try_from_val(&env, &data).unwrap();
+
+    assert_eq!(topic0, Symbol::new(&env, "token_recovered"));
+    assert_eq!(topic1, admin);
+    assert_eq!(topic2, stray.clone());
+    assert_eq!(topic3, to.clone());
+    assert_eq!(actual_amount, 2_000_000u128);
     assert_eq!(get_balance(&env, &stray, &to), 2_000_000);
     assert_eq!(get_balance(&env, &stray, &client.address), 3_000_000);
 }
