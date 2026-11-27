@@ -32,6 +32,9 @@ pub use types::*;
 pub const DEFAULT_MAX_UTILIZATION_BPS: u32 = 8500;
 /// Maximum utilization cap accepted by `set_max_utilization` (100%).
 pub const MAX_UTILIZATION_BPS: u32 = 10_000;
+/// Maximum per-invoice exposure limit accepted by `set_max_invoice_exposure`
+/// (100% of `TotalDeposits`, issue #1180). `0` disables the limit (unrestricted).
+pub const MAX_INVOICE_EXPOSURE_BPS: u32 = 10_000;
 
 /// Upper bound for the admin-settable minimum discount floor enforced by
 /// `set_min_discount` (`DataKey::MinDiscountBps`, issue #829). 5000 bps = 50%
@@ -1344,6 +1347,11 @@ impl PoolContract {
     ///   An invoice exactly at the maximum is accepted. The maximum defaults
     ///   to 0 (unrestricted), where the check and its extra invoice read are
     ///   skipped (issue #1184).
+    /// * `InvoiceExposureLimitExceeded` if the invoice's `funded_amount`
+    ///   exceeds the admin-configured percentage of `TotalDeposits`
+    ///   (`DataKey::MaxInvoiceExposureBps`, set via
+    ///   `set_max_invoice_exposure`). An invoice exactly at the limit is
+    ///   accepted. The limit defaults to 0 (unrestricted) (issue #1180).
     ///
     /// # Returns
     /// * `bool` - `true` when the invoice is funded.
@@ -1487,18 +1495,26 @@ impl PoolContract {
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
         let cumulative_funded = totals.cumulative_funded;
-        // Admin-set maximum realised-loss threshold (issue #1289). It is an
-        // eligibility rule, so it panics in single and batch mode alike.
-        // Unset means disabled, preserving the behavior of every instance
-        // that predates the policy.
-        if let Some(threshold_bps) = Self::max_loss_threshold(&env) {
-            if Self::loss_threshold_exceeded(
-                &env,
-                totals.loss_realised,
-                cumulative_funded,
-                threshold_bps,
-            ) {
-                panic_with_error!(&env, PoolError::MaxLossExceeded);
+
+        // Admin-set per-invoice exposure limit (issue #1180): cap the share of
+        // `TotalDeposits` a single newly funded invoice may consume, even when
+        // overall utilization is low. Like the yield floor and max maturity
+        // rules, this is a per-invoice eligibility check so it panics in single
+        // and batch mode alike; already-funded invoices are never re-checked.
+        // Skipped when the limit is 0 (unrestricted) or when the pool has no
+        // deposits (so an empty pool still surfaces `InsufficientLiquidity`).
+        let max_invoice_exposure_bps: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxInvoiceExposureBps)
+            .unwrap_or(0u32);
+        if max_invoice_exposure_bps > 0 && total_deposits > 0 {
+            let max_exposure_amount = total_deposits
+                .checked_mul(max_invoice_exposure_bps as u128)
+                .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow))
+                / 10_000;
+            if funded_amount > max_exposure_amount {
+                panic_with_error!(&env, PoolError::InvoiceExposureLimitExceeded);
             }
         }
         let available = total_deposits - total_funded;
@@ -1616,7 +1632,8 @@ impl PoolContract {
     ///
     /// Entries that fail an *eligibility* check (not listed, already funded by
     /// this pool, unverified issuer/buyer, asset mismatch, a discount below
-    /// the floor, a maturity beyond the maximum) instead revert the
+    /// the floor, a maturity beyond the maximum, or a funded amount above the
+    /// per-invoice exposure limit) instead revert the
     /// whole call with the same typed error `fund_invoice` would raise. The
     /// distinction matters: a capacity stop is a normal, expected outcome for
     /// an LP filling the pool, whereas an ineligible entry is a caller mistake
@@ -2934,166 +2951,69 @@ impl PoolContract {
             .unwrap_or(0u64)
     }
 
-    /// Sets or clears the optional maximum realised-loss threshold enforced by
-    /// `fund_invoice` (issue #1289).
+    /// Sets the maximum percentage of `TotalDeposits`, in basis points, that a
+    /// single newly funded invoice may consume (issue #1180).
     ///
-    /// The threshold compares cumulative realised loss with cumulative funded
-    /// volume: once `TotalLossRealised / CumulativeFunded` exceeds it, new
-    /// funding is rejected with `MaxLossExceeded` until an admin reviews the
-    /// pool and raises or clears the limit. Repayments, defaults, withdrawals
-    /// and every other settlement path stay available.
+    /// Authorization mirrors `set_min_discount` and `set_max_time_to_maturity`:
+    /// the *stored* admin must sign. `0` (the default, and the state of every
+    /// instance predating this feature) means unrestricted. The rule applies
+    /// only when an invoice is newly funded: invoices the pool already funded
+    /// are never re-checked, so lowering the limit cannot block their
+    /// repayment or default handling. An invoice whose funded amount equals
+    /// `total_deposits * max_bps / 10_000` is accepted.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
-    /// * `threshold_bps` - The new threshold in basis points (`10_000` =
-    ///   100%), or `None` to disable the check. Pass `Some(0)` to stop new
-    ///   funding after any realised loss.
+    /// * `max_bps` - The new per-invoice exposure limit in basis points
+    ///   (`10_000` = 100%). `0` removes the limit.
     ///
     /// # Auth
     /// Requires authorization from the stored `admin`.
     ///
     /// # Panics
     /// * `NotInitialized` if the pool is not initialized.
-    /// * `InvalidConfiguration` if the threshold exceeds 10,000 bps.
+    /// * `InvalidConfiguration` if `max_bps` exceeds `MAX_INVOICE_EXPOSURE_BPS`
+    ///   (`10_000`).
     ///
     /// # Returns
-    /// * `bool` - `true` when the threshold is updated.
+    /// * `bool` - `true` when the limit is updated. Emits
+    ///   `max_invoice_exposure_updated` with `(old_max_bps, new_max_bps)`.
     ///
     /// # Example
     /// ```ignore
-    /// client.set_max_loss_threshold(&Some(500));
+    /// // Cap any single invoice at 25% of pool deposits.
+    /// client.set_max_invoice_exposure(&2500);
     /// ```
-    pub fn set_max_loss_threshold(env: Env, threshold_bps: Option<u32>) -> bool {
+    pub fn set_max_invoice_exposure(env: Env, max_bps: u32) -> bool {
         require_not_paused(&env);
         let admin =
             Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
         admin.require_auth();
-        if let Some(bps) = threshold_bps {
-            if bps > MAX_UTILIZATION_BPS {
-                panic_with_error!(&env, PoolError::InvalidConfiguration);
-            }
+        if max_bps > MAX_INVOICE_EXPOSURE_BPS {
+            panic_with_error!(&env, PoolError::InvalidConfiguration);
         }
-        let old_threshold_bps = Self::max_loss_threshold(&env);
+        let old_max_bps = env
+            .storage()
+            .instance()
+            .get(&DataKey::MaxInvoiceExposureBps)
+            .unwrap_or(0u32);
         env.storage()
             .instance()
-            .set(&DataKey::MaxLossThresholdBps, &threshold_bps);
-        events::max_loss_threshold_updated(&env, old_threshold_bps, threshold_bps);
+            .set(&DataKey::MaxInvoiceExposureBps, &max_bps);
+        events::max_invoice_exposure_updated(&env, old_max_bps, max_bps);
         Self::extend_instance_ttl(&env);
         true
     }
 
-    /// Returns the optional maximum realised-loss threshold in basis points.
-    /// `None` (the default, including for instances predating issue #1289)
-    /// means new funding is not gated by losses.
-    pub fn get_max_loss_threshold(env: Env) -> Option<u32> {
-        Self::max_loss_threshold(&env)
-    }
-
-    /// Returns the recorded-versus-actual funding-asset balance reconciliation
-    /// for this pool (issue #1288).
-    ///
-    /// `recorded_available_liquidity` is `TotalDeposits - TotalFunded`, the
-    /// amount the pool's books say should be held on contract.
-    /// `actual_token_balance` is the live balance reported by the funding
-    /// asset's SEP-41 `balance`. `signed_difference` is actual minus recorded:
-    /// positive for unsolicited transfers (reconcilable via
-    /// `reconcile_donation`), negative if accounting or an external transfer
-    /// left the pool short.
-    ///
-    /// # Auth
-    /// No authorization is required. Pure read: nothing is written and no TTL
-    /// is extended.
-    ///
-    /// # Panics
-    /// * `NotInitialized` if the pool is not initialized.
-    /// * `Overflow` if the recorded totals underflow or a balance does not fit
-    ///   in the return types.
-    ///
-    /// # Returns
-    /// * `AssetBalanceReconciliation` - The reconciliation snapshot.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let view = client.get_asset_balance_reconciliation();
-    /// ```
-    pub fn get_asset_balance_reconciliation(env: Env) -> AssetBalanceReconciliation {
-        Self::require_initialized(&env);
-        let totals = Self::totals(&env);
-        let recorded_available_liquidity = totals
-            .deposits
-            .checked_sub(totals.funded)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-        let actual_token_balance = Self::actual_funding_asset_balance(&env);
-        let recorded_i128 = i128::try_from(recorded_available_liquidity)
-            .unwrap_or_else(|_| panic_with_error!(&env, PoolError::Overflow));
-        let actual_i128 = i128::try_from(actual_token_balance)
-            .unwrap_or_else(|_| panic_with_error!(&env, PoolError::Overflow));
-        let signed_difference = actual_i128
-            .checked_sub(recorded_i128)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-
-        AssetBalanceReconciliation {
-            recorded_available_liquidity,
-            actual_token_balance,
-            signed_difference,
-        }
-    }
-
-    /// Reconciles unsolicited funding-asset tokens as an explicit donation to
-    /// the pool's existing LPs (issue #1291).
-    ///
-    /// A third party can transfer tokens straight to the pool contract, which
-    /// increases the live token balance without increasing `TotalDeposits`.
-    /// This permissionless entry point measures the surplus as
-    /// `token.balance(pool) - (TotalDeposits - TotalFunded)` and credits it to
-    /// `TotalDeposits`, bringing recorded accounting back in line with the
-    /// balance. No LP shares are minted: the donation accrues to current LPs
-    /// through a higher share price, proportionally to their holdings.
-    ///
-    /// # Auth
-    /// No authorization is required. The amount reconciled is never supplied
-    /// by the caller; it is measured from the token balance, so a caller can
-    /// only donate what has already been transferred to the pool.
-    ///
-    /// # Panics
-    /// * `NotInitialized` if the pool is not initialized.
-    /// * `NoDonationToReconcile` if the actual balance does not exceed recorded
-    ///   available liquidity (no surplus to recognise). Nothing is written.
-    /// * `Overflow` if recorded totals or the resulting deposit total cannot
-    ///   be represented.
-    ///
-    /// # Returns
-    /// * `u128` - The donated amount recognised, in funding-asset base units.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let donated = client.reconcile_donation();
-    /// ```
-    pub fn reconcile_donation(env: Env) -> u128 {
-        require_not_paused(&env);
-        Self::require_initialized(&env);
-        let totals = Self::totals(&env);
-        let recorded_available_liquidity = totals
-            .deposits
-            .checked_sub(totals.funded)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
-        let actual_token_balance = Self::actual_funding_asset_balance(&env);
-        let donated = actual_token_balance
-            .checked_sub(recorded_available_liquidity)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::NoDonationToReconcile));
-        if donated == 0 {
-            panic_with_error!(&env, PoolError::NoDonationToReconcile);
-        }
-        let new_total_deposits = totals
-            .deposits
-            .checked_add(donated)
-            .unwrap_or_else(|| panic_with_error!(&env, PoolError::Overflow));
+    /// Returns the maximum percentage of `TotalDeposits`, in basis points,
+    /// accepted for a single newly funded invoice. Defaults to `0`
+    /// (unrestricted) when never set, so instances predating issue #1180 keep
+    /// their behavior.
+    pub fn get_max_invoice_exposure_bps(env: Env) -> u32 {
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &new_total_deposits);
-        events::donation_reconciled(&env, donated, new_total_deposits);
-        Self::extend_instance_ttl(&env);
-        donated
+            .get(&DataKey::MaxInvoiceExposureBps)
+            .unwrap_or(0u32)
     }
 
     /// Sets the minimum invoice discount (yield floor) enforced by

@@ -62,13 +62,10 @@ pub enum PoolError {
     /// funded, and never while the maximum is at its default of `0`
     /// (unrestricted) (issue #1184).
     MaturityTooLong = 30,
-    /// Cumulative realised loss exceeds the admin-configured maximum loss
-    /// threshold (`DataKey::MaxLossThresholdBps`, set via
-    /// `set_max_loss_threshold`), so new funding is halted until reviewed.
-    /// Never triggers while the threshold is unset (issue #1289).
-    MaxLossExceeded = 31,
-    /// `reconcile_donation` found no unaccounted funding-asset balance to
-    /// reconcile (the actual token balance does not exceed the pool's
-    /// recorded available liquidity) (issue #1291).
-    NoDonationToReconcile = 32,
+    /// The invoice's funded amount exceeds the admin-configured per-invoice
+    /// exposure limit (`DataKey::MaxInvoiceExposureBps`, set via
+    /// `set_max_invoice_exposure`) as a percentage of `TotalDeposits`. Only
+    /// checked when an invoice is newly funded, and never while the limit is
+    /// at its default of `0` (unrestricted) (issue #1180).
+    InvoiceExposureLimitExceeded = 31,
 }
