@@ -4,7 +4,7 @@
 // positionally; migrating them is a schema change, not an SDK repair,
 // so it is deliberately out of scope for the #826 upgrade.
 #![allow(deprecated)]
-use soroban_sdk::{Address, BytesN, Env, Symbol};
+use soroban_sdk::{Address, BytesN, Env, String, Symbol};
 
 pub fn invoice_created(
     env: &Env,
@@ -248,4 +248,43 @@ pub fn escrow_contract_updated(env: &Env, old: &Address, new: &Address) {
         ),
         (),
     );
+}
+
+pub fn asset_metadata_set(
+    env: &Env,
+    asset: &Address,
+    code: &Option<String>,
+    decimals: &Option<u32>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "asset_metadata_set"), asset.clone()),
+        (code.clone(), *decimals),
+    );
+}
+
+/// Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery
+/// evidence hash after shipment (issue #1162).
+///
+/// Topics are `(delivery_evidence_recorded, invoice_id, actor)` and the
+/// payload is the evidence hash. Only the hash is published — the underlying
+/// delivery documents are never written on-chain.
+pub fn delivery_evidence_recorded(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    actor: &Address,
+    evidence_hash: &BytesN<32>,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "delivery_evidence_recorded"),
+            invoice_id.clone(),
+            actor.clone(),
+        ),
+        evidence_hash.clone(),
+    );
+}
+
+pub fn max_invoice_lifetime_set(env: &Env, lifetime: u64) {
+    env.events()
+        .publish((Symbol::new(env, "max_invoice_lifetime_set"),), lifetime);
 }

@@ -88,6 +88,21 @@ pub fn repayment_received(
     );
 }
 
+/// Emitted by `settle_repayment` when realised yield changes the LP share
+/// price (issue #1171). Topics index the event name and repaid `invoice_id`;
+/// the data payload is `(old_price, new_price)`, both scaled by
+/// `SHARE_PRICE_SCALE` (1e18) so 1.0 is `1_000_000_000_000_000_000`.
+///
+/// Emitted only on a successful repayment whose LP yield slice is non-zero:
+/// failed settlements revert entirely, and exact-funded/fully-refunded
+/// repayments leave the share price unchanged and emit nothing.
+pub fn share_price_updated(env: &Env, invoice_id: &BytesN<32>, old_price: u128, new_price: u128) {
+    env.events().publish(
+        (Symbol::new(env, "share_price_updated"), invoice_id.clone()),
+        (old_price, new_price),
+    );
+}
+
 /// Emitted by `handle_default` when an invoice defaults. Topics index the event name
 /// and the defaulted `invoice_id`. Data payload is `loss_amount`: the defaulted
 /// funded principal in USDC stroops.
@@ -174,5 +189,27 @@ pub fn min_discount_updated(env: &Env, old_min_bps: u32, new_min_bps: u32) {
     env.events().publish(
         (Symbol::new(env, "min_discount_updated"),),
         (old_min_bps, new_min_bps),
+    );
+}
+
+/// Emitted by `set_max_time_to_maturity` when the admin changes the maximum
+/// remaining time to maturity accepted for newly funded invoices (issue
+/// #1184). Like `min_discount_updated`, it carries the old value as well as
+/// the new one; `0` means unrestricted. A rejected change emits nothing.
+pub fn max_maturity_updated(env: &Env, old_max_seconds: u64, new_max_seconds: u64) {
+    env.events().publish(
+        (Symbol::new(env, "max_maturity_updated"),),
+        (old_max_seconds, new_max_seconds),
+    );
+}
+
+/// Emitted by `set_max_invoice_exposure` when the admin changes the maximum
+/// percentage of pool deposits (in basis points) a single newly funded invoice
+/// may consume (issue #1180). Carries both the old and new values; `0` means
+/// unrestricted. A rejected change emits nothing.
+pub fn max_invoice_exposure_updated(env: &Env, old_max_bps: u32, new_max_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "max_invoice_exposure_updated"),),
+        (old_max_bps, new_max_bps),
     );
 }

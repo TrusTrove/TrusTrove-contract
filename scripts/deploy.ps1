@@ -44,7 +44,7 @@ foreach ($arg in $args) {
 
 # Resolve stellar CLI location dynamically
 $stellar = Get-Command stellar -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Source
-if (-not $stellar) {
+if (-not $stellar -and -not $dryRun) {
     $stellarBin = [Environment]::GetEnvironmentVariable('STELLAR_BIN')
     if ($stellarBin -and (Test-Path $stellarBin)) {
         $stellar = $stellarBin
@@ -78,19 +78,20 @@ Get-Content $envFile | ForEach-Object {
 
 $addressesFile = ".deployed-addresses"
 
-if ($fresh) {
+if ($fresh -and -not $dryRun) {
     Write-Host "=== -Fresh flag set: removing saved addresses and starting clean ==="
     Remove-Item -Path $addressesFile -ErrorAction SilentlyContinue
 }
 
 # Ensure file exists
-if (-not (Test-Path $addressesFile)) {
+if (-not $dryRun -and -not (Test-Path $addressesFile)) {
     New-Item -Path $addressesFile -ItemType File -Force | Out-Null
 }
 
 # Read all saved addresses into a hashtable
 function Get-SavedAddresses {
     $map = @{}
+    if ($dryRun -and $fresh) { return $map }
     if (Test-Path $addressesFile) {
         Get-Content $addressesFile | ForEach-Object {
             if ($_ -match '^([^=]+)=(.*)$') {
@@ -187,7 +188,7 @@ function Deploy-Contract {
     }
     $output = & $stellar @deployArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Deploy failed for $key:"
+        Write-Host "ERROR: Deploy failed for ${key}:"
         Write-Host "  $output"
         Write-Host "  Fix the error above and rerun — already-deployed contracts will be skipped."
         throw "Deploy failed for $key"
@@ -224,7 +225,7 @@ function Get-OrCreateSalt {
     $salt = Load-Address "${key}_salt"
     if (-not $salt) {
         $salt = -join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Maximum 256) })
-        Save-Address "${key}_salt" $salt
+        if (-not $dryRun) { Save-Address "${key}_salt" $salt }
     }
     return $salt
 }
@@ -273,7 +274,7 @@ function Invoke-Init {
     Write-Host "  Invoking $label ($contractId) ..."
     $output = & $stellar contract invoke --id $contractId --source $env:DEPLOYER_ACCOUNT --network testnet @initArgs 2>&1
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "ERROR: Invocation failed for $label:"
+        Write-Host "ERROR: Invocation failed for ${label}:"
         Write-Host "  $output"
         Write-Host "  The contract is deployed but this wiring step did not complete."
         Write-Host "  Fix the error and rerun — this step will be retried automatically."
@@ -282,6 +283,47 @@ function Invoke-Init {
 
     Save-Address $initKey "true"
     Write-Host "  $label applied successfully."
+}
+
+# ---------------------------------------------------------------------------
+# 4d. Deployed code hash preflight (issue #1299)
+# ---------------------------------------------------------------------------
+
+# Before any reference-setting call, compare each deployed contract's on-chain
+# code hash with the intended release: the wasm_hashes map in
+# $env:RELEASE_MANIFEST when set, otherwise the freshly built local WASM.
+function Assert-DeployedCodeHashes {
+    param([string[]]$contracts)
+
+    if ($dryRun) {
+        Write-Host "  [DRY-RUN] Would verify deployed code hashes before wiring: $($contracts -join ', ')"
+        return
+    }
+
+    $scriptDir = Split-Path -Parent $PSCommandPath
+    $sourceArgs = @()
+    if ($env:RELEASE_MANIFEST) {
+        if (-not (Test-Path $env:RELEASE_MANIFEST)) {
+            Write-Host "ERROR: RELEASE_MANIFEST is set but not found: $env:RELEASE_MANIFEST"
+            exit 1
+        }
+        $sourceArgs = @('--manifest', $env:RELEASE_MANIFEST)
+        Write-Host "=== Preflight: comparing deployed code hashes with $env:RELEASE_MANIFEST ==="
+    } else {
+        $sourceArgs = @('--wasm-dir', 'target/wasm32v1-none/release')
+        Write-Host "=== Preflight: comparing deployed code hashes with locally built WASM ==="
+    }
+
+    $checkArgs = $sourceArgs + @('--network', 'testnet')
+    foreach ($contract in $contracts) {
+        $checkArgs += @('--contract', $contract)
+    }
+    & python (Join-Path $scriptDir 'check_deployed_hashes.py') @checkArgs
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "ERROR: deployed code does not match the intended release."
+        Write-Host "       Refusing to set contract references. No wiring call was made."
+        exit 1
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -308,8 +350,12 @@ if (-not $xlmAsset) {
     exit 1
 }
 
-$deployerAddress = & $stellar keys address $deployerAccount 2>&1
-if ($LASTEXITCODE -ne 0) {
+$deployerAddress = if ($dryRun) {
+    if ($env:DEPLOYER_ADDRESS) { $env:DEPLOYER_ADDRESS } else { "<address-for-$deployerAccount>" }
+} else {
+    & $stellar keys address $deployerAccount 2>&1
+}
+if (-not $dryRun -and $LASTEXITCODE -ne 0) {
     Write-Host "ERROR: Could not resolve address for key '$deployerAccount'."
     Write-Host "       Run scripts/setup-testnet.ps1 first."
     exit 1
@@ -441,6 +487,13 @@ if (-not $dryRun -and $poolXlmId -ne $poolXlmTargetId) {
 }
 Write-Host "XLM Pool: $poolXlmId"
 
+# Issue #1299: verify every contract ID about to be wired is running the WASM
+# this release intends, before the first reference-setting call.
+$preflightContracts = @("registry=$registryId", "invoice=$invoiceId", "escrow_usdc=$escrowUsdcId", "pool_usdc=$poolUsdcId")
+if ($escrowXlmId) { $preflightContracts += "escrow_xlm=$escrowXlmId" }
+if ($poolXlmId) { $preflightContracts += "pool_xlm=$poolXlmId" }
+Assert-DeployedCodeHashes $preflightContracts
+
 Write-Host "`n=== Wiring USDC pool_contract into invoice_contract ==="
 Invoke-Init "invoice_set_pool" $invoiceId @("--", "set_pool_contract", "--pool_contract", $poolUsdcId)
 
@@ -491,6 +544,10 @@ NEXT_PUBLIC_ESCROW_XLM_CONTRACT_ID=$escrowXlmId # EXPERIMENTAL
 NEXT_PUBLIC_POOL_USDC_CONTRACT_ID=$poolUsdcId
 NEXT_PUBLIC_POOL_XLM_CONTRACT_ID=$poolXlmId # EXPERIMENTAL
 "@ | Set-Content $envOut
+
+python (Join-Path $PSScriptRoot 'deployment_manifest.py') write deployments.json `
+    $registryId $invoiceId $escrowUsdcId $escrowXlmId $poolUsdcId $poolXlmId
+if ($LASTEXITCODE -ne 0) { throw 'Could not write the deployment manifest' }
 
 Write-Host "`n==========================================="
 Write-Host "Deployment complete."

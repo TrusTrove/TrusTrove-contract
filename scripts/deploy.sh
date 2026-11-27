@@ -103,7 +103,9 @@ done
 
 # Prefer a globally available `stellar` on PATH, fall back to STELLAR_BIN env var,
 # then fall back to a common WSL installation
-if command -v stellar &> /dev/null; then
+if [ "$DRY_RUN" = true ]; then
+  STELLAR="stellar"
+elif command -v stellar &> /dev/null; then
   STELLAR="stellar"
 elif [ -n "${STELLAR_BIN:-}" ] && [ -f "$STELLAR_BIN" ]; then
   STELLAR="$STELLAR_BIN"
@@ -132,17 +134,19 @@ fi
 
 ADDRESSES_FILE=".deployed-addresses"
 
-if [ "$FRESH" = true ]; then
+if [ "$FRESH" = true ] && [ "$DRY_RUN" != true ]; then
   echo "=== --fresh flag set: removing saved addresses and starting clean ==="
   rm -f "$ADDRESSES_FILE"
 fi
 
-touch "$ADDRESSES_FILE"
+if [ "$DRY_RUN" != true ]; then touch "$ADDRESSES_FILE"; fi
+_dry_run_excluded_keys=()
 
 # Write or overwrite a key in the addresses file
 save_address() {
   local key="$1"
   local value="$2"
+  if [ "$DRY_RUN" = true ]; then return 0; fi
   # Remove any existing line for this key, then append
   if grep -q "^${key}=" "$ADDRESSES_FILE" 2>/dev/null; then
     # Use a temp file for portability (no in-place sed on all systems)
@@ -154,6 +158,13 @@ save_address() {
 # Return the saved address for a key (empty string if not found)
 load_address() {
   local key="$1"
+  if [ "$DRY_RUN" = true ]; then
+    if [ "$FRESH" = true ]; then return 0; fi
+    local excluded
+    for excluded in "${_dry_run_excluded_keys[@]}"; do
+      if [ "$key" = "$excluded" ]; then return 0; fi
+    done
+  fi
   grep "^${key}=" "$ADDRESSES_FILE" 2>/dev/null | cut -d= -f2 || true
 }
 
@@ -483,6 +494,46 @@ verify_pinned_invoice() {
 }
 
 # ---------------------------------------------------------------------------
+# 4d. Deployed code hash preflight (issue #1299)
+# ---------------------------------------------------------------------------
+
+# verify_deployed_code_hashes <KEY=CONTRACT_ID>...
+# Before any reference-setting call, compare each deployed contract's on-chain
+# code hash with the intended release: the `wasm_hashes` map in
+# $RELEASE_MANIFEST when set, otherwise the freshly built local WASM artifacts.
+# Exits non-zero without invoking a single wiring call if anything differs, so
+# a deployment can never point references at contract IDs running unexpected
+# WASM.
+verify_deployed_code_hashes() {
+  if [ "$DRY_RUN" = true ]; then
+    echo "  [DRY-RUN] Would verify deployed code hashes before wiring: $*"
+    return 0
+  fi
+
+  local -a source_args
+  if [ -n "${RELEASE_MANIFEST:-}" ]; then
+    if [ ! -f "$RELEASE_MANIFEST" ]; then
+      echo "ERROR: RELEASE_MANIFEST is set but not found: $RELEASE_MANIFEST" 1>&2
+      exit 1
+    fi
+    source_args=(--manifest "$RELEASE_MANIFEST")
+    echo "=== Preflight: comparing deployed code hashes with $RELEASE_MANIFEST ==="
+  else
+    source_args=(--wasm-dir "target/wasm32v1-none/release")
+    echo "=== Preflight: comparing deployed code hashes with locally built WASM ==="
+  fi
+
+  if ! python3 "$SCRIPT_DIR/check_deployed_hashes.py" \
+      "${source_args[@]}" \
+      --network testnet \
+      "$@"; then
+    echo "ERROR: deployed code does not match the intended release." 1>&2
+    echo "       Refusing to set contract references. No wiring call was made." 1>&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # 5. Pre-flight checks
 # ---------------------------------------------------------------------------
 
@@ -504,11 +555,15 @@ if [ -z "${XLM_ASSET:-}" ]; then
   exit 1
 fi
 
+if [ "$DRY_RUN" = true ]; then
+  DEPLOYER_ADDRESS="${DEPLOYER_ADDRESS:-<address-for-$DEPLOYER_ACCOUNT>}"
+else
 DEPLOYER_ADDRESS=$("$STELLAR" keys address "$DEPLOYER_ACCOUNT" 2>&1) || {
   echo "ERROR: Could not resolve address for key '$DEPLOYER_ACCOUNT'."
   echo "       Run scripts/setup-testnet.sh first."
   exit 1
 }
+fi
 echo "  Deployer address : $DEPLOYER_ADDRESS"
 echo "  Addresses file   : $ADDRESSES_FILE"
 echo "  Fresh deploy     : $FRESH"
@@ -573,8 +628,12 @@ if [ -n "$ONLY_CONTRACT" ]; then
   done
   _pattern=$(printf '%s|' "${_clear_keys[@]}")
   _pattern="${_pattern%|}"
-  grep -vE "^(${_pattern})=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
-  mv "${ADDRESSES_FILE}.tmp" "$ADDRESSES_FILE"
+  if [ "$DRY_RUN" = true ]; then
+    _dry_run_excluded_keys=("${_clear_keys[@]}")
+  else
+    grep -vE "^(${_pattern})=" "$ADDRESSES_FILE" > "${ADDRESSES_FILE}.tmp" 2>/dev/null || true
+    mv "${ADDRESSES_FILE}.tmp" "$ADDRESSES_FILE"
+  fi
 
   # Load all surviving saved addresses into variables for cross-refs
   REGISTRY_ID=$(load_address "registry")
@@ -775,6 +834,20 @@ if _should_run "pool_xlm"; then
   echo ""
 fi
 
+# Issue #1299: verify every contract ID about to be wired is running the WASM
+# this release intends, before the first reference-setting call.
+_preflight_contracts=()
+[ -n "${REGISTRY_ID:-}" ] && _preflight_contracts+=("--contract" "registry=$REGISTRY_ID")
+[ -n "${INVOICE_ID:-}" ] && _preflight_contracts+=("--contract" "invoice=$INVOICE_ID")
+[ -n "${ESCROW_USDC_ID:-}" ] && _preflight_contracts+=("--contract" "escrow_usdc=$ESCROW_USDC_ID")
+[ -n "${POOL_USDC_ID:-}" ] && _preflight_contracts+=("--contract" "pool_usdc=$POOL_USDC_ID")
+[ -n "${ESCROW_XLM_ID:-}" ] && _preflight_contracts+=("--contract" "escrow_xlm=$ESCROW_XLM_ID")
+[ -n "${POOL_XLM_ID:-}" ] && _preflight_contracts+=("--contract" "pool_xlm=$POOL_XLM_ID")
+if [ "${#_preflight_contracts[@]}" -gt 0 ]; then
+  verify_deployed_code_hashes "${_preflight_contracts[@]}"
+  echo ""
+fi
+
 if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "usdc_pair" ]; then
   echo ""
   echo "=== Wiring USDC pool_contract into invoice_contract ==="
@@ -866,17 +939,8 @@ NEXT_PUBLIC_POOL_XLM_CONTRACT_ID=$POOL_XLM_ID # EXPERIMENTAL
 EOF
 
 JSON_OUT="deployments.json"
-cat > "$JSON_OUT" <<EOF
-{
-  "registry": "$REGISTRY_ID",
-  "invoice": "$INVOICE_ID",
-  "escrow_usdc": "$ESCROW_USDC_ID",
-  "escrow_xlm": "$ESCROW_XLM_ID",
-  "pool_usdc": "$POOL_USDC_ID",
-  "pool_xlm": "$POOL_XLM_ID",
-  "updated_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-}
-EOF
+python3 "$SCRIPT_DIR/deployment_manifest.py" write "$JSON_OUT" \
+  "$REGISTRY_ID" "$INVOICE_ID" "$ESCROW_USDC_ID" "$ESCROW_XLM_ID" "$POOL_USDC_ID" "$POOL_XLM_ID"
 
 if [ -f "scripts/maintainer/update-readme-addresses.sh" ]; then
   bash scripts/maintainer/update-readme-addresses.sh

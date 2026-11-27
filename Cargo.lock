@@ -1892,7 +1892,9 @@ name = "trusttrove-integration-tests"
 version = "0.1.0"
 dependencies = [
  "k256",
+ "serde_json",
  "soroban-sdk",
+ "tempfile",
  "trusttrove-escrow",
  "trusttrove-invoice",
  "trusttrove-pool",
@@ -1913,6 +1915,17 @@ dependencies = [
  "trusttrove-registry",
  "trusttrove-test-utils",
  "trusttrove-ttl",
+]
+
+[[package]]
+name = "trusttrove-migration-tests"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+ "trusttrove-escrow",
+ "trusttrove-invoice",
+ "trusttrove-pool",
+ "trusttrove-registry",
 ]
 
 [[package]]

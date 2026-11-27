@@ -127,4 +127,97 @@ pub enum DataKey {
     /// **Storage-key layout:** appended at the end of the unnumbered enum
     /// (index 7) — see the note on [`DataKey::IssuerReleased`].
     InvoiceContract,
+    /// Ledger sequence in which the lock for a given invoice was created.
+    /// The inner `BytesN<32>` is the invoice ID. Value type: `u64`.
+    ///
+    /// Written by [`EscrowContract::lock`] and removed when the lock record is
+    /// removed. Records created before this key existed have no entry, so
+    /// [`EscrowContract::get_locked_ledger`] returns `0` to mean "unknown".
+    /// A partial `release_to_pool` preserves both the lock and this key.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 8) — see the note on [`DataKey::IssuerReleased`].
+    LockedLedger(BytesN<32>),
+    /// Minimum seconds before default handling. Instance key with a u64 value.
+    MinLockSeconds,
+    /// Minimum amount (in USDC stroops) accepted by future
+    /// [`EscrowContract::lock`](crate::EscrowContract::lock) calls (#1297).
+    /// Instance key; value type: `u128`. Absent means no minimum beyond the
+    /// existing non-zero rule, so deployments that never set it keep their
+    /// previous behaviour. Existing locks are unaffected and stay releasable.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 10) — see the note on [`DataKey::IssuerReleased`].
+    MinLockAmount,
+    /// Address that received the most recent successful release or default for
+    /// a given invoice (#1296). The inner `BytesN<32>` is the invoice ID.
+    /// Value type: `Address`. Failed transfers never write this key; the write
+    /// follows the token transfer inside the same transaction, so a reverted
+    /// release leaves the previous recipient in place.
+    ///
+    /// Written by [`EscrowContract::release_to_issuer`](crate::EscrowContract::release_to_issuer),
+    /// [`EscrowContract::release_to_pool`](crate::EscrowContract::release_to_pool),
+    /// [`EscrowContract::handle_default`](crate::EscrowContract::handle_default) and
+    /// [`EscrowContract::release_after_timeout`](crate::EscrowContract::release_after_timeout);
+    /// read by [`EscrowContract::get_last_release_recipient`](crate::EscrowContract::get_last_release_recipient).
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 11) — see the note on [`DataKey::IssuerReleased`].
+    LastReleaseRecipient(BytesN<32>),
+}
+
+/// Which escrow write entry points an address may call under the current
+/// configuration, returned by
+/// [`EscrowContract::get_release_authorization`](crate::EscrowContract::get_release_authorization)
+/// (issue #1198).
+///
+/// Each action flag is `true` only when the address passes that entry
+/// point's caller rule **and** the contract is not paused. Conditions that
+/// depend on a particular invoice rather than on the caller are not
+/// evaluated: whether a lock or issuer-release marker exists, the recorded
+/// issuer, the default grace period and the timeout deadline.
+///
+/// This is a preview only. It never replaces authorization: every write still
+/// runs its own `require_auth` and checks, whatever this struct reported.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReleaseAuthorization {
+    /// `true` while the emergency pause is engaged. Every action below then
+    /// reverts with `ContractPaused`, so all action flags are `false`.
+    pub paused: bool,
+    /// `lock`: the configured pool contract.
+    pub lock: bool,
+    /// `release_to_issuer`: the configured pool contract.
+    pub release_to_issuer: bool,
+    /// `release_to_pool`: the invoice contract reported by the pool's
+    /// `get_invoice_contract`, which must also equal the reference pinned with
+    /// `set_invoice_contract` when one is set.
+    pub release_to_pool: bool,
+    /// `handle_default`: the stored admin or the configured pool contract.
+    pub handle_default: bool,
+    /// `release_after_timeout`: permissionless, so any address.
+    pub release_after_timeout: bool,
+}
+
+/// Read-only custody coverage preview for one invoice, returned by
+/// [`EscrowContract::get_custody_coverage`](crate::EscrowContract::get_custody_coverage)
+/// (issue #1298).
+///
+/// The view compares the amount the contract tracks as locked against the
+/// tokens it actually holds, letting an operator decide whether a proposed
+/// release can succeed before submitting a transaction. It transfers nothing
+/// and writes no storage, so it can be called while the contract is paused.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustodyCoverage {
+    /// Amount tracked in the invoice's active [`DataKey::Locked`] record, or
+    /// `0` when no lock exists.
+    pub tracked_amount: u128,
+    /// Actual balance of the configured asset held by the escrow contract, in
+    /// stroops. Includes unsolicited transfers and residual dust, so it may
+    /// exceed the sum of tracked locks.
+    pub token_balance: i128,
+    /// `true` when an active lock exists and `token_balance` covers
+    /// `tracked_amount`; `false` otherwise (including when there is no lock).
+    pub can_release: bool,
 }
