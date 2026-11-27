@@ -72,6 +72,7 @@ pub fn default_resolved(
     pool: &Address,
     caller: &Address,
     amount: u128,
+    lock_age: u64,
 ) {
     env.events().publish(
         (
@@ -80,7 +81,7 @@ pub fn default_resolved(
             pool.clone(),
             caller.clone(),
         ),
-        amount,
+        (amount, lock_age),
     );
 }
 
@@ -88,6 +89,16 @@ pub fn default_resolved(
 pub fn timeout_window_set(env: &Env, window: u64) {
     env.events()
         .publish((Symbol::new(env, "timeout_window_set"),), window);
+}
+
+/// Emitted by `set_min_lock_amount` when the admin changes the minimum amount
+/// accepted by future `lock` calls (#1297). `admin` is indexed; the data is
+/// the new minimum in USDC stroops.
+pub fn min_lock_amount_set(env: &Env, admin: &Address, min_amount: u128) {
+    env.events().publish(
+        (Symbol::new(env, "min_lock_amount_set"), admin.clone()),
+        min_amount,
+    );
 }
 
 /// Emitted by `set_invoice_contract` when the admin pins the invoice
@@ -107,6 +118,22 @@ pub fn timeout_released(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amou
             Symbol::new(env, "timeout_released"),
             invoice_id.clone(),
             pool.clone(),
+        ),
+        amount,
+    );
+}
+
+/// Emitted by `recover_token` when the admin sweeps a stray, non-funding token
+/// out of the escrow. `admin`, `token` and `to` are indexed so an auditor can
+/// filter by who recovered, which asset, and where it went; the data is the
+/// amount moved.
+pub fn token_recovered(env: &Env, admin: &Address, token: &Address, to: &Address, amount: u128) {
+    env.events().publish(
+        (
+            Symbol::new(env, "token_recovered"),
+            admin.clone(),
+            token.clone(),
+            to.clone(),
         ),
         amount,
     );
