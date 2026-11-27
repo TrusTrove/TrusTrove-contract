@@ -145,9 +145,10 @@ pub enum DataKey {
     /// Confirmation that the buyer has received/accepted the goods/services.
     /// Used with `issuer_confirmed` to advance the invoice to `Confirmed` status.
     BuyerConfirmedAt(BytesN<32>),
-    /// Evidence that delivery has been recorded for this invoice.
-    /// The inner `BytesN<32>` is the invoice ID. Value type: `u8` (index 13).
-    DeliveryEvidence(u8),
+    /// Proof-of-delivery evidence hash recorded for this invoice. The inner
+    /// `BytesN<32>` is the invoice ID. Value type: `BytesN<32>` (the evidence
+    /// hash), read with `get_delivery_evidence`.
+    DeliveryEvidence(BytesN<32>),
 }
 
 /// Metadata describing a supported asset (optional asset code and decimals).

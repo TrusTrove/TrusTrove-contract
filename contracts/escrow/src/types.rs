@@ -163,15 +163,15 @@ pub enum DataKey {
     /// intentionally appended to preserve the positional encoding of existing
     /// `DataKey` variants.
     ReleaseSequence(BytesN<32>),
-    /// Minimum lock amount in stroops for a given invoice. The invoice ID
-    /// is the suffix. Value type: `u128` (index 11). This key is
+    /// Minimum amount accepted by future `lock` calls (#1297). Instance key;
+    /// value type: `u128` (index 11). Absent means `0`. This key is
     /// intentionally appended to preserve the positional encoding of existing
     /// `DataKey` variants.
-    MinLockAmount(BytesN<32>),
-    /// One-based successful-release counter for the most recent release to the
-    /// issuer. The invoice ID is the suffix. Value type: `u64` (index 12). This key is
-    /// intentionally appended to preserve the positional encoding of existing
-    /// `DataKey` variants.
+    MinLockAmount,
+    /// Recipient of the most recent successful release/default for an invoice
+    /// (#1296). The invoice ID is the suffix. Value type: `Address` (index 12).
+    /// This key is intentionally appended to preserve the positional encoding
+    /// of existing `DataKey` variants.
     LastReleaseRecipient(BytesN<32>),
 }
 
