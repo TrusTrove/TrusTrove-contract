@@ -30,6 +30,24 @@ pub struct EscrowRecord {
     pub issuer: soroban_sdk::Address,
 }
 
+/// Snapshot of one invoice's lock state returned by
+/// [`EscrowContract::get_locked_batch`] (issue #1294).
+///
+/// `exists` distinguishes a missing lock from a live record whose amount is
+/// zero, so callers can batch-read several invoices without losing the
+/// presence signal that [`EscrowContract::has_lock`] exposes one invoice at a
+/// time. `amount` and `locked_at` are `0` when `exists` is `false`.
+#[contracttype]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LockState {
+    /// Locked amount in USDC stroops, or `0` when no record exists.
+    pub amount: u128,
+    /// Unix timestamp recorded at lock time, or `0` when no record exists.
+    pub locked_at: u64,
+    /// Whether a lock record exists for the requested invoice.
+    pub exists: bool,
+}
+
 /// Actions that can be recorded in the escrow event history.
 ///
 /// Each variant corresponds to a state transition of an escrow lock.

@@ -11040,3 +11040,204 @@ fn test_share_price_overflow_boundary() {
         Err(Ok(soroban_sdk::Error::from(PoolError::Overflow)))
     );
 }
+
+// ---------------------------------------------------------------------------
+//  ISSUE #1293: ADMIN-SETTABLE MINIMUM FUNDING AMOUNT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_min_fund_principal_defaults_to_zero() {
+    let te = setup();
+    assert_eq!(te.pool.get_min_fund_principal(), 0);
+}
+
+#[test]
+fn test_set_min_fund_principal_reads_back_and_emits_event() {
+    let te = setup();
+
+    assert!(te.pool.set_min_fund_principal(&1_000_000));
+
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "min_fund_principal_updated")
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (0u128, 1_000_000u128)
+    );
+    assert_eq!(te.pool.get_min_fund_principal(), 1_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_min_fund_principal_requires_admin_authorization() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_min_fund_principal(&1_000_000);
+}
+
+#[test]
+fn test_set_min_fund_principal_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_min_fund_principal",
+            args: (1_000_000u128,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_min_fund_principal(&1_000_000).is_err());
+    assert_eq!(te.pool.get_min_fund_principal(), 0);
+}
+
+#[test]
+fn test_fund_invoice_below_min_fund_principal_rejected_before_escrow() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_fund_principal(&(DEFAULT_FUNDED_AMOUNT + 1));
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    let funded_key = DataKey::FundedInvoice(invoice_id.clone());
+    let stats_before = te.pool.get_stats();
+    let escrow_balance_before = MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.escrow_id);
+
+    assert_eq!(
+        te.pool.try_fund_invoice(&invoice_id),
+        Err(Ok(soroban_sdk::Error::from(PoolError::UnderMinimumFunding)))
+    );
+    // A rejected call emits nothing in its own per-invocation buffer.
+    assert_eq!(te.env.events().all().len(), 0);
+
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_funded, stats_before.total_funded);
+    assert_eq!(
+        stats_after.active_invoice_count,
+        stats_before.active_invoice_count
+    );
+    assert!(!te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().has(&funded_key)
+    }));
+    assert_eq!(
+        MockTokenClient::new(&te.env, &te.usdc_id).balance(&te.escrow_id),
+        escrow_balance_before
+    );
+}
+
+#[test]
+fn test_fund_invoice_exact_min_fund_principal_boundary_accepted() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_fund_principal(&DEFAULT_FUNDED_AMOUNT);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    assert!(te.pool.fund_invoice(&invoice_id));
+    assert_eq!(te.pool.get_stats().total_funded, DEFAULT_FUNDED_AMOUNT);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_batch_fund_invoice_below_min_fund_principal_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_min_fund_principal(&(DEFAULT_FUNDED_AMOUNT + 1));
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    let ids = vec![&te.env, invoice_id];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+// ---------------------------------------------------------------------------
+//  ISSUE #1290: UTILIZATION CHANGE EVENT
+// ---------------------------------------------------------------------------
+
+fn utilization_event_data(
+    te: &TestEnv,
+    events: &Vec<(Address, Vec<Val>, Val)>,
+) -> Option<(u32, u32)> {
+    for i in 0..events.len() {
+        let (_contract, topics, data) = events.get(i).unwrap();
+        if topics.len() != 1 {
+            continue;
+        }
+        let topic = Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap();
+        if topic == Symbol::new(&te.env, "utilization_updated") {
+            return Some(<(u32, u32)>::try_from_val(&te.env, &data).unwrap());
+        }
+    }
+    None
+}
+
+#[test]
+fn test_fund_invoice_emits_utilization_change() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+
+    te.pool.fund_invoice(&invoice_id);
+
+    let events = te.env.events().all();
+    assert_eq!(
+        utilization_event_data(&te, &events),
+        Some((0, 980)),
+        "funding should report utilization moving from 0 to 980 bps"
+    );
+}
+
+#[test]
+fn test_deposit_emits_utilization_change_after_funding() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    // Second deposit: funded stays 9.8B while deposits double to 200B, so
+    // utilization falls from 980 bps to 490 bps.
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let events = te.env.events().all();
+    assert_eq!(
+        utilization_event_data(&te, &events),
+        Some((980, 490)),
+        "deposit should report the utilization drop"
+    );
+}
+
+#[test]
+fn test_deposit_without_funding_does_not_emit_utilization_change() {
+    let te = setup();
+
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    let events = te.env.events().all();
+    assert_eq!(utilization_event_data(&te, &events), None);
+}
+
+#[test]
+fn test_repayment_emits_utilization_change() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
+
+    te.invoice.repay(&invoice_id);
+
+    let events = te.env.events().all();
+    assert_eq!(
+        utilization_event_data(&te, &events),
+        Some((980, 0)),
+        "repayment should report utilization returning to 0 bps"
+    );
+}

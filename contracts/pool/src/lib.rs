@@ -676,17 +676,27 @@ impl PoolContract {
         Self::require_initialized(&env);
         lp.require_auth();
         let shares_to_issue = Self::shares_for_deposit(&env, usdc_amount);
-        let total_deposits = Self::totals(&env).deposits;
+        let totals = Self::totals(&env);
+        let total_deposits = totals.deposits;
+        let utilization_before =
+            Self::utilization_bps_or_panic(&env, totals.funded, total_deposits);
 
         let usdc_id = Self::funding_asset(&env);
         let usdc = token::Client::new(&env, &usdc_id);
         usdc.transfer(&lp, env.current_contract_address(), &(usdc_amount as i128));
 
         Self::_mint(&env, &lp, shares_to_issue);
+        let new_total_deposits = total_deposits + usdc_amount;
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits + usdc_amount));
+            .set(&DataKey::TotalDeposits, &new_total_deposits);
         Self::bump_lifetime_volume(&env, &DataKey::LifetimeDepositedVolume, usdc_amount);
+
+        let utilization_after =
+            Self::utilization_bps_or_panic(&env, totals.funded, new_total_deposits);
+        if utilization_before != utilization_after {
+            events::utilization_updated(&env, utilization_before, utilization_after);
+        }
 
         let lp_deposit_count_key = DataKey::LPDepositCount(lp.clone());
         let count: u32 = env
@@ -861,7 +871,10 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::InsufficientShares);
         }
 
-        let total_deposits = Self::totals(&env).deposits;
+        let totals = Self::totals(&env);
+        let total_deposits = totals.deposits;
+        let utilization_before =
+            Self::utilization_bps_or_panic(&env, totals.funded, total_deposits);
         let usdc_to_return = Self::preview_withdraw_amount(&env, shares);
 
         let usdc_id = Self::funding_asset(&env);
@@ -873,10 +886,17 @@ impl PoolContract {
         );
 
         let remaining_shares = Self::_burn(&env, &lp, shares);
+        let new_total_deposits = total_deposits - usdc_to_return;
         env.storage()
             .instance()
-            .set(&DataKey::TotalDeposits, &(total_deposits - usdc_to_return));
+            .set(&DataKey::TotalDeposits, &new_total_deposits);
         Self::bump_lifetime_volume(&env, &DataKey::LifetimeWithdrawnVolume, usdc_to_return);
+
+        let utilization_after =
+            Self::utilization_bps_or_panic(&env, totals.funded, new_total_deposits);
+        if utilization_before != utilization_after {
+            events::utilization_updated(&env, utilization_before, utilization_after);
+        }
 
         if remaining_shares == 0 {
             // Full withdrawal: reset LP-scoped storage to prevent stale state
@@ -1468,9 +1488,24 @@ impl PoolContract {
             panic_with_error!(&env, PoolError::InvalidAmount);
         }
 
+        // Admin-set minimum funding amount (issue #1293). This is an
+        // eligibility rule, so it runs before any pool state is committed or
+        // any escrow interaction happens, and it panics in both single and
+        // batch mode. At the default of 0 the comparison is unreachable, so
+        // existing behavior is unchanged.
+        let min_fund_principal: u128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinFundPrincipal)
+            .unwrap_or(0u128);
+        if funded_amount < min_fund_principal {
+            panic_with_error!(&env, PoolError::UnderMinimumFunding);
+        }
+
         let totals = Self::totals(&env);
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
+        let utilization_before = Self::utilization_bps_or_panic(&env, total_funded, total_deposits);
         let cumulative_funded = totals.cumulative_funded;
 
         // Admin-set per-invoice exposure limit (issue #1180): cap the share of
@@ -1584,6 +1619,9 @@ impl PoolContract {
             args,
         );
 
+        if utilization_before != utilization_after {
+            events::utilization_updated(&env, utilization_before, utilization_after);
+        }
         events::invoice_funded(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
         true
@@ -1972,6 +2010,8 @@ impl PoolContract {
         let totals = Self::totals(&env);
         let total_funded = totals.funded;
         let total_loss_realised = totals.loss_realised;
+        let utilization_before =
+            Self::utilization_bps_or_panic(&env, total_funded, totals.deposits);
 
         // Validate every pool-side arithmetic bound before anything is written
         // and before the invoice is mutated: the funded principal must fit
@@ -2039,6 +2079,14 @@ impl PoolContract {
 
         env.storage().persistent().remove(&funded_key);
 
+        let utilization_after = Self::utilization_bps_or_panic(
+            &env,
+            new_total_funded,
+            new_total_deposits.unwrap_or(totals.deposits),
+        );
+        if utilization_before != utilization_after {
+            events::utilization_updated(&env, utilization_before, utilization_after);
+        }
         events::invoice_defaulted(&env, &invoice_id, funded_amount);
         Self::extend_instance_ttl(&env);
         true
@@ -3042,6 +3090,65 @@ impl PoolContract {
             .unwrap_or(0u32)
     }
 
+    /// Sets the minimum discounted principal that `fund_invoice` and
+    /// `batch_fund_invoice` will advance, in funding-asset base units
+    /// (issue #1293).
+    ///
+    /// The floor is checked after the invoice's discounted principal is
+    /// computed and before any pool state is committed or escrow is called,
+    /// so an under-floor invoice costs no storage or event budget. A floor of
+    /// `0` (the default, and the state of every instance predating this
+    /// feature) accepts any non-zero principal, preserving existing behavior.
+    /// The rule applies only when an invoice is newly funded; invoices already
+    /// funded are never re-checked.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `min_amount` - The new minimum funded principal. `0` disables the
+    ///   floor.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored `admin`.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the floor is updated. Emits
+    ///   `min_fund_principal_updated` with `(old_min, new_min)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_min_fund_principal(&1_000_000); // 0.1 USDC
+    /// ```
+    pub fn set_min_fund_principal(env: Env, min_amount: u128) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        let old_min = env
+            .storage()
+            .instance()
+            .get(&DataKey::MinFundPrincipal)
+            .unwrap_or(0u128);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinFundPrincipal, &min_amount);
+        events::min_fund_principal_updated(&env, old_min, min_amount);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Returns the minimum discounted principal accepted by new funding calls.
+    /// Defaults to `0` (no floor) when never set, so instances predating issue
+    /// #1293 keep their behavior.
+    pub fn get_min_fund_principal(env: Env) -> u128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::MinFundPrincipal)
+            .unwrap_or(0u128)
+    }
+
     /// Returns the pool's contract references and funding policy in one
     /// read-only snapshot (issue #1188).
     ///
@@ -3445,6 +3552,7 @@ impl PoolContract {
         let total_deposits = totals.deposits;
         let total_funded = totals.funded;
         let total_yield = totals.yield_distributed;
+        let utilization_before = Self::utilization_bps_or_panic(env, total_funded, total_deposits);
         // Price before the yield is credited; a zero-yield repayment leaves
         // the price untouched and must not emit an event (#1171).
         let old_share_price = Self::share_price(env);
@@ -3534,6 +3642,11 @@ impl PoolContract {
         if lp_yield > 0 {
             let new_share_price = Self::share_price(env);
             events::share_price_updated(env, invoice_id, old_share_price, new_share_price);
+        }
+        let utilization_after =
+            Self::utilization_bps_or_panic(env, new_total_funded, new_total_deposits);
+        if utilization_before != utilization_after {
+            events::utilization_updated(env, utilization_before, utilization_after);
         }
         // Update event to include protocol cut information
         events::repayment_received(env, invoice_id, amount, lp_yield, protocol_cut);

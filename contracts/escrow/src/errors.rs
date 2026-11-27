@@ -36,4 +36,7 @@ pub enum EscrowError {
     /// asset. That asset backs every active lock, so it is never recoverable
     /// through this path.
     InvalidToken = 13,
+    /// Returned when `get_locked_batch` is given more invoice IDs than the
+    /// bounded batch read accepts (issue #1294).
+    BatchTooLarge = 14,
 }

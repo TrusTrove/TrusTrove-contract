@@ -10,6 +10,8 @@ mod constants;
 mod errors;
 mod events;
 mod test;
+#[cfg(test)]
+mod tests;
 mod types;
 
 pub use constants::*;
@@ -21,6 +23,10 @@ const DEFAULT_MIN_LOCK_SECONDS: u64 = 60;
 /// any non-zero amount was accepted.
 const DEFAULT_MIN_LOCK_AMOUNT: u128 = 0;
 const MAX_HISTORY_PAGE_SIZE: u32 = 100;
+/// Upper bound on the number of invoice IDs accepted by `get_locked_batch`.
+/// Keeps the worst-case cost of one batch read within the transaction budget
+/// (issue #1294).
+pub const MAX_LOCK_BATCH_SIZE: u32 = 100;
 /// Default `release_after_timeout` window (30 days) used until the admin sets one.
 pub const DEFAULT_TIMEOUT_WINDOW_SECONDS: u64 = 30 * 24 * 60 * 60;
 /// Upper bound accepted by `set_timeout_window` (365 days), matching invoice's expiry cap.
@@ -1298,6 +1304,61 @@ impl EscrowContract {
             }
             None => 0,
         }
+    }
+
+    /// Returns `amount`, `locked_at`, and presence for each supplied invoice
+    /// ID, in the same order as the input (issue #1294).
+    ///
+    /// Dashboards inspecting several invoices can read every lock in one call
+    /// instead of one RPC per invoice. Missing IDs do not fail the batch: they
+    /// produce a [`LockState`] with `exists == false` and zero values. The
+    /// batch is bounded by [`MAX_LOCK_BATCH_SIZE`].
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_ids` - Invoice IDs to inspect, in the order they should be
+    ///   returned.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// * `BatchTooLarge` if `invoice_ids` contains more than
+    ///   [`MAX_LOCK_BATCH_SIZE`] entries.
+    ///
+    /// # Returns
+    /// * `Vec<LockState>` - One entry per requested invoice, in input order.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let states = client.get_locked_batch(&ids);
+    /// ```
+    pub fn get_locked_batch(env: Env, invoice_ids: Vec<BytesN<32>>) -> Vec<LockState> {
+        if invoice_ids.len() > MAX_LOCK_BATCH_SIZE {
+            panic_with_error!(&env, EscrowError::BatchTooLarge);
+        }
+        let mut states = Vec::new(&env);
+        for invoice_id in invoice_ids.iter() {
+            let key = DataKey::Locked(invoice_id);
+            match env.storage().persistent().get::<_, EscrowRecord>(&key) {
+                Some(record) => {
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                    states.push_back(LockState {
+                        amount: record.amount,
+                        locked_at: record.locked_at,
+                        exists: true,
+                    });
+                }
+                None => states.push_back(LockState {
+                    amount: 0,
+                    locked_at: 0,
+                    exists: false,
+                }),
+            }
+        }
+        states
     }
 
     fn min_lock_seconds(env: &Env) -> u64 {
