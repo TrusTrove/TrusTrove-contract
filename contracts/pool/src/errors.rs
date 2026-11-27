@@ -68,4 +68,7 @@ pub enum PoolError {
     /// no tokens; withdrawals and repayments are never blocked by the cap
     /// (issue #1179).
     DepositCapExceeded = 31,
+    /// The configured total deposit cap exceeds the funding token's signed
+    /// transfer amount range (`i128::MAX`).
+    InvalidDepositCap = 32,
 }
