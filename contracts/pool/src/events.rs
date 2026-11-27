@@ -40,6 +40,23 @@ pub fn lp_deposited(env: &Env, lp: &Address, usdc_amount: u128, shares_issued: u
     );
 }
 
+/// Emitted by `deposit` and `withdraw` after a successful LP action, carrying
+/// the LP's post-operation share balance, tracked principal and ledger time so
+/// indexers have an authoritative position checkpoint (issue #1292). Failed
+/// calls revert and therefore emit nothing.
+pub fn lp_position_checkpoint(
+    env: &Env,
+    lp: &Address,
+    resulting_shares: u128,
+    principal: u128,
+    ledger_time: u64,
+) {
+    env.events().publish(
+        (Symbol::new(env, "lp_position_checkpoint"), lp.clone()),
+        (resulting_shares, principal, ledger_time),
+    );
+}
+
 /// Emitted by `withdraw` when an LP redeems pool shares for USDC.
 pub fn lp_withdrawn(env: &Env, lp: &Address, usdc_amount: u128, shares_burned: u128) {
     env.events().publish(
@@ -189,6 +206,31 @@ pub fn min_discount_updated(env: &Env, old_min_bps: u32, new_min_bps: u32) {
     env.events().publish(
         (Symbol::new(env, "min_discount_updated"),),
         (old_min_bps, new_min_bps),
+    );
+}
+
+/// Emitted by `set_max_loss_threshold` when the admin changes the optional
+/// realised-loss threshold that gates new funding (issue #1289). `None`
+/// disables the check; a rejected change emits nothing.
+pub fn max_loss_threshold_updated(
+    env: &Env,
+    old_threshold_bps: Option<u32>,
+    new_threshold_bps: Option<u32>,
+) {
+    env.events().publish(
+        (Symbol::new(env, "max_loss_threshold_updated"),),
+        (old_threshold_bps, new_threshold_bps),
+    );
+}
+
+/// Emitted by `reconcile_donation` when unsolicited funding-asset tokens held
+/// by the pool are recognised as a donation to existing LPs (issue #1291).
+/// `donated` is the surplus reconciled and `total_deposits` is the resulting
+/// recorded deposit total. No shares are minted.
+pub fn donation_reconciled(env: &Env, donated: u128, total_deposits: u128) {
+    env.events().publish(
+        (Symbol::new(env, "donation_reconciled"),),
+        (donated, total_deposits),
     );
 }
 

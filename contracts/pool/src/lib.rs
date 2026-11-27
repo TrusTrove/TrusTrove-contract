@@ -280,6 +280,11 @@ impl PoolContract {
         env.storage()
             .instance()
             .set(&DataKey::MinDiscountBps, &0u32);
+        // No maximum realised-loss threshold at construction (issue #1289);
+        // instances predating the key read the same `None` fallback.
+        env.storage()
+            .instance()
+            .set(&DataKey::MaxLossThresholdBps, &Option::<u32>::None);
         Self::extend_instance_ttl(&env);
 
         events::pool_initialized(
@@ -682,7 +687,7 @@ impl PoolContract {
         let usdc = token::Client::new(&env, &usdc_id);
         usdc.transfer(&lp, env.current_contract_address(), &(usdc_amount as i128));
 
-        Self::_mint(&env, &lp, shares_to_issue);
+        let resulting_shares = Self::_mint(&env, &lp, shares_to_issue);
         env.storage()
             .instance()
             .set(&DataKey::TotalDeposits, &(total_deposits + usdc_amount));
@@ -703,13 +708,24 @@ impl PoolContract {
 
         let lp_init_key = DataKey::LPInitialDeposit(lp.clone());
         let init_dep: u128 = env.storage().persistent().get(&lp_init_key).unwrap_or(0);
+        let resulting_principal = init_dep + usdc_amount;
         env.storage()
             .persistent()
-            .set(&lp_init_key, &(init_dep + usdc_amount));
+            .set(&lp_init_key, &resulting_principal);
         env.storage()
             .persistent()
             .extend_ttl(&lp_init_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
+        // Emit the checkpoint before the long-standing `lp_deposited` event so
+        // existing consumers that read the last pool event keep seeing the
+        // same event they did before #1292.
+        events::lp_position_checkpoint(
+            &env,
+            &lp,
+            resulting_shares,
+            resulting_principal,
+            env.ledger().timestamp(),
+        );
         events::lp_deposited(&env, &lp, usdc_amount, shares_to_issue);
         // #865: deposit is the most frequent LP write path; like every other
         // state-changing entrypoint it must refresh the instance TTL (the
@@ -913,6 +929,13 @@ impl PoolContract {
             .persistent()
             .extend_ttl(&yield_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 
+        events::lp_position_checkpoint(
+            &env,
+            &lp,
+            remaining_shares,
+            new_init_dep,
+            env.ledger().timestamp(),
+        );
         events::lp_withdrawn(&env, &lp, usdc_to_return, shares);
         // #865: mirror of the deposit fix — the withdrawal success path must
         // bump the instance TTL too, otherwise the LP-facing entrypoints
@@ -2588,6 +2611,17 @@ impl PoolContract {
             }
         }
 
+        if let Some(threshold_bps) = Self::max_loss_threshold(&env) {
+            if Self::loss_threshold_exceeded(
+                &env,
+                totals.loss_realised,
+                totals.cumulative_funded,
+                threshold_bps,
+            ) {
+                rejection_reasons.push_back(FundingRejectionReason::MaxLossExceeded);
+            }
+        }
+
         let funded_amount = if ctx.discount_bps > 10_000 {
             0
         } else {
@@ -3108,6 +3142,7 @@ impl PoolContract {
             min_discount_bps: Self::get_min_discount_bps(env.clone()),
             min_initial_deposit: Self::min_initial_deposit(&env),
             max_batch_size: MAX_BATCH_SIZE,
+            max_loss_threshold_bps: Self::max_loss_threshold(&env),
         }
     }
 
@@ -3361,6 +3396,44 @@ impl PoolContract {
         }
     }
 
+    /// Reads the optional maximum realised-loss threshold (issue #1289).
+    /// Unset keys, including instances that predate the policy, mean disabled.
+    fn max_loss_threshold(env: &Env) -> Option<u32> {
+        env.storage()
+            .instance()
+            .get(&DataKey::MaxLossThresholdBps)
+            .unwrap_or(None)
+    }
+
+    /// Returns true when realised loss exceeds `threshold_bps` of lifetime
+    /// funded volume. Cross-multiplied so the comparison is exact: a ratio
+    /// exactly at the threshold does not stop funding.
+    fn loss_threshold_exceeded(
+        env: &Env,
+        loss_realised: u128,
+        cumulative_funded: u128,
+        threshold_bps: u32,
+    ) -> bool {
+        if cumulative_funded == 0 {
+            return false;
+        }
+        let scaled_loss = loss_realised
+            .checked_mul(10_000)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+        let scaled_threshold = (threshold_bps as u128)
+            .checked_mul(cumulative_funded)
+            .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+        scaled_loss > scaled_threshold
+    }
+
+    /// Live funding-asset balance held by this contract, converted from the
+    /// token's signed SEP-41 `balance` to the pool's unsigned units.
+    fn actual_funding_asset_balance(env: &Env) -> u128 {
+        let usdc = token::Client::new(env, &Self::funding_asset(env));
+        let balance = usdc.balance(&env.current_contract_address());
+        u128::try_from(balance).unwrap_or_else(|_| panic_with_error!(env, PoolError::Overflow))
+    }
+
     /// Shared settlement path for invoice repayments, called by both
     /// `receive_repayment` and `receive_repayment_with_refund`.
     ///
@@ -3547,7 +3620,7 @@ impl PoolContract {
     }
 
     /// Internal helper to mint LP shares (scoped for SEP-41 share issuance).
-    fn _mint(env: &Env, to: &Address, amount: u128) {
+    fn _mint(env: &Env, to: &Address, amount: u128) -> u128 {
         let total_shares = Self::totals(env).shares;
         env.storage()
             .instance()
@@ -3555,12 +3628,14 @@ impl PoolContract {
 
         let lp_shares_key = DataKey::LPShares(to.clone());
         let lp_shares: u128 = env.storage().persistent().get(&lp_shares_key).unwrap_or(0);
+        let resulting_shares = lp_shares + amount;
         env.storage()
             .persistent()
-            .set(&lp_shares_key, &(lp_shares + amount));
+            .set(&lp_shares_key, &resulting_shares);
         env.storage()
             .persistent()
             .extend_ttl(&lp_shares_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        resulting_shares
     }
 
     /// Internal helper to burn LP shares (scoped for SEP-41 share redemption).

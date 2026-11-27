@@ -206,6 +206,24 @@ pub struct PoolConfig {
     /// Maximum number of invoices accepted by one `batch_fund_invoice` call
     /// (`MAX_BATCH_SIZE`).
     pub max_batch_size: u32,
+    /// Maximum realised-loss threshold in basis points enforced before new
+    /// funding, or `None` when unset (no threshold, issue #1289).
+    pub max_loss_threshold_bps: Option<u32>,
+}
+
+/// Read-only asset balance reconciliation snapshot returned by
+/// `get_asset_balance_reconciliation` (issue #1288).
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AssetBalanceReconciliation {
+    /// Recorded available liquidity (`TotalDeposits - TotalFunded`) in
+    /// funding-asset base units.
+    pub recorded_available_liquidity: u128,
+    /// Actual funding-asset balance held by the pool contract.
+    pub actual_token_balance: u128,
+    /// `actual_token_balance - recorded_available_liquidity`, negative when
+    /// the pool holds less than its books report.
+    pub signed_difference: i128,
 }
 
 /// Why a listed invoice would currently be rejected by `fund_invoice`.
@@ -223,6 +241,9 @@ pub enum FundingRejectionReason {
     MaturityTooLong,
     InsufficientLiquidity,
     UtilizationCapExceeded,
+    /// Cumulative realised loss exceeds the admin-configured maximum loss
+    /// threshold (issue #1289).
+    MaxLossExceeded,
     Overflow,
 }
 

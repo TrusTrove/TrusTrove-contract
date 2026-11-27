@@ -416,6 +416,48 @@ Emitted when an LP withdraws USDC from the pool by burning shares.
 
 ---
 
+### `lp_position_checkpoint`
+
+Emitted after every successful LP `deposit` or `withdraw` with the resulting
+position, so indexers can record an authoritative post-operation snapshot
+(issue #1292). It is emitted immediately before `lp_deposited` /
+`lp_withdrawn`, leaving those events last for consumers that read the last
+pool event. Failed calls revert and emit nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"lp_position_checkpoint"` |
+| `topic[1]` | `Address` | LP address |
+| **Data** | `(u128, u128, u64)` | `(resulting_shares, principal, ledger_time)` |
+
+- `resulting_shares`: LP share balance after the operation.
+- `principal`: LP tracked principal (`LPInitialDeposit`) after the operation.
+- `ledger_time`: Ledger timestamp of the successful operation.
+
+**Emitted by:** `deposit()` and `withdraw()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
+### `donation_reconciled`
+
+Emitted by `reconcile_donation` when unsolicited funding-asset tokens held by
+the pool are recognised as a donation to existing LPs (issue #1291). The
+donated amount is measured from the live token balance, credited to
+`TotalDeposits`, and never mints LP shares.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"donation_reconciled"` |
+| **Data** | `(u128, u128)` | `(donated, total_deposits)` |
+
+**Emitted by:** `reconcile_donation()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs`
+
+---
+
 ### `transfer`
 
 Emitted by SEP-41 share-movement entry points (`transfer`, `transfer_shares`, and `transfer_from`) using the standard SEP-41 transfer schema so generic token indexers can track LP share movements.
@@ -1403,7 +1445,7 @@ Note that some event names appear in multiple contracts. When indexing, filter b
 2. **Use topics for filtering** — `topic[0]` is always the event name (Symbol)
 3. **Data decoding** — payloads use Soroban SDK xdr encoding; decode based on the schemas above
 4. **Invoice lifecycle** — track `invoice_created` → `invoice_listed` → `invoice_funded` → `invoice_shipped` → `delivery_confirmed` (×2) → `both_confirmed` → `invoice_repaid` / `invoice_defaulted`
-5. **Pool events** — `lp_deposited` / `lp_withdrawn` track LP positions; `repayment_received` tracks yield accrual and protocol fee cuts; `share_price_updated` tracks the 1e18 fixed-point LP share price before and after a yield-bearing repayment; `invoice_defaulted` tracks defaulted funded principal
+5. **Pool events** — `lp_position_checkpoint`, `lp_deposited` / `lp_withdrawn` track LP positions; `donation_reconciled` records unsolicited-token donations; `repayment_received` tracks yield accrual and protocol fee cuts; `share_price_updated` tracks the 1e18 fixed-point LP share price before and after a yield-bearing repayment; `invoice_defaulted` tracks defaulted funded principal
 6. **Escrow events** — `funds_locked` → `released_to_issuer` OR `released_to_pool` / `default_resolved`
 7. **Batch events** — `batch_invoices_created` and `batch_invoices_listed` are summary events emitted after the per-invoice events of the same call. `pool::batch_fund_invoice` has no summary event; reconcile it from the individual `invoice_funded` events instead, which is also what tells you which entries a capacity stop skipped.
 

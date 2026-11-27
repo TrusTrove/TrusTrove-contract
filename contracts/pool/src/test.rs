@@ -7209,8 +7209,9 @@ fn test_share_metadata_unreadable_without_config() {
 }
 
 //  ISSUE #758: DEPOSIT ROUTES THROUGH mint()
-// The `mint()` extraction must be invisible from the outside: same shares, same
-// bookkeeping, and exactly one event with the same payload shape.
+// The `mint()` extraction must be invisible from the outside: same shares and
+// bookkeeping, with the unchanged `lp_deposited` payload still emitted last
+// (after the #1292 position checkpoint).
 #[test]
 fn test_deposit_mints_through_shared_helper_without_changing_behaviour() {
     let te = setup();
@@ -7218,10 +7219,11 @@ fn test_deposit_mints_through_shared_helper_without_changing_behaviour() {
     let shares = te.pool.deposit(&te.lp, &10_000_000_000);
     assert_eq!(shares, 10_000_000_000);
 
-    // One event, unchanged: `lp_deposited(lp, usdc_amount, shares_issued)` —
-    // in deposit's own per-invocation buffer (sdk >=22).
+    // Two events in deposit's own per-invocation buffer (sdk >=22): the #1292
+    // checkpoint, then the unchanged `lp_deposited(lp, usdc_amount,
+    // shares_issued)` last.
     let events = te.env.events().all();
-    assert_eq!(events.len(), 1);
+    assert_eq!(events.len(), 2);
     let (contract, topics, data) = events.get(events.len() - 1).unwrap();
     assert_eq!(contract, te.pool_id);
     assert_eq!(topics.len(), 2);
@@ -11039,4 +11041,309 @@ fn test_share_price_overflow_boundary() {
         te.pool.try_get_share_price(),
         Err(Ok(soroban_sdk::Error::from(PoolError::Overflow)))
     );
+}
+
+// ---------------------------------------------------------------------------
+// LP position checkpoints (issue #1292)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_deposit_emits_lp_position_checkpoint() {
+    let te = setup();
+    let amount = 10_000_000_000u128;
+    te.env.ledger().set_timestamp(1_700_000_000);
+
+    let shares = te.pool.deposit(&te.lp, &amount);
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 2);
+
+    let (contract, topics, data) = events.get(0).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "lp_position_checkpoint")
+    );
+    assert_eq!(
+        Address::try_from_val(&te.env, &topics.get(1).unwrap()).unwrap(),
+        te.lp
+    );
+    assert_eq!(
+        <(u128, u128, u64)>::try_from_val(&te.env, &data).unwrap(),
+        (shares, amount, 1_700_000_000)
+    );
+}
+
+#[test]
+fn test_withdraw_emits_lp_position_checkpoint() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    te.env.ledger().set_timestamp(1_700_000_100);
+
+    let returned = te.pool.withdraw(&te.lp, &4_000_000_000);
+    assert_eq!(returned, 4_000_000_000);
+
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 2);
+    let (contract, topics, data) = events.get(0).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "lp_position_checkpoint")
+    );
+    assert_eq!(
+        <(u128, u128, u64)>::try_from_val(&te.env, &data).unwrap(),
+        (6_000_000_000, 6_000_000_000, 1_700_000_100)
+    );
+}
+
+#[test]
+fn test_rejected_deposit_emits_no_checkpoint_and_mutates_nothing() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
+    assert!(te.pool.try_deposit(&te.lp, &0).is_err());
+
+    assert_eq!(te.env.events().all().len(), 0);
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+    assert_eq!(
+        te.pool.get_lp_position(&te.lp).shares,
+        position_before.shares
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Asset donation reconciliation (issue #1291)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_reconcile_donation_credits_surplus_without_minting_shares() {
+    let te = setup();
+    let deposit = 10_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let donation = 1_234_567u128;
+    let shares_before = te.pool.get_stats().total_shares;
+
+    // Unsolicited transfer straight to the pool contract.
+    MockTokenClient::new(&te.env, &te.usdc_id).transfer(&te.lp, &te.pool_id, &(donation as i128));
+
+    let view = te.pool.get_asset_balance_reconciliation();
+    assert_eq!(view.recorded_available_liquidity, deposit);
+    assert_eq!(view.actual_token_balance, deposit + donation);
+    assert_eq!(view.signed_difference, donation as i128);
+
+    assert_eq!(te.pool.reconcile_donation(), donation);
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (_, topics, data) = events.get(0).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "donation_reconciled")
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (donation, deposit + donation)
+    );
+
+    // Accounting now matches the balance and no shares were minted.
+    assert_eq!(te.pool.get_stats().total_deposits, deposit + donation);
+    assert_eq!(te.pool.get_stats().total_shares, shares_before);
+    let view_after = te.pool.get_asset_balance_reconciliation();
+    assert_eq!(view_after.signed_difference, 0);
+
+    // A second reconciliation has nothing to credit and changes nothing.
+    let deposits_before = te.pool.get_stats().total_deposits;
+    assert_eq!(
+        te.pool.try_reconcile_donation(),
+        Err(Ok(soroban_sdk::Error::from(
+            PoolError::NoDonationToReconcile
+        )))
+    );
+    assert_eq!(te.pool.get_stats().total_deposits, deposits_before);
+    assert_eq!(te.env.events().all().len(), 0);
+}
+
+#[test]
+fn test_reconcile_donation_rejects_zero_surplus() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &10_000_000_000);
+    let deposits_before = te.pool.get_stats().total_deposits;
+
+    assert_eq!(
+        te.pool.try_reconcile_donation(),
+        Err(Ok(soroban_sdk::Error::from(
+            PoolError::NoDonationToReconcile
+        )))
+    );
+    assert_eq!(te.pool.get_stats().total_deposits, deposits_before);
+    assert_eq!(te.env.events().all().len(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Asset balance reconciliation view (issue #1288)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_asset_balance_reconciliation_reports_positive_and_negative_surplus() {
+    let te = setup();
+    let deposit = 10_000_000_000u128;
+    te.pool.deposit(&te.lp, &deposit);
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+
+    let balanced = te.pool.get_asset_balance_reconciliation();
+    assert_eq!(balanced.recorded_available_liquidity, deposit);
+    assert_eq!(balanced.actual_token_balance, deposit);
+    assert_eq!(balanced.signed_difference, 0);
+
+    usdc.transfer(&te.lp, &te.pool_id, &42);
+    let surplus = te.pool.get_asset_balance_reconciliation();
+    assert_eq!(surplus.signed_difference, 42);
+
+    usdc.transfer(&te.pool_id, &te.lp, &100);
+    let deficit = te.pool.get_asset_balance_reconciliation();
+    assert_eq!(deficit.recorded_available_liquidity, deposit);
+    assert_eq!(deficit.actual_token_balance, deposit + 42 - 100);
+    assert_eq!(deficit.signed_difference, -58);
+}
+
+#[test]
+fn test_asset_balance_reconciliation_includes_deployed_capital() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    te.pool.fund_invoice(&invoice_id);
+
+    let view = te.pool.get_asset_balance_reconciliation();
+    assert_eq!(
+        view.recorded_available_liquidity,
+        100_000_000_000 - DEFAULT_FUNDED_AMOUNT
+    );
+    assert_eq!(view.actual_token_balance, view.recorded_available_liquidity);
+    assert_eq!(view.signed_difference, 0);
+}
+
+// ---------------------------------------------------------------------------
+// Maximum loss threshold for new funding (issue #1289)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_max_loss_threshold_defaults_to_disabled() {
+    let te = setup();
+    assert_eq!(te.pool.get_max_loss_threshold(), None);
+    assert_eq!(te.pool.get_pool_config().max_loss_threshold_bps, None);
+
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    // Even a 100% realised-loss ratio cannot block funding while disabled.
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &1_000u128);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &1_000u128);
+    });
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+fn test_max_loss_threshold_blocks_funding_above_limit() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    assert!(te.pool.set_max_loss_threshold(&Some(500)));
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &10_000u128);
+        // 501 / 10_000 = 5.01%, above the 5% threshold.
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &501u128);
+    });
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    let stats_before = te.pool.get_stats();
+
+    assert_eq!(
+        te.pool.try_fund_invoice(&invoice_id),
+        Err(Ok(soroban_sdk::Error::from(PoolError::MaxLossExceeded)))
+    );
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_funded, stats_before.total_funded);
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.active_invoice_count, 0);
+    let funded_key = DataKey::FundedInvoice(invoice_id);
+    assert!(!te.env.as_contract(&te.pool_id, || {
+        te.env.storage().persistent().has(&funded_key)
+    }));
+
+    // Withdrawals remain available while funding is paused by the threshold.
+    assert_eq!(te.pool.withdraw(&te.lp, &1_000_000_000), 1_000_000_000);
+}
+
+#[test]
+fn test_max_loss_threshold_allows_funding_exactly_at_limit() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_loss_threshold(&Some(500));
+    te.env.as_contract(&te.pool_id, || {
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::CumulativeFunded, &10_000u128);
+        te.env
+            .storage()
+            .instance()
+            .set(&DataKey::TotalLossRealised, &500u128);
+    });
+
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+fn test_set_max_loss_threshold_emits_event_and_rejects_invalid_values() {
+    let te = setup();
+    assert!(te.pool.set_max_loss_threshold(&Some(500)));
+
+    // Capture before any other invocation: sdk >=22 resets the event buffer at
+    // every top-level call.
+    let events = te.env.events().all();
+    assert_eq!(te.pool.get_max_loss_threshold(), Some(500));
+    assert_eq!(events.len(), 1);
+    let (_, topics, data) = events.get(0).unwrap();
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "max_loss_threshold_updated")
+    );
+    assert_eq!(
+        <(Option<u32>, Option<u32>)>::try_from_val(&te.env, &data).unwrap(),
+        (None, Some(500))
+    );
+
+    assert_eq!(
+        te.pool.try_set_max_loss_threshold(&Some(10_001)),
+        Err(Ok(soroban_sdk::Error::from(
+            PoolError::InvalidConfiguration
+        )))
+    );
+    assert_eq!(te.pool.get_max_loss_threshold(), Some(500));
+
+    // `None` clears the policy again.
+    assert!(te.pool.set_max_loss_threshold(&None));
+    assert_eq!(te.pool.get_max_loss_threshold(), None);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_loss_threshold_requires_admin_authorization() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_max_loss_threshold(&Some(500));
 }
