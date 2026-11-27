@@ -145,6 +145,12 @@ pub enum DataKey {
     // Ledger timestamp at which the buyer's delivery confirmation was
     // recorded (issue #1160). Mirrors `IssuerConfirmedAt`.
     BuyerConfirmedAt(BytesN<32>),
+    // Optional buyer purchase-order hash, stored separately so existing
+    // Invoice records keep their serialized shape.
+    PurchaseOrderHash(BytesN<32>),
+    // O(1) buyer-index position marker. Added separately from the legacy
+    // boolean membership marker to preserve its stored value type.
+    BuyerIndexPosition(Address, u64),
     // 32-byte proof-of-delivery evidence hash attached by the buyer or issuer
     // after shipment, keyed by invoice id (issue #1162). Only the hash is
     // stored; the underlying documents stay off-chain. Appended after every

@@ -1269,8 +1269,273 @@ fn test_create_invoice_with_verified_parties() {
     assert_eq!(invoice.status, InvoiceStatus::Created);
     assert_eq!(invoice.funding_asset, usdc);
     assert_eq!(invoice.funding_pool, None);
+    assert_eq!(client.get_purchase_order_hash(&invoice_id), None);
     assert!(!invoice.issuer_confirmed);
     assert!(!invoice.buyer_confirmed);
+}
+
+#[test]
+fn test_create_with_purchase_order_hash_stores_and_emits_hash() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let purchase_order_hash = BytesN::from_array(&env, &[42u8; 32]);
+    let invoice_id = client.create_with_purchase_order_hash(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &usdc,
+        &Some(purchase_order_hash.clone()),
+    );
+
+    let events = env.events().all();
+    let (event_contract, topics, data) = events.last().expect("expected creation event");
+    assert_eq!(event_contract, client.address);
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_created_with_po_hash")
+    );
+    assert_eq!(
+        <(u128, BytesN<32>)>::try_from_val(&env, &data).unwrap(),
+        (DEFAULT_FACE_VALUE, purchase_order_hash)
+    );
+    assert_eq!(
+        client.get_purchase_order_hash(&invoice_id),
+        Some(BytesN::from_array(&env, &[42u8; 32]))
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth")]
+fn test_create_with_purchase_order_hash_requires_buyer_consent() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let hash = BytesN::from_array(&env, &[42u8; 32]);
+    env.mock_auths(&[soroban_sdk::testutils::MockAuth {
+        address: &issuer,
+        invoke: &soroban_sdk::testutils::MockAuthInvoke {
+            contract: &client.address,
+            fn_name: "create_with_purchase_order_hash",
+            args: (
+                issuer.clone(),
+                buyer.clone(),
+                DEFAULT_FACE_VALUE,
+                due_date,
+                usdc.clone(),
+                Some(hash),
+            )
+                .into_val(&env),
+            sub_invokes: &[],
+        },
+    }]);
+
+    client.create_with_purchase_order_hash(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &usdc,
+        &Some(BytesN::from_array(&env, &[42u8; 32])),
+    );
+}
+
+#[test]
+fn test_correct_invoice_updates_terms_indexes_and_invalidates_attestation() {
+    let (env, client, issuer, buyer, registry, usdc) = setup();
+    let other_buyer = Address::generate(&env);
+    registry.register(&other_buyer);
+    let other_asset = env.register(MockToken, ());
+    client.add_supported_asset(&other_asset);
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let purchase_order_hash = BytesN::from_array(&env, &[7u8; 32]);
+    let invoice_id = client.create_with_purchase_order_hash(
+        &issuer,
+        &buyer,
+        &DEFAULT_FACE_VALUE,
+        &due_date,
+        &usdc,
+        &Some(purchase_order_hash),
+    );
+    let second_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    let corrected_value = DEFAULT_FACE_VALUE + 1;
+    let corrected_due_date = due_date + 1;
+
+    assert!(client.correct_invoice(
+        &invoice_id,
+        &other_buyer,
+        &corrected_value,
+        &corrected_due_date,
+        &other_asset,
+    ));
+
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected correction event");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_terms_corrected")
+    );
+    let (old_digest, new_digest) = <(BytesN<32>, BytesN<32>)>::try_from_val(&env, &data).unwrap();
+    assert_ne!(old_digest, new_digest);
+
+    let invoice = client.get(&invoice_id);
+    assert_eq!(invoice.buyer, other_buyer);
+    assert_eq!(invoice.face_value, corrected_value);
+    assert_eq!(invoice.due_date, corrected_due_date);
+    assert_eq!(invoice.funding_asset, other_asset);
+    assert_eq!(invoice.status, InvoiceStatus::Created);
+    assert_eq!(client.get_purchase_order_hash(&invoice_id), None);
+    assert_eq!(client.get_attestation_age(&invoice_id), None);
+    let old_buyer_invoices = client.get_by_buyer(&buyer, &0, &MAX_PAGE_SIZE);
+    assert_eq!(old_buyer_invoices.len(), 1);
+    assert_eq!(old_buyer_invoices.get(0).unwrap().id, second_id);
+    let new_buyer_invoices = client.get_by_buyer(&other_buyer, &0, &MAX_PAGE_SIZE);
+    assert_eq!(new_buyer_invoices.len(), 1);
+    assert_eq!(new_buyer_invoices.get(0).unwrap().id, invoice_id);
+}
+
+#[test]
+fn test_correct_invoice_same_terms_is_idempotent() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert!(client.correct_invoice(&invoice_id, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc,));
+    assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn test_correct_invoice_rejects_issuer_as_buyer() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let result =
+        client.try_correct_invoice(&invoice_id, &issuer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    assert_eq!(
+        result.err().and_then(|error| error.ok()),
+        Some(soroban_sdk::Error::from(InvoiceError::InvalidParticipants))
+    );
+    assert_eq!(client.get_buyer(&invoice_id), buyer);
+}
+
+#[test]
+fn test_update_listing_terms_changes_discount_and_is_idempotent() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    assert!(client.update_listing_terms(&invoice_id, &5000));
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected listing terms event");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_listing_terms_updated")
+    );
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&env, &data).unwrap(),
+        (200, 5000)
+    );
+    let updated = client.get(&invoice_id);
+    assert_eq!(updated.status, InvoiceStatus::Listed);
+    assert_eq!(updated.discount_bps, 5000);
+    assert!(client.update_listing_terms(&invoice_id, &5000));
+    assert!(env.events().all().is_empty());
+}
+
+#[test]
+fn test_update_listing_terms_rejects_discount_outside_valid_range() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    let result = client.try_update_listing_terms(&invoice_id, &5001);
+    assert_eq!(
+        result.err().and_then(|error| error.ok()),
+        Some(soroban_sdk::Error::from(InvoiceError::DiscountTooHigh))
+    );
+    assert_eq!(client.get(&invoice_id).discount_bps, DEFAULT_DISCOUNT_BPS);
+}
+
+#[test]
+fn test_delist_returns_invoice_to_created_and_removes_listed_membership() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    assert!(client.delist(&invoice_id, &false));
+    let events = env.events().all();
+    let (_, topics, data) = events.last().expect("expected delisting event");
+    assert_eq!(
+        Symbol::try_from_val(&env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&env, "invoice_delisted")
+    );
+    assert_eq!(
+        InvoiceStatus::try_from_val(&env, &data).unwrap(),
+        InvoiceStatus::Created
+    );
+    let invoice = client.get(&invoice_id);
+    assert_eq!(invoice.status, InvoiceStatus::Created);
+    assert_eq!(invoice.discount_bps, 0);
+    assert_eq!(invoice.listed_at, None);
+    assert_eq!(client.get_attestation_age(&invoice_id), None);
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Created, &0, &MAX_PAGE_SIZE)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn test_delist_can_cancel_invoice() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+    attest(&env, &client, &invoice_id);
+    client.list_for_financing(&invoice_id, &DEFAULT_DISCOUNT_BPS);
+
+    assert!(client.delist(&invoice_id, &true));
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Cancelled);
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Listed, &0, &MAX_PAGE_SIZE)
+            .len(),
+        0
+    );
+    assert_eq!(
+        client
+            .get_by_status(&InvoiceStatus::Cancelled, &0, &MAX_PAGE_SIZE)
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn test_delist_rejects_invoice_that_is_not_listed() {
+    let (env, client, issuer, buyer, _, usdc) = setup();
+    let due_date = env.ledger().timestamp() + DEFAULT_DUE_OFFSET;
+    let invoice_id = client.create(&issuer, &buyer, &DEFAULT_FACE_VALUE, &due_date, &usdc);
+
+    let result = client.try_delist(&invoice_id, &false);
+    assert_eq!(
+        result.err().and_then(|error| error.ok()),
+        Some(soroban_sdk::Error::from(
+            InvoiceError::InvalidStatusTransition
+        ))
+    );
+    assert_eq!(client.get(&invoice_id).status, InvoiceStatus::Created);
 }
 
 /// Golden vector for the invoice id (#834).

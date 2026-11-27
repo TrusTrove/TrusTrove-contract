@@ -1018,7 +1018,43 @@ impl InvoiceContract {
     ) -> BytesN<32> {
         require_not_paused(&env);
         issuer.require_auth();
-        Self::create_inner(&env, issuer, buyer, face_value, due_date, funding_asset)
+        Self::create_inner(
+            &env,
+            issuer,
+            buyer,
+            face_value,
+            due_date,
+            funding_asset,
+            None,
+        )
+    }
+
+    /// Creates an invoice with an optional buyer-provided purchase-order hash.
+    /// When a hash is supplied, both the issuer and buyer must authorize
+    /// creation; the buyer's authorization is consent to publish the hash.
+    pub fn create_with_purchase_order_hash(
+        env: Env,
+        issuer: Address,
+        buyer: Address,
+        face_value: u128,
+        due_date: u64,
+        funding_asset: Address,
+        purchase_order_hash: Option<BytesN<32>>,
+    ) -> BytesN<32> {
+        require_not_paused(&env);
+        issuer.require_auth();
+        if purchase_order_hash.is_some() && issuer != buyer {
+            buyer.require_auth();
+        }
+        Self::create_inner(
+            &env,
+            issuer,
+            buyer,
+            face_value,
+            due_date,
+            funding_asset,
+            purchase_order_hash,
+        )
     }
 
     /// Auth-free body of [`Self::create`], shared with [`Self::batch_create`].
@@ -1035,6 +1071,7 @@ impl InvoiceContract {
         face_value: u128,
         due_date: u64,
         funding_asset: Address,
+        purchase_order_hash: Option<BytesN<32>>,
     ) -> BytesN<32> {
         if issuer == buyer {
             panic_with_error!(env, InvoiceError::InvalidParticipants);
@@ -1132,6 +1169,13 @@ impl InvoiceContract {
 
         let inv_key = DataKey::Invoice(invoice_id.clone());
         Self::save_invoice(env, inv_key, &invoice);
+        if let Some(hash) = purchase_order_hash.as_ref() {
+            let key = DataKey::PurchaseOrderHash(invoice_id.clone());
+            env.storage().persistent().set(&key, hash);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
 
         let entry_key = DataKey::CreatedAtIndexEntry(counter as u32);
         env.storage()
@@ -1155,6 +1199,17 @@ impl InvoiceContract {
             face_value,
             &funding_asset,
         );
+        if let Some(hash) = purchase_order_hash.as_ref() {
+            events::invoice_created_with_purchase_order_hash(
+                env,
+                &invoice_id,
+                &invoice.issuer,
+                &invoice.buyer,
+                face_value,
+                &funding_asset,
+                hash,
+            );
+        }
         invoice_id
     }
 
@@ -1234,6 +1289,7 @@ impl InvoiceContract {
                 face_value,
                 due_date,
                 funding_asset.clone(),
+                None,
             );
             created.push_back(invoice_id);
         }
@@ -1348,6 +1404,40 @@ impl InvoiceContract {
             InvoiceStatus::Listed,
         );
         events::invoice_listed(&env, &invoice_id, discount_bps);
+        true
+    }
+
+    /// Updates the discount of a listed invoice without changing its status.
+    /// Only the issuer may update the discount, which must remain in `1..=5000`.
+    /// The existing attestation remains valid because it certifies invoice
+    /// credit risk and does not include the discount in its signed payload.
+    pub fn update_listing_terms(env: Env, invoice_id: BytesN<32>, discount_bps: u32) -> bool {
+        require_not_paused(&env);
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.issuer.require_auth();
+        if invoice.status != InvoiceStatus::Listed {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+        if discount_bps == 0 {
+            panic_with_error!(&env, InvoiceError::InvalidDiscount);
+        }
+        if discount_bps > 5000 {
+            panic_with_error!(&env, InvoiceError::DiscountTooHigh);
+        }
+        if invoice.discount_bps == discount_bps {
+            return true;
+        }
+
+        let old_discount_bps = invoice.discount_bps;
+        invoice.discount_bps = discount_bps;
+        Self::save_invoice(&env, inv_key, &invoice);
+        Self::extend_instance_ttl(&env);
+        events::invoice_listing_terms_updated(&env, &invoice_id, old_discount_bps, discount_bps);
         true
     }
 
@@ -1532,6 +1622,137 @@ impl InvoiceContract {
             InvoiceStatus::Cancelled,
         );
         events::invoice_cancelled(&env, &invoice_id);
+        true
+    }
+
+    /// Corrects the buyer, face value, due date, or funding asset while an
+    /// invoice is still `Created`. The invoice ID remains stable; the emitted
+    /// digests identify the old and corrected terms. Any prior attestation is
+    /// removed because it covered the previous terms.
+    pub fn correct_invoice(
+        env: Env,
+        invoice_id: BytesN<32>,
+        buyer: Address,
+        face_value: u128,
+        due_date: u64,
+        funding_asset: Address,
+    ) -> bool {
+        require_not_paused(&env);
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.issuer.require_auth();
+        if invoice.status != InvoiceStatus::Created {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+        if invoice.buyer == buyer
+            && invoice.face_value == face_value
+            && invoice.due_date == due_date
+            && invoice.funding_asset == funding_asset
+        {
+            return true;
+        }
+        if invoice.issuer == buyer {
+            panic_with_error!(&env, InvoiceError::InvalidParticipants);
+        }
+        if face_value < MIN_FACE_VALUE {
+            panic_with_error!(&env, InvoiceError::InvalidFaceValue);
+        }
+        if face_value > MAX_FACE_VALUE {
+            panic_with_error!(&env, InvoiceError::InvalidAmount);
+        }
+        let now = env.ledger().timestamp();
+        let max_due_date = now
+            .checked_add(Self::get_max_invoice_lifetime(env.clone()))
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::MathOverflow));
+        if due_date <= now || due_date > max_due_date {
+            panic_with_error!(&env, InvoiceError::InvalidDueDate);
+        }
+        let asset_key = DataKey::SupportedAsset(funding_asset.clone());
+        if !env.storage().persistent().has(&asset_key) {
+            panic_with_error!(&env, InvoiceError::UnsupportedAsset);
+        }
+        bump_persistent(&env, &asset_key);
+        let registry_id: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::RegistryContract)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        require_verified(&env, &registry_id, &buyer, InvoiceError::BuyerNotVerified);
+
+        let old_purchase_order_hash: Option<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PurchaseOrderHash(invoice_id.clone()));
+        if old_purchase_order_hash.is_some() {
+            bump_persistent(&env, &DataKey::PurchaseOrderHash(invoice_id.clone()));
+        }
+        let old_digest = invoice_terms_digest(&env, &invoice, &old_purchase_order_hash);
+        let old_buyer = invoice.buyer.clone();
+        invoice.buyer = buyer.clone();
+        invoice.face_value = face_value;
+        invoice.due_date = due_date;
+        invoice.funding_asset = funding_asset;
+        invoice.remaining_balance = face_value;
+        Self::save_invoice(&env, inv_key, &invoice);
+        if old_buyer != buyer {
+            remove_from_buyer_index(&env, &old_buyer, &invoice_id);
+            extend_buyer_index(&env, &buyer, &invoice_id);
+            env.storage()
+                .persistent()
+                .remove(&DataKey::PurchaseOrderHash(invoice_id.clone()));
+        }
+        let new_purchase_order_hash = if old_buyer == buyer {
+            old_purchase_order_hash
+        } else {
+            None
+        };
+        let new_digest = invoice_terms_digest(&env, &invoice, &new_purchase_order_hash);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Attestation(invoice_id.clone()));
+        Self::extend_instance_ttl(&env);
+        events::invoice_terms_corrected(&env, &invoice_id, &old_digest, &new_digest);
+        true
+    }
+
+    /// Removes an unfunded invoice from financing. `cancel_invoice` selects
+    /// whether the invoice returns to `Created` for later relisting or becomes
+    /// permanently `Cancelled`.
+    pub fn delist(env: Env, invoice_id: BytesN<32>, cancel_invoice: bool) -> bool {
+        require_not_paused(&env);
+        let inv_key = DataKey::Invoice(invoice_id.clone());
+        let mut invoice: Invoice = env
+            .storage()
+            .persistent()
+            .get(&inv_key)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotFound));
+        invoice.issuer.require_auth();
+        if invoice.status != InvoiceStatus::Listed {
+            panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
+        }
+
+        let new_status = if cancel_invoice {
+            InvoiceStatus::Cancelled
+        } else {
+            InvoiceStatus::Created
+        };
+        invoice.status = new_status;
+        invoice.discount_bps = 0;
+        invoice.listed_at = None;
+        Self::save_invoice(&env, inv_key, &invoice);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Attestation(invoice_id.clone()));
+        Self::extend_instance_ttl(&env);
+        move_status_index(&env, &invoice_id, InvoiceStatus::Listed, new_status);
+        events::invoice_delisted(&env, &invoice_id, new_status);
+        if cancel_invoice {
+            events::invoice_cancelled(&env, &invoice_id);
+        }
         true
     }
 
@@ -3494,6 +3715,16 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id)
     }
 
+    /// Returns the optional purchase-order hash supplied and authorized by
+    /// the buyer when the invoice was created.
+    pub fn get_purchase_order_hash(env: Env, invoice_id: BytesN<32>) -> Option<BytesN<32>> {
+        Self::get_invoice(&env, invoice_id.clone());
+        let key = DataKey::PurchaseOrderHash(invoice_id);
+        let hash = env.storage().persistent().get(&key);
+        if hash.is_some() {
+            bump_persistent(&env, &key);
+        }
+        hash
     /// Returns whether an invoice with `invoice_id` exists (issue #1153).
     ///
     /// Lets callers check an ID without calling `get` and trapping
@@ -4396,6 +4627,28 @@ fn require_verified(env: &Env, registry_id: &Address, addr: &Address, err: Invoi
     }
 }
 
+fn invoice_terms_digest(
+    env: &Env,
+    invoice: &Invoice,
+    purchase_order_hash: &Option<BytesN<32>>,
+) -> BytesN<32> {
+    let mut preimage = Bytes::new(env);
+    preimage.extend_from_array(&invoice.id.to_array());
+    preimage.append(&invoice.issuer.clone().to_xdr(env));
+    preimage.append(&invoice.buyer.clone().to_xdr(env));
+    preimage.extend_from_array(&invoice.face_value.to_be_bytes());
+    preimage.extend_from_array(&invoice.due_date.to_be_bytes());
+    preimage.append(&invoice.funding_asset.clone().to_xdr(env));
+    match purchase_order_hash {
+        Some(hash) => {
+            preimage.extend_from_array(&[1]);
+            preimage.extend_from_array(&hash.to_array());
+        }
+        None => preimage.extend_from_array(&[0]),
+    }
+    env.crypto().sha256(&preimage).into()
+}
+
 /// Adds an invoice ID to the issuer's index if not already present.
 ///
 /// Duplicate detection uses the O(1) [`DataKey::IssuerMembership`] marker
@@ -4443,6 +4696,69 @@ fn extend_issuer_index(env: &Env, issuer: &Address, invoice_id: &BytesN<32>) {
         .extend_ttl(&marker_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
+fn remove_from_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
+    let short_id = project_short_id(invoice_id);
+    let membership_key = DataKey::BuyerMembership(buyer.clone(), short_id);
+    let position_key = DataKey::BuyerIndexPosition(buyer.clone(), short_id);
+    let count_key = DataKey::BuyerIndexCount(buyer.clone());
+    let count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+
+    let position = env
+        .storage()
+        .persistent()
+        .get::<_, u32>(&position_key)
+        .or_else(|| {
+            // Existing buyer rows predate position markers; locate one once and
+            // compact it into the new O(1) representation.
+            (0..count).find(|index| {
+                env.storage()
+                    .persistent()
+                    .get::<_, BytesN<32>>(&DataKey::BuyerIndexEntry(buyer.clone(), *index))
+                    .is_some_and(|id| id == *invoice_id)
+            })
+        });
+    let Some(position) = position else {
+        return;
+    };
+    if position >= count {
+        env.storage().persistent().remove(&position_key);
+        env.storage().persistent().remove(&membership_key);
+        return;
+    }
+
+    let last = count - 1;
+    if position != last {
+        let last_id: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BuyerIndexEntry(buyer.clone(), last))
+            .unwrap_or_else(|| panic_with_error!(env, InvoiceError::NotFound));
+        let entry_key = DataKey::BuyerIndexEntry(buyer.clone(), position);
+        env.storage().persistent().set(&entry_key, &last_id);
+        env.storage()
+            .persistent()
+            .extend_ttl(&entry_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        let moved_position_key =
+            DataKey::BuyerIndexPosition(buyer.clone(), project_short_id(&last_id));
+        env.storage()
+            .persistent()
+            .set(&moved_position_key, &position);
+        env.storage()
+            .persistent()
+            .extend_ttl(&moved_position_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    env.storage()
+        .persistent()
+        .remove(&DataKey::BuyerIndexEntry(buyer.clone(), last));
+    env.storage().persistent().set(&count_key, &last);
+    env.storage()
+        .persistent()
+        .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    env.storage().persistent().remove(&position_key);
+    env.storage().persistent().remove(&membership_key);
+}
+
 /// Adds an invoice ID to the buyer's index if not already present.
 ///
 /// Duplicate detection uses the O(1) [`DataKey::BuyerMembership`] marker
@@ -4488,6 +4804,11 @@ fn extend_buyer_index(env: &Env, buyer: &Address, invoice_id: &BytesN<32>) {
     env.storage()
         .persistent()
         .extend_ttl(&marker_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    let position_key = DataKey::BuyerIndexPosition(buyer.clone(), project_short_id(invoice_id));
+    env.storage().persistent().set(&position_key, &count);
+    env.storage()
+        .persistent()
+        .extend_ttl(&position_key, TTL_THRESHOLD, TTL_EXTEND_TO);
 }
 
 /// Adds an invoice ID to the status index if not already present.

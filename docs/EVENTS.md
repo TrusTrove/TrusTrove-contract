@@ -29,6 +29,24 @@ Emitted when a new invoice is created.
 
 **Emitted by:** `create()` in `contracts/invoice/src/lib.rs:276`
 
+### `invoice_created_with_po_hash`
+
+Companion event emitted only when creation includes a buyer-authorized
+purchase-order hash. The existing `invoice_created` topics and `u128` payload
+remain unchanged for compatibility.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"invoice_created_with_po_hash"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Issuer address |
+| `topic[3]` | `Address` | Buyer address who consented to the hash |
+| `topic[4]` | `Address` | Funding asset |
+| **Data** | `(u128, BytesN<32>)` | `(face_value, purchase_order_hash)` |
+
+**Emitted by:** `create_with_purchase_order_hash()` in `contracts/invoice/src/lib.rs`
+
 ---
 
 ### `invoice_listed`
@@ -43,6 +61,42 @@ Emitted when an invoice is listed for financing.
 | **Data** | `u32` | Discount in basis points (1 bp = 0.01%) |
 
 **Emitted by:** `list_for_financing()` in `contracts/invoice/src/lib.rs:335`
+
+### `invoice_terms_corrected`
+
+Emitted when the issuer corrects a `Created` invoice. The invoice ID remains
+stable; both SHA-256 digests cover the invoice ID, issuer, buyer, face value,
+due date, funding asset, and optional purchase-order hash.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"invoice_terms_corrected"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `(BytesN<32>, BytesN<32>)` | `(old_terms_digest, new_terms_digest)` |
+
+### `invoice_listing_terms_updated`
+
+Emitted when the issuer changes the discount on a `Listed` invoice.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"invoice_listing_terms_updated"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `(u32, u32)` | `(old_discount_bps, new_discount_bps)` |
+
+### `invoice_delisted`
+
+Emitted when the issuer withdraws an unfunded `Listed` invoice. The target
+status is either `Created` (available for relisting) or `Cancelled`.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"invoice_delisted"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| **Data** | `InvoiceStatus` | New status |
 
 ---
 
