@@ -202,3 +202,14 @@ pub fn max_maturity_updated(env: &Env, old_max_seconds: u64, new_max_seconds: u6
         (old_max_seconds, new_max_seconds),
     );
 }
+
+/// Emitted by `set_max_invoice_exposure` when the admin changes the maximum
+/// percentage of pool deposits (in basis points) a single newly funded invoice
+/// may consume (issue #1180). Carries both the old and new values; `0` means
+/// unrestricted. A rejected change emits nothing.
+pub fn max_invoice_exposure_updated(env: &Env, old_max_bps: u32, new_max_bps: u32) {
+    env.events().publish(
+        (Symbol::new(env, "max_invoice_exposure_updated"),),
+        (old_max_bps, new_max_bps),
+    );
+}

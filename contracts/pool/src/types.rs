@@ -159,6 +159,12 @@ pub enum DataKey {
     /// calls, before any buyer refund is netted out. Stored in persistent
     /// storage (#1174).
     LifetimeRepaidVolume,
+    /// Admin-configured maximum percentage of `TotalDeposits` (in basis points,
+    /// where `10_000` = 100%) that a single newly funded invoice may consume
+    /// (issue #1180). `0` (the default when never set) means unrestricted.
+    /// Appended after `LifetimeRepaidVolume` to keep existing discriminants
+    /// stable.
+    MaxInvoiceExposureBps,
 }
 
 /// Read-only snapshot of a pool's contract references and funding policy,
