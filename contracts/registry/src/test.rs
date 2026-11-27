@@ -293,6 +293,11 @@ fn test_reinstate_restores_verified_and_emits_event() {
                 (Symbol::new(&env, "address_reinstated"), issuer.clone()).into_val(&env),
                 ().into_val(&env),
             ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), issuer.clone()).into_val(&env),
+                4u64.into_val(&env),
+            ),
         ]
     );
 }
@@ -960,6 +965,11 @@ fn test_update_profile_happy_path() {
                 (Symbol::new(&env, "profile_updated"), issuer.clone()).into_val(&env),
                 ().into_val(&env),
             ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), issuer.clone()).into_val(&env),
+                2u64.into_val(&env),
+            ),
         ]
     );
 }
@@ -1115,6 +1125,11 @@ fn test_register_issuer_then_buyer_panics() {
                 (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
                 ().into_val(&env),
             ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), issuer.clone()).into_val(&env),
+                1u64.into_val(&env),
+            ),
         ]
     );
 
@@ -1211,6 +1226,11 @@ fn test_register_buyer_then_issuer_panics() {
                 client.address.clone(),
                 (Symbol::new(&env, "buyer_registered"), buyer.clone()).into_val(&env),
                 ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), buyer.clone()).into_val(&env),
+                1u64.into_val(&env),
             ),
         ]
     );
@@ -2913,6 +2933,11 @@ fn test_register_issuer_emits_event() {
                 (Symbol::new(&env, "issuer_registered"), issuer.clone()).into_val(&env),
                 ().into_val(&env),
             ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), issuer.clone()).into_val(&env),
+                1u64.into_val(&env),
+            ),
         ]
     );
 }
@@ -2940,6 +2965,11 @@ fn test_register_buyer_emits_event() {
                 client.address.clone(),
                 (Symbol::new(&env, "buyer_registered"), buyer.clone()).into_val(&env),
                 ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), buyer.clone()).into_val(&env),
+                1u64.into_val(&env),
             ),
         ]
     );
@@ -2969,6 +2999,11 @@ fn test_revoke_emits_event() {
                 client.address.clone(),
                 (Symbol::new(&env, "address_revoked"), issuer.clone()).into_val(&env),
                 ().into_val(&env),
+            ),
+            (
+                client.address.clone(),
+                (Symbol::new(&env, "profile_version"), issuer.clone()).into_val(&env),
+                3u64.into_val(&env),
             ),
         ]
     );
