@@ -9995,14 +9995,6 @@ fn test_set_deposit_cap_requires_admin_authorization() {
 
 #[test]
 fn test_set_deposit_cap_rejects_self_authorizing_non_admin() {
-fn test_set_max_invoice_exposure_requires_admin_authorization() {
-    let te = setup();
-    te.env.set_auths(&[]);
-    te.pool.set_max_invoice_exposure(&2_500);
-}
-
-#[test]
-fn test_set_max_invoice_exposure_rejects_self_authorizing_non_admin() {
     let te = setup();
     let non_admin = Address::generate(&te.env);
     te.env.mock_auths(&[MockAuth {
@@ -10019,10 +10011,21 @@ fn test_set_max_invoice_exposure_rejects_self_authorizing_non_admin() {
 }
 
 #[test]
-fn test_set_deposit_cap_emits_event_with_old_and_new_values() {
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_invoice_exposure_requires_admin_authorization() {
     let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_max_invoice_exposure(&2_500);
+}
 
-    te.pool.set_deposit_cap(&100_000_000);
+#[test]
+fn test_set_max_invoice_exposure_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
             fn_name: "set_max_invoice_exposure",
             args: (2_500u32,).into_val(&te.env),
             sub_invokes: &[],
@@ -10033,10 +10036,10 @@ fn test_set_deposit_cap_emits_event_with_old_and_new_values() {
 }
 
 #[test]
-fn test_set_max_invoice_exposure_emits_event_and_is_idempotent() {
+fn test_set_deposit_cap_emits_event_with_old_and_new_values() {
     let te = setup();
 
-    te.pool.set_max_invoice_exposure(&2_500);
+    te.pool.set_deposit_cap(&100_000_000);
     let events = te.env.events().all();
     assert_eq!(events.len(), 1);
     let (contract, topics, data) = events.get(events.len() - 1).unwrap();
@@ -10059,6 +10062,20 @@ fn test_set_max_invoice_exposure_emits_event_and_is_idempotent() {
         (100_000_000u128, 0u128)
     );
     assert_eq!(te.pool.get_deposit_cap(), 0);
+}
+
+#[test]
+fn test_set_max_invoice_exposure_emits_event_and_is_idempotent() {
+    let te = setup();
+
+    te.pool.set_max_invoice_exposure(&2_500);
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
         Symbol::new(&te.env, "max_invoice_exposure_updated")
     );
     assert_eq!(
