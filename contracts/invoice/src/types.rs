@@ -134,21 +134,20 @@ pub enum DataKey {
     AssetMetadata(Address),
     MaxInvoiceLifetime,
     CreatedAtIndexEntry(u32),
-    // Ledger timestamp at which the issuer's delivery confirmation was
-    // recorded (issue #1160). Written at most once per party by
-    // `confirm_delivery` and read by `get_lifecycle_timestamps`. Kept as a
-    // separate entry rather than an `Invoice` field so the existing `Invoice`
-    // encoding — and every already-deployed record — stays byte-for-byte
-    // unchanged. Appended after every existing variant so already-deployed
-    // key discriminants stay stable.
+    // Per-invoice status revision and optional pre-listing buyer acknowledgement.
+    // Appended to preserve the discriminants of all existing storage keys.
+    StatusRevision(BytesN<32>),
+    BuyerListingAcknowledgement(BytesN<32>),
+    BuyerAcknowledgementRequired,
+    /// Confirmation that the issuer has delivered the goods/services.
+    /// Used with `issuer_confirmed` to advance the invoice to `Confirmed` status.
     IssuerConfirmedAt(BytesN<32>),
-    // Ledger timestamp at which the buyer's delivery confirmation was
-    // recorded (issue #1160). Mirrors `IssuerConfirmedAt`.
+    /// Confirmation that the buyer has received/accepted the goods/services.
+    /// Used with `issuer_confirmed` to advance the invoice to `Confirmed` status.
     BuyerConfirmedAt(BytesN<32>),
-    // 32-byte proof-of-delivery evidence hash attached by the buyer or issuer
-    // after shipment, keyed by invoice id (issue #1162). Only the hash is
-    // stored; the underlying documents stay off-chain. Appended after every
-    // existing variant so already-deployed key discriminants stay stable.
+    /// Proof-of-delivery evidence hash recorded for this invoice. The inner
+    /// `BytesN<32>` is the invoice ID. Value type: `BytesN<32>` (the evidence
+    /// hash), read with `get_delivery_evidence`.
     DeliveryEvidence(BytesN<32>),
 }
 
