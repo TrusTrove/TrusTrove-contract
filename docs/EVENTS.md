@@ -92,6 +92,22 @@ Emitted when either the issuer or buyer confirms delivery.
 
 ---
 
+### `delivery_evidence_recorded`
+
+Emitted when the buyer or issuer attaches a 32-byte proof-of-delivery evidence hash after shipment (issue #1162). Only the hash is published — the delivery documents themselves stay off-chain.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"delivery_evidence_recorded"` |
+| `topic[1]` | `BytesN<32>` | Invoice ID |
+| `topic[2]` | `Address` | Actor (buyer or issuer) that attached the hash |
+| **Data** | `BytesN<32>` | Evidence hash |
+
+**Emitted by:** `record_delivery_evidence()` in `contracts/invoice/src/lib.rs`
+
+---
+
 ### `both_confirmed`
 
 Emitted when both issuer and buyer have confirmed delivery (invoice advances to Confirmed).
@@ -642,6 +658,25 @@ nothing.
 
 ---
 
+### `max_invoice_exposure_updated`
+
+Emitted when the admin changes the maximum percentage of `TotalDeposits` (in
+basis points) that a single newly funded invoice may consume, via
+`set_max_invoice_exposure` (issue #1180). Carries both the old and new values;
+`0` means unrestricted. A rejected call (non-admin, or value above `10_000`
+bps) emits nothing.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"max_invoice_exposure_updated"` |
+| **Data** | `(u32, u32)` | `(old_max_bps, new_max_bps)` |
+
+**Emitted by:** `set_max_invoice_exposure()` in `contracts/pool/src/lib.rs`  
+**Source:** `contracts/pool/src/events.rs:195`
+
+---
+
 ### `allowance_approved`
 
 Emitted by the SEP-41 `approve()` whenever an LP's spending grant changes.
@@ -767,6 +802,35 @@ Emitted when locked funds are released to the issuer.
 
 **Emitted by:** `release_to_issuer()` in `contracts/escrow/src/lib.rs:184`
 
+#### Last release recipient
+
+After the token transfer succeeds, `release_to_issuer` also records the issuer
+as the invoice's most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. The event shape is unchanged. A
+failed transfer reverts the call before the write, so it never updates the
+stored recipient.
+
+---
+
+### `token_recovered`
+
+Emitted when the admin sweeps a stray, non-funding token out of the escrow with
+`recover_token` (#1201). One event is emitted per successful recovery; a
+rejected call (funding asset, zero amount, escrow as recipient, non-admin,
+paused) emits nothing. The configured funding asset is never recoverable, so
+the event never describes movement of lock collateral.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"token_recovered"` |
+| `topic[1]` | `Address` | Admin that authorized the recovery |
+| `topic[2]` | `Address` | Recovered token contract |
+| `topic[3]` | `Address` | Recipient of the recovered tokens |
+| **Data** | `u128` | Recovered amount, in the token's smallest unit |
+
+**Emitted by:** `recover_token()` in `contracts/escrow/src/lib.rs`
+
 ---
 
 ### `released_to_pool`
@@ -782,6 +846,13 @@ Emitted when locked funds are released back to the pool (on repayment).
 | **Data** | `u128` | Released amount (repayment amount) |
 
 **Emitted by:** `release_to_pool()` in `contracts/escrow/src/lib.rs:243`
+
+#### Last release recipient
+
+After a successful transfer, the pool address is recorded as the invoice's
+most recent release recipient (#1296), readable with
+`get_last_release_recipient(invoice_id)`. Failed transfers revert before the
+write and leave any earlier recipient untouched.
 
 #### Partial Release and Residual Lock
 
@@ -810,9 +881,34 @@ Emitted when default is resolved and funds returned to pool.
 | `topic[0]` | `Symbol` | `"default_resolved"` |
 | `topic[1]` | `BytesN<32>` | Invoice ID |
 | `topic[2]` | `Address` | Pool contract address |
-| **Data** | `u128` | Returned amount |
+| `topic[3]` | `Address` | Caller address that triggered the default resolution |
+| **Data** | `(u128, u64)` | `(returned_amount, lock_age)` where `lock_age` is elapsed seconds funds remained in escrow before default handling |
 
-**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs:311`
+**Emitted by:** `handle_default()` in `contracts/escrow/src/lib.rs`
+**Source:** `contracts/escrow/src/events.rs:69`
+
+#### Last release recipient
+
+A successful default records the pool address as the invoice's most recent
+release recipient (#1296). All funds always go to the pool, whatever address
+triggered the default.
+
+---
+
+### `min_lock_amount_set`
+
+Emitted by `set_min_lock_amount()` when the admin changes the minimum accepted
+by future `lock` calls (#1297). Existing locks are unaffected and remain
+releasable.
+
+| Field | Type | Description |
+|-------|------|-------------|
+| **Topics** | | |
+| `topic[0]` | `Symbol` | `"min_lock_amount_set"` |
+| `topic[1]` | `Address` | Admin who set the minimum |
+| **Data** | `u128` | New minimum in USDC stroops (`0` disables it) |
+
+**Emitted by:** `set_min_lock_amount()` in `contracts/escrow/src/lib.rs`
 
 ---
 

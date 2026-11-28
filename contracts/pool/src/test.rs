@@ -21,7 +21,8 @@ use crate::{
         SUGGESTED_DISCOUNT_FLOOR_BPS,
     },
     DataKey, FundingRejectionReason, PoolContract, PoolContractClient, PoolError,
-    DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS, TTL_EXTEND_TO, TTL_THRESHOLD,
+    DEFAULT_MIN_INITIAL_DEPOSIT, DEFAULT_SHARE_DECIMALS, MAX_INVOICE_EXPOSURE_BPS, TTL_EXTEND_TO,
+    TTL_THRESHOLD,
 };
 
 use trusttrove_escrow::{EscrowContract as RealEscrow, EscrowContractClient as RealEscrowClient};
@@ -9007,6 +9008,11 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// cross-contract call. The ceilings below pin the re-measurement at
 /// cpu = 1,714,128 / mem = 375,634 after merging lifetime volume metrics and adding
 /// lifetime-funded accounting (#1189), with small headroom.
+///
+/// Re-pinned by #1296: `escrow.release_to_issuer` now also records the last
+/// release recipient (one persistent write + TTL bump) on the funding payout
+/// path. The flow now measures cpu = 1,763,382 / mem = 392,926; the ceilings
+/// below leave headroom on top of that intentional cost.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -9020,12 +9026,12 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_735_000,
-        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_790_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter + #1296 release recipient) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 390_000,
-        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger) must stay within its re-pinned memory budget: {mem}"
+        mem < 405_000,
+        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger + #1296 release recipient) must stay within its re-pinned memory budget: {mem}"
     );
 }
 
@@ -9672,6 +9678,213 @@ fn test_set_max_time_to_maturity_emits_event_with_old_and_new_values() {
         (30 * ONE_DAY, ONE_DAY)
     );
     assert_eq!(te.pool.get_max_time_to_maturity(), ONE_DAY);
+}
+
+// ---------------------------------------------------------------------------
+//  ISSUE #1180: ADMIN-SETTABLE PER-INVOICE EXPOSURE LIMIT
+// ---------------------------------------------------------------------------
+
+#[test]
+fn test_max_invoice_exposure_defaults_to_unrestricted() {
+    let te = setup();
+    assert_eq!(te.pool.get_max_invoice_exposure_bps(), 0);
+
+    // With no per-invoice exposure limit, a single invoice consuming ~78.4% of
+    // pool deposits (below the 85% utilization cap) still funds.
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 80_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+fn test_fund_invoice_at_max_invoice_exposure_boundary_accepted() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_invoice_exposure(&2_500); // 25% -> 25_000_000_000
+
+    // 50_000_000_000 at 5000 bps discount -> funded_amount = 25_000_000_000 (exact boundary).
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_000, 5_000, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_fund_invoice_one_stroop_above_max_invoice_exposure_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_invoice_exposure(&2_500); // 25% -> 25_000_000_000
+
+    // 50_000_000_002 at 5000 bps discount -> funded_amount = 25_000_000_001.
+    // Utilization would be ~25% (well below the 85% pool cap), but this single
+    // invoice is 1 stroop above the 25% per-invoice exposure limit.
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_002, 5_000, 30 * ONE_DAY);
+    te.pool.fund_invoice(&invoice_id);
+}
+
+/// The exposure cap is evaluated against current `TotalDeposits`, so an
+/// invoice that exceeds the limit becomes fundable once pool deposits grow.
+#[test]
+fn test_max_invoice_exposure_allows_funding_after_pool_deposits_grow() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &60_000_000_000);
+    te.pool.set_max_invoice_exposure(&2_500); // 25% of 60B = 15B
+
+    // 20B at 200 bps discount -> funded_amount = 19.6B (> 15B, <= 25B).
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 20_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.try_fund_invoice(&invoice_id).is_err());
+
+    // Grow deposits to 100B so 25% = 25B >= 19.6B.
+    te.pool.deposit(&te.lp, &40_000_000_000);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+/// An invoice exceeding the per-invoice exposure limit is an eligibility
+/// failure, not a capacity shortfall, so batch funding reverts instead of
+/// stopping silently.
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_batch_fund_invoice_above_max_invoice_exposure_rejected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_invoice_exposure(&2_500);
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 30_000_000_000, 200, 30 * ONE_DAY);
+    let ids = vec![&te.env, invoice_id];
+    te.pool.batch_fund_invoice(&ids);
+}
+
+/// Invoices funded before the exposure limit was set or lowered remain valid:
+/// new oversized funding is blocked, while the already-funded invoice repays
+/// normally.
+#[test]
+fn test_max_invoice_exposure_leaves_existing_invoices_unaffected() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &20_000_000_000);
+    let funded =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 10_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&funded));
+    let funded_amount = te.pool.get_funded_amount(&funded).unwrap();
+
+    // Lower per-invoice exposure cap to 10% (2B), well below the existing 9.8B invoice.
+    te.pool.set_max_invoice_exposure(&1_000);
+    assert_eq!(te.pool.get_funded_amount(&funded), Some(funded_amount));
+
+    let new_invoice =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 5_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.try_fund_invoice(&new_invoice).is_err());
+
+    te.invoice.mark_shipped(&funded);
+    te.invoice.confirm_delivery(&funded, &te.issuer);
+    te.invoice.confirm_delivery(&funded, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 30 * ONE_DAY + 1);
+    te.invoice.repay(&funded);
+
+    assert_eq!(te.pool.get_funded_amount(&funded), None);
+    let stats = te.pool.get_stats();
+    assert_eq!(stats.active_invoice_count, 0);
+    assert_eq!(stats.total_funded, 0);
+}
+
+#[test]
+fn test_set_max_invoice_exposure_zero_removes_limit() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    te.pool.set_max_invoice_exposure(&1_000);
+    te.pool.set_max_invoice_exposure(&0);
+    assert_eq!(te.pool.get_max_invoice_exposure_bps(), 0);
+
+    let invoice_id =
+        create_and_list_with_params_and_term(&te, &te.usdc_id, 50_000_000_000, 200, 30 * ONE_DAY);
+    assert!(te.pool.fund_invoice(&invoice_id));
+}
+
+#[test]
+fn test_set_max_invoice_exposure_accepts_upper_bound_10000_bps() {
+    let te = setup();
+    assert!(te.pool.set_max_invoice_exposure(&MAX_INVOICE_EXPOSURE_BPS));
+    assert_eq!(
+        te.pool.get_max_invoice_exposure_bps(),
+        MAX_INVOICE_EXPOSURE_BPS
+    );
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #15)")]
+fn test_set_max_invoice_exposure_rejects_above_10000_bps() {
+    let te = setup();
+    te.pool
+        .set_max_invoice_exposure(&(MAX_INVOICE_EXPOSURE_BPS + 1));
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_max_invoice_exposure_requires_admin_authorization() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_max_invoice_exposure(&2_500);
+}
+
+#[test]
+fn test_set_max_invoice_exposure_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_max_invoice_exposure",
+            args: (2_500u32,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_max_invoice_exposure(&2_500).is_err());
+    assert_eq!(te.pool.get_max_invoice_exposure_bps(), 0);
+}
+
+#[test]
+fn test_set_max_invoice_exposure_emits_event_and_is_idempotent() {
+    let te = setup();
+
+    te.pool.set_max_invoice_exposure(&2_500);
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "max_invoice_exposure_updated")
+    );
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (0u32, 2_500u32)
+    );
+
+    // Re-setting the same value is idempotent and emits (2500, 2500).
+    te.pool.set_max_invoice_exposure(&2_500);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (2_500u32, 2_500u32)
+    );
+    assert_eq!(te.pool.get_max_invoice_exposure_bps(), 2_500);
+
+    te.pool.set_max_invoice_exposure(&1_000);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u32, u32)>::try_from_val(&te.env, &data).unwrap(),
+        (2_500u32, 1_000u32)
+    );
+    assert_eq!(te.pool.get_max_invoice_exposure_bps(), 1_000);
 }
 
 // --------------- Configurable failing invoice (issue #964) ---------------
