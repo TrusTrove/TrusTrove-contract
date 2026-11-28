@@ -244,6 +244,7 @@ let status = if !profile_exists {
 | `PoolContract` | `Address` | Pool contract address | `set_pool_contract()` |
 | `Counter` | `u64` | Monotonically increasing invoice counter | `initialize()`, incremented on `create()` |
 | `ExpiryWindow` | `u64` | Listing expiry window in seconds (default `604800`) | `set_expiry_window()` |
+| `BuyerAcknowledgementRequired` | `bool` | Whether new listings require buyer acknowledgement (default `false`) | `set_buyer_acknowledgement()` |
 | `SupportedAssetCount` | `u32` | Number of supported funding assets | `add_supported_asset()` |
 | `SupportedAsset(Address)` | `bool` | True if the asset is allowed for new invoices. *Note: Under the `pool_factory` model, an asset listed here should also be registered via `pool_factory::register_asset` to ensure `fund_invoice` is reachable.* | `add_supported_asset()` |
 
@@ -253,9 +254,15 @@ let status = if !profile_exists {
 
 | DataKey | Type | Description |
 |---------|------|-------------|
-| `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID. Never deleted; `exists(invoice_id)` checks its presence without reading, writing or TTL-bumping it |
-| `IssuerConfirmedAt(BytesN<32>)` | `u64` | Ledger timestamp of the issuer's delivery confirmation, exposed by `get_issuer_confirmed_at` (issue #1137). Stored separately from the `Invoice` record so already-stored invoices keep decoding unchanged |
-| `DeliveryEvidence(BytesN<32>)` | `BytesN<32>` | Write-once proof-of-delivery evidence hash attached after shipment by the buyer or issuer, exposed by `get_delivery_evidence` (issue #1162). Only the hash is stored; documents stay off-chain |
+| `Invoice(BytesN<32>)` | `Invoice` | Full invoice record keyed by SHA-256 invoice ID |
+| `StatusRevision(BytesN<32>)` | `u64` | Per-invoice lifecycle revision; absent values read as `0` | Each successful status transition |
+| `BuyerListingAcknowledgement(BytesN<32>)` | `bool` | Buyer acknowledgement marker for pre-listing consent | `acknowledge_listing()` |
+
+Status revision and acknowledgement metadata are stored separately from
+`Invoice`, so adding them does not alter the serialized invoice layout or
+prevent older invoice records from decoding. The acknowledgement gate is
+disabled by default; disabling it permits all otherwise-valid created invoices
+to be listed, including invoices created before the setting was introduced.
 
 #### Supported Asset Allow-List
 
