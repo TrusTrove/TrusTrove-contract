@@ -420,6 +420,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `get_verified_since` | `get_verified_since(address: Address) -> Option<u64>` |
 | Registry | `get_verification_status` | `get_verification_status(address: Address) -> VerificationStatus` |
 | Registry | `get_role` | `get_role(address: Address) -> Option<Role>` |
+| Registry | `change_role` | `change_role(address: Address, new_role: Role) -> bool` |
+| Registry | `get_role_version` | `get_role_version(address: Address) -> u32` |
 | Registry | `get_profile_count` | `get_profile_count(role: Role) -> u32` |
 | Registry | `list_profiles` | `list_profiles(role: Role, start: u32, limit: u32) -> Vec<Address>` |
 | Registry | `revoke` | `revoke(address: Address) -> bool` |

@@ -60,6 +60,16 @@ impl Profile {
         }
     }
 
+    /// Changes only the role bit, leaving verification/revocation flags and
+    /// registration time untouched (#1129).
+    pub fn set_role(&mut self, role: Role) {
+        if role == Role::Buyer {
+            self.packed_flags |= 1;
+        } else {
+            self.packed_flags &= !1;
+        }
+    }
+
     pub fn verified(&self) -> bool {
         (self.packed_flags & 2) != 0
     }

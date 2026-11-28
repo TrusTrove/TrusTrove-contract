@@ -91,6 +91,7 @@ All contracts follow a consistent TTL extension pattern:
 |---------|------|-------------|
 | `ProfileIndex(Role, u32)` | `Address` | The `index`-th registered address for `Role::Issuer` / `Role::Buyer`, in registration order |
 | `ProfileCount(Role)` | `u32` | Number of populated `ProfileIndex` slots for that role |
+| `RoleVersion(Address)` | `u32` | Number of accepted role transitions for an address; starts at `0` and is exposed by `get_role_version()` (#1129) |
 
 Both keys are written by **every** registration path (`register_issuer`,
 `register_buyer`, `batch_register_issuers`, `batch_register_buyers`) and are
@@ -162,9 +163,11 @@ consumers must not decode it directly — use the decoded contract views
 ##### Valid Flag Combinations
 
 The three meaningful bits yield eight theoretical combinations, but only three
-are valid in the protocol's state machine. The role bit (bit 0) is immutable
-after registration; the verified and revoked bits are mutually exclusive — a
-profile cannot be both verified and revoked simultaneously.
+are valid in the protocol's state machine. The role bit (bit 0) is normally set
+at registration and can only be changed by the admin-only `change_role()`
+entry point (#1129), which flips that bit without touching the other flags.
+The verified and revoked bits are mutually exclusive — a profile cannot be
+both verified and revoked simultaneously.
 
 | packed_flags (binary) | Role    | Verified | Revoked | `VerificationStatus` | Description |
 |-----------------------|---------|----------|---------|---------------------|-------------|
@@ -216,9 +219,11 @@ let status = if !profile_exists {
   above it, so a single call can never walk the whole index. Pages are
   contiguous and non-overlapping: page `n` is
   `list_profiles(role, n * limit, limit)`.
-- The index is append-only. The registry has no deregistration path —
-  `revoke` only flips the profile's verification flags — so a slot is never
-  rewritten or freed, and revoked profiles stay enumerated.
+- The index is append-only except for role changes. The registry has no
+  deregistration path — `revoke` only flips the profile's verification flags —
+  so revoked profiles stay enumerated. `change_role()` (#1129) compacts the
+  old role's index and appends the address to the new role's index, keeping
+  each role's count aligned with the decoded profile roles.
 - `get_profile(address)` returns the full `Profile` struct or panics with
   `NotFound` if absent.
 - `get_verification_status(address)` returns a three-valued enum

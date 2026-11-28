@@ -4,6 +4,7 @@
 // positionally; migrating them is a schema change, not an SDK repair,
 // so it is deliberately out of scope for the #826 upgrade.
 #![allow(deprecated)]
+use crate::Role;
 use soroban_sdk::{Address, BytesN, Env, String, Symbol};
 
 pub fn upgraded(env: &Env, wasm_hash: &BytesN<32>) {
@@ -44,6 +45,22 @@ pub fn profile_verified(env: &Env, address: &Address, status: bool) {
     env.events().publish(
         (Symbol::new(env, "profile_verified"), address.clone()),
         status,
+    );
+}
+
+/// Emitted only for an actual role transition, never for an idempotent
+/// `change_role` call (#1129). The per-address `version` disambiguates repeated
+/// transitions for off-chain consumers.
+pub fn role_changed(
+    env: &Env,
+    address: &Address,
+    previous_role: &Role,
+    new_role: &Role,
+    version: u32,
+) {
+    env.events().publish(
+        (Symbol::new(env, "role_changed"), address.clone()),
+        (previous_role.clone(), new_role.clone(), version),
     );
 }
 
