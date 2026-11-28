@@ -4495,3 +4495,100 @@ fn test_get_metadata_key_count_not_found_panics() {
         .unwrap();
     assert_eq!(err, RegistryError::NotFound.into());
 }
+
+#[test]
+fn test_get_profile_metadata_hash_deterministic_and_updates() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+
+    let m1 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        ),
+        (
+            String::from_str(&env, "country"),
+            String::from_str(&env, "US")
+        ),
+    ];
+    client.register_issuer(&issuer, &m1);
+
+    let hash1 = client.get_profile_metadata_hash(&issuer);
+    // Calling the view repeatedly without state changes is idempotent.
+    assert_eq!(client.get_profile_metadata_hash(&issuer), hash1);
+
+    // Updating metadata changes the digest.
+    let m2 = map![
+        &env,
+        (
+            String::from_str(&env, "name"),
+            String::from_str(&env, "Acme Corp")
+        ),
+        (
+            String::from_str(&env, "country"),
+            String::from_str(&env, "CA")
+        ),
+    ];
+    client.update_metadata(&issuer, &m2);
+    let hash2 = client.get_profile_metadata_hash(&issuer);
+    assert_ne!(hash1, hash2);
+}
+
+#[test]
+fn test_get_profile_metadata_hash_order_independent() {
+    let (env, _admin, client) = setup();
+    let issuer_a = Address::generate(&env);
+    let issuer_b = Address::generate(&env);
+
+    let mut m_ab = soroban_sdk::Map::new(&env);
+    m_ab.set(
+        String::from_str(&env, "alpha"),
+        String::from_str(&env, "one"),
+    );
+    m_ab.set(
+        String::from_str(&env, "beta"),
+        String::from_str(&env, "two"),
+    );
+
+    let mut m_ba = soroban_sdk::Map::new(&env);
+    m_ba.set(
+        String::from_str(&env, "beta"),
+        String::from_str(&env, "two"),
+    );
+    m_ba.set(
+        String::from_str(&env, "alpha"),
+        String::from_str(&env, "one"),
+    );
+
+    client.register_issuer(&issuer_a, &m_ab);
+    client.register_issuer(&issuer_b, &m_ba);
+
+    assert_eq!(
+        client.get_profile_metadata_hash(&issuer_a),
+        client.get_profile_metadata_hash(&issuer_b)
+    );
+}
+
+#[test]
+fn test_get_profile_metadata_hash_empty_metadata_boundary() {
+    let (env, _admin, client) = setup();
+    let buyer = Address::generate(&env);
+    let empty: soroban_sdk::Map<String, String> = soroban_sdk::Map::new(&env);
+
+    client.register_buyer(&buyer, &empty);
+    let h1 = client.get_profile_metadata_hash(&buyer);
+    let h2 = client.get_profile_metadata_hash(&buyer);
+    assert_eq!(h1, h2);
+}
+
+#[test]
+fn test_get_profile_metadata_hash_not_found() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    let err = client
+        .try_get_profile_metadata_hash(&unknown)
+        .unwrap_err()
+        .unwrap();
+    assert_eq!(err, RegistryError::NotFound.into());
+}
