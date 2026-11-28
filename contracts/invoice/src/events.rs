@@ -33,6 +33,40 @@ pub fn invoice_listed(env: &Env, invoice_id: &BytesN<32>, discount_bps: u32) {
     );
 }
 
+/// Emitted after the buyer acknowledges an invoice before financing listing.
+pub fn buyer_listing_acknowledged(env: &Env, invoice_id: &BytesN<32>, buyer: &Address) {
+    env.events().publish(
+        (
+            Symbol::new(env, "buyer_listing_acknowledged"),
+            invoice_id.clone(),
+            buyer.clone(),
+        ),
+        (),
+    );
+}
+
+/// Emitted for each successful lifecycle status transition.
+pub fn invoice_status_changed(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    from: crate::InvoiceStatus,
+    to: crate::InvoiceStatus,
+    revision: u64,
+) {
+    env.events().publish(
+        (
+            Symbol::new(env, "invoice_status_changed"),
+            invoice_id.clone(),
+        ),
+        (from, to, revision),
+    );
+}
+
+pub fn buyer_acknowledgement_set(env: &Env, required: bool) {
+    env.events()
+        .publish((Symbol::new(env, "buyer_ack_set"),), required);
+}
+
 pub fn invoice_cancelled(env: &Env, invoice_id: &BytesN<32>) {
     env.events().publish(
         (Symbol::new(env, "invoice_cancelled"), invoice_id.clone()),

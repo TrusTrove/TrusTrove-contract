@@ -51,7 +51,9 @@ pub enum EscrowAction {
 /// An entry in the escrow event history for a given invoice.
 ///
 /// History is stored under [`DataKey::History`] as a `Vec<EscrowEvent>`
-/// and is append-only — see [`EscrowContract::append_history`].
+/// and is append-only — see [`EscrowContract::append_history`]. Legacy entries
+/// without a release sequence remain readable and are returned with sequence
+/// `0`.
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EscrowEvent {
@@ -64,6 +66,21 @@ pub struct EscrowEvent {
     /// Unix timestamp (seconds) when this event was recorded.
     pub timestamp: u64,
     /// The caller address that triggered this event (for DefaultHandled events).
+    pub caller: Option<soroban_sdk::Address>,
+    /// One-based sequence of this successful release within the current lock.
+    /// Lock entries and legacy history entries use `0`.
+    pub sequence: u64,
+}
+
+/// The pre-#1203 history layout. Kept for decoding entries already persisted
+/// by deployed contracts; new history writes use [`EscrowEvent`].
+#[contracttype]
+#[derive(Clone, Debug)]
+pub(crate) struct LegacyEscrowEvent {
+    pub invoice_id: BytesN<32>,
+    pub action: EscrowAction,
+    pub amount: u128,
+    pub timestamp: u64,
     pub caller: Option<soroban_sdk::Address>,
 }
 
@@ -138,31 +155,23 @@ pub enum DataKey {
     /// **Storage-key layout:** appended at the end of the unnumbered enum
     /// (index 8) — see the note on [`DataKey::IssuerReleased`].
     LockedLedger(BytesN<32>),
-    /// Minimum seconds before default handling. Instance key with a u64 value.
+    /// Minimum seconds before default handling. Instance key with a u64 value
+    /// (index 9).
     MinLockSeconds,
-    /// Minimum amount (in USDC stroops) accepted by future
-    /// [`EscrowContract::lock`](crate::EscrowContract::lock) calls (#1297).
-    /// Instance key; value type: `u128`. Absent means no minimum beyond the
-    /// existing non-zero rule, so deployments that never set it keep their
-    /// previous behaviour. Existing locks are unaffected and stay releasable.
-    ///
-    /// **Storage-key layout:** appended at the end of the unnumbered enum
-    /// (index 10) — see the note on [`DataKey::IssuerReleased`].
+    /// One-based successful-release counter for the current/most recent lock.
+    /// The invoice ID is the suffix. Value type: `u64` (index 10). This key is
+    /// intentionally appended to preserve the positional encoding of existing
+    /// `DataKey` variants.
+    ReleaseSequence(BytesN<32>),
+    /// Minimum amount accepted by future `lock` calls (#1297). Instance key;
+    /// value type: `u128` (index 11). Absent means `0`. This key is
+    /// intentionally appended to preserve the positional encoding of existing
+    /// `DataKey` variants.
     MinLockAmount,
-    /// Address that received the most recent successful release or default for
-    /// a given invoice (#1296). The inner `BytesN<32>` is the invoice ID.
-    /// Value type: `Address`. Failed transfers never write this key; the write
-    /// follows the token transfer inside the same transaction, so a reverted
-    /// release leaves the previous recipient in place.
-    ///
-    /// Written by [`EscrowContract::release_to_issuer`](crate::EscrowContract::release_to_issuer),
-    /// [`EscrowContract::release_to_pool`](crate::EscrowContract::release_to_pool),
-    /// [`EscrowContract::handle_default`](crate::EscrowContract::handle_default) and
-    /// [`EscrowContract::release_after_timeout`](crate::EscrowContract::release_after_timeout);
-    /// read by [`EscrowContract::get_last_release_recipient`](crate::EscrowContract::get_last_release_recipient).
-    ///
-    /// **Storage-key layout:** appended at the end of the unnumbered enum
-    /// (index 11) — see the note on [`DataKey::IssuerReleased`].
+    /// Recipient of the most recent successful release/default for an invoice
+    /// (#1296). The invoice ID is the suffix. Value type: `Address` (index 12).
+    /// This key is intentionally appended to preserve the positional encoding
+    /// of existing `DataKey` variants.
     LastReleaseRecipient(BytesN<32>),
 }
 

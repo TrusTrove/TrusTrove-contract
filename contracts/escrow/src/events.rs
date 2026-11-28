@@ -44,35 +44,51 @@ pub fn funds_locked(env: &Env, invoice_id: &BytesN<32>, issuer: &Address, amount
     );
 }
 
-pub fn released_to_issuer(env: &Env, invoice_id: &BytesN<32>, issuer: &Address, amount: u128) {
+/// Release events keep their existing topic layout; the data is now
+/// `(amount, sequence)` so indexers can correlate it with history.
+pub fn released_to_issuer(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    issuer: &Address,
+    amount: u128,
+    sequence: u64,
+) {
     env.events().publish(
         (
             Symbol::new(env, "released_to_issuer"),
             invoice_id.clone(),
             issuer.clone(),
         ),
-        amount,
+        (amount, sequence),
     );
 }
 
-pub fn released_to_pool(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amount: u128) {
+/// The data is `(amount, sequence)`; topics retain their existing layout.
+pub fn released_to_pool(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    pool: &Address,
+    amount: u128,
+    sequence: u64,
+) {
     env.events().publish(
         (
             Symbol::new(env, "released_to_pool"),
             invoice_id.clone(),
             pool.clone(),
         ),
-        amount,
+        (amount, sequence),
     );
 }
 
+/// The data is `(amount, sequence)`; topics retain their existing layout.
 pub fn default_resolved(
     env: &Env,
     invoice_id: &BytesN<32>,
     pool: &Address,
     caller: &Address,
     amount: u128,
-    lock_age: u64,
+    sequence: u64,
 ) {
     env.events().publish(
         (
@@ -81,7 +97,7 @@ pub fn default_resolved(
             pool.clone(),
             caller.clone(),
         ),
-        (amount, lock_age),
+        (amount, sequence),
     );
 }
 
@@ -112,14 +128,21 @@ pub fn invoice_contract_set(env: &Env, admin: &Address, invoice_contract: &Addre
 }
 
 /// Emitted by `release_after_timeout` when a stale lock is returned to the pool.
-pub fn timeout_released(env: &Env, invoice_id: &BytesN<32>, pool: &Address, amount: u128) {
+/// The data is `(amount, sequence)`; topics retain their existing layout.
+pub fn timeout_released(
+    env: &Env,
+    invoice_id: &BytesN<32>,
+    pool: &Address,
+    amount: u128,
+    sequence: u64,
+) {
     env.events().publish(
         (
             Symbol::new(env, "timeout_released"),
             invoice_id.clone(),
             pool.clone(),
         ),
-        amount,
+        (amount, sequence),
     );
 }
 
