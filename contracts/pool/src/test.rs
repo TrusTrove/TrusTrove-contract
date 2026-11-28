@@ -9013,6 +9013,12 @@ fn test_fund_invoice_reads_invoice_once_via_get_funding_context() {
 /// release recipient (one persistent write + TTL bump) on the funding payout
 /// path. The flow now measures cpu = 1,763,382 / mem = 392,926; the ceilings
 /// below leave headroom on top of that intentional cost.
+///
+/// Re-pinned by #1203: the escrow release paths now read, increment and store a
+/// per-invoice `ReleaseSequence` (one persistent read + write + TTL bump) and
+/// stamp it into the history entry, so `release_to_issuer` on the funding
+/// payout path costs more than the #1296 ceilings. The flow measures
+/// cpu = 1,943,620 / mem = 433,002; the ceilings below pin that re-measurement.
 #[test]
 fn test_fund_invoice_host_budget_below_four_call_baseline() {
     let te = setup();
@@ -9026,12 +9032,12 @@ fn test_fund_invoice_host_budget_below_four_call_baseline() {
     std::println!("FUND833_BUDGET cpu={cpu} mem={mem}");
 
     assert!(
-        cpu < 1_790_000,
-        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter + #1296 release recipient) must stay within its re-pinned CPU budget: {cpu}"
+        cpu < 1_990_000,
+        "fund_invoice (batched read + #819 issuer payout + #829 discount floor + #969 buyer snapshot + #1196 lock ledger + #1189 cumulative funded counter + #1296 release recipient + #1203 release sequence) must stay within its re-pinned CPU budget: {cpu}"
     );
     assert!(
-        mem < 405_000,
-        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger + #1296 release recipient) must stay within its re-pinned memory budget: {mem}"
+        mem < 450_000,
+        "fund_invoice (batched read + #819 issuer payout + #969 buyer snapshot + #1196 lock ledger + #1296 release recipient + #1203 release sequence) must stay within its re-pinned memory budget: {mem}"
     );
 }
 

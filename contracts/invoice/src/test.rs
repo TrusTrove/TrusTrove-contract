@@ -10166,7 +10166,7 @@ fn test_record_delivery_evidence_rejects_before_shipment() {
 }
 
 #[test]
-#[should_panic(expected = "Error(Contract, #33)")]
+#[should_panic(expected = "Error(Contract, #34)")]
 fn test_record_delivery_evidence_rejects_zero_hash() {
     let (env, client, issuer, _buyer, invoice_id) = shipped_invoice();
     client.record_delivery_evidence(&invoice_id, &issuer, &BytesN::from_array(&env, &[0u8; 32]));

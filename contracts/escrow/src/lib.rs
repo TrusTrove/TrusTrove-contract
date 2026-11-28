@@ -1566,12 +1566,15 @@ impl EscrowContract {
     /// ```
     pub fn get_history_count(env: Env, invoice_id: BytesN<32>) -> u32 {
         let key = DataKey::History(invoice_id);
-        match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
-            Some(history) => {
+        // Decode through the legacy-aware helper: history written before
+        // #1203 stores entries without the `sequence` field, and decoding those
+        // as the current `EscrowEvent` would fail.
+        match env.storage().persistent().get::<_, Val>(&key) {
+            Some(value) => {
                 env.storage()
                     .persistent()
                     .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-                history.len()
+                Self::decode_history(&env, &value).len()
             }
             None => 0,
         }
