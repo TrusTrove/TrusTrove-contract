@@ -5,7 +5,7 @@ extern crate std;
 use crate::{
     DataKey, Profile, RegistryContract, RegistryContractClient, RegistryError, Role,
     VerificationStatus, MAX_METADATA_KEY_LEN, MAX_METADATA_SIZE, MAX_METADATA_VALUE_LEN,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    PROFILE_SCHEMA_VERSION, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 use proptest::prelude::*;
 use proptest::test_runner::{Config as ProptestConfig, TestRunner};
@@ -66,6 +66,87 @@ fn test_register_buyer() {
     let profile = client.get_profile(&buyer);
     assert_eq!(profile.role(), crate::Role::Buyer);
     assert!(!profile.verified());
+}
+
+#[test]
+fn test_profile_schema_version_is_stored_for_all_registration_paths() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let buyer = Address::generate(&env);
+    let batch_issuer = Address::generate(&env);
+    let batch_buyer = Address::generate(&env);
+
+    client.register_issuer(&issuer, &map![&env]);
+    client.register_buyer(&buyer, &map![&env]);
+    client.batch_register_issuers(&vec![&env, (batch_issuer.clone(), map![&env])]);
+    client.batch_register_buyers(&vec![&env, (batch_buyer.clone(), map![&env])]);
+
+    for address in [issuer, buyer, batch_issuer, batch_buyer] {
+        assert_eq!(
+            client.get_profile_schema_version(&address),
+            PROFILE_SCHEMA_VERSION
+        );
+    }
+}
+
+#[test]
+fn test_profile_schema_version_defaults_legacy_and_reads_mixed_versions() {
+    let (env, _admin, client) = setup();
+    let legacy = Address::generate(&env);
+    let newer = Address::generate(&env);
+    let metadata = map![&env];
+    let legacy_profile = Profile::new(
+        Role::Issuer,
+        false,
+        env.ledger().timestamp(),
+        metadata.clone(),
+    );
+    let newer_profile = Profile::new(Role::Buyer, false, env.ledger().timestamp(), metadata);
+
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::Profile(legacy.clone()), &legacy_profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Profile(newer.clone()), &newer_profile);
+        env.storage()
+            .persistent()
+            .set(&DataKey::ProfileSchemaVersion(newer.clone()), &2u32);
+    });
+
+    assert_eq!(client.get_profile(&legacy).role(), Role::Issuer);
+    assert_eq!(client.get_profile_schema_version(&legacy), 1);
+    assert_eq!(client.get_profile_schema_version(&newer), 2);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #3)")]
+fn test_profile_schema_version_unknown_profile_panics() {
+    let (env, _admin, client) = setup();
+    let unknown = Address::generate(&env);
+    client.get_profile_schema_version(&unknown);
+}
+
+#[test]
+fn test_profile_schema_version_is_idempotent_across_metadata_updates() {
+    let (env, _admin, client) = setup();
+    let issuer = Address::generate(&env);
+    client.register_issuer(&issuer, &map![&env]);
+
+    assert_eq!(
+        client.get_profile_schema_version(&issuer),
+        PROFILE_SCHEMA_VERSION
+    );
+    client.update_profile(&issuer, &map![&env]);
+    assert_eq!(
+        client.get_profile_schema_version(&issuer),
+        PROFILE_SCHEMA_VERSION
+    );
+    assert_eq!(
+        client.get_profile_schema_version(&issuer),
+        PROFILE_SCHEMA_VERSION
+    );
 }
 
 #[test]

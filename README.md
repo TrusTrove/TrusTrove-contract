@@ -78,6 +78,7 @@ batch_register_issuers(entries) → Vec<Address>   ← admin only, max 50, retur
 batch_register_buyers(entries) → Vec<Address>    ← admin only, max 50, returns skipped
 is_verified(address) → bool
 get_profile(address) → Profile
+get_profile_schema_version(address) → u32              ← defaults legacy profiles to v1
 get_profile_count(role) → u32                    ← issuers/buyers registered, O(1)
 list_profiles(role, start, limit) → Vec<Address> ← registration-ordered page, limit ≤ 50
 revoke(address) → bool
@@ -416,6 +417,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `remove_metadata_key` | `remove_metadata_key(address: Address, metadata_key: String) -> bool` |
 | Registry | `get_metadata_key_count` | `get_metadata_key_count(address: Address) -> u32` |
 | Registry | `get_profile` | `get_profile(address: Address) -> Profile` |
+| Registry | `get_profile_schema_version` | `get_profile_schema_version(address: Address) -> u32` |
 | Registry | `is_verified` | `is_verified(address: Address) -> bool` |
 | Registry | `get_verified_since` | `get_verified_since(address: Address) -> Option<u64>` |
 | Registry | `get_verification_status` | `get_verification_status(address: Address) -> VerificationStatus` |
