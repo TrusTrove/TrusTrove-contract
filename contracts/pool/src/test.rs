@@ -9680,6 +9680,168 @@ fn test_set_max_time_to_maturity_emits_event_with_old_and_new_values() {
     assert_eq!(te.pool.get_max_time_to_maturity(), ONE_DAY);
 }
 
+// --------------- Total pool deposit cap (issue #1179) ---------------
+
+#[test]
+fn test_deposit_cap_defaults_to_unrestricted() {
+    let te = setup();
+    assert_eq!(te.pool.get_deposit_cap(), 0);
+
+    // With no cap, a large deposit still succeeds.
+    te.pool.deposit(&te.lp, &100_000_000_000);
+    assert_eq!(te.pool.get_stats().total_deposits, 100_000_000_000);
+}
+
+#[test]
+fn test_set_deposit_cap_succeeds_and_reads_back() {
+    let te = setup();
+    assert!(te.pool.set_deposit_cap(&500_000_000));
+    assert_eq!(te.pool.get_deposit_cap(), 500_000_000);
+}
+
+/// The largest representable token transfer amount is a valid cap.
+#[test]
+fn test_set_deposit_cap_accepts_i128_max() {
+    let te = setup();
+    let cap = i128::MAX as u128;
+    assert!(te.pool.set_deposit_cap(&cap));
+    assert_eq!(te.pool.get_deposit_cap(), cap);
+}
+
+/// Caps outside the funding token's signed transfer range are rejected and
+/// must not overwrite the previous valid configuration.
+#[test]
+fn test_set_deposit_cap_rejects_values_above_i128_max() {
+    let te = setup();
+    te.pool.set_deposit_cap(&500_000_000);
+    let invalid_cap = i128::MAX as u128 + 1;
+
+    assert!(te.pool.try_set_deposit_cap(&invalid_cap).is_err());
+    assert_eq!(te.pool.get_deposit_cap(), 500_000_000);
+}
+
+#[test]
+fn test_set_deposit_cap_zero_removes_cap() {
+    let te = setup();
+    te.pool.set_deposit_cap(&100_000_000);
+    te.pool.deposit(&te.lp, &100_000_000);
+    assert!(te.pool.try_deposit(&te.lp, &1).is_err());
+
+    te.pool.set_deposit_cap(&0);
+    assert_eq!(te.pool.get_deposit_cap(), 0);
+    te.pool.deposit(&te.lp, &100_000_000);
+    assert_eq!(te.pool.get_stats().total_deposits, 200_000_000);
+}
+
+/// A deposit that lands exactly on the cap is accepted.
+#[test]
+fn test_deposit_at_deposit_cap_boundary_succeeds() {
+    let te = setup();
+    te.pool.set_deposit_cap(&100_000_000_000);
+
+    let shares = te.pool.deposit(&te.lp, &100_000_000_000);
+    assert_eq!(shares, 100_000_000_000);
+    assert_eq!(te.pool.get_stats().total_deposits, 100_000_000_000);
+}
+
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_deposit_one_stroop_over_deposit_cap_panics() {
+    let te = setup();
+    te.pool.set_deposit_cap(&100_000_000_000);
+    te.pool.deposit(&te.lp, &100_000_000_001);
+}
+
+/// The rejection happens before the token transfer: a failed over-cap deposit
+/// leaves the LP's balance, the pool's balance, shares and totals untouched.
+#[test]
+fn test_deposit_beyond_cap_rejected_before_transfer_preserves_state() {
+    let te = setup();
+    te.pool.set_deposit_cap(&100_000_000);
+    te.pool.deposit(&te.lp, &50_000_000);
+
+    let usdc = MockTokenClient::new(&te.env, &te.usdc_id);
+    let lp_balance_before = usdc.balance(&te.lp);
+    let pool_balance_before = usdc.balance(&te.pool_id);
+    let stats_before = te.pool.get_stats();
+    let position_before = te.pool.get_lp_position(&te.lp);
+
+    assert!(te.pool.try_deposit(&te.lp, &50_000_001).is_err());
+
+    assert_eq!(usdc.balance(&te.lp), lp_balance_before);
+    assert_eq!(usdc.balance(&te.pool_id), pool_balance_before);
+    let stats_after = te.pool.get_stats();
+    assert_eq!(stats_after.total_deposits, stats_before.total_deposits);
+    assert_eq!(stats_after.total_shares, stats_before.total_shares);
+    let position_after = te.pool.get_lp_position(&te.lp);
+    assert_eq!(position_after.shares, position_before.shares);
+    assert_eq!(position_after.deposit_count, position_before.deposit_count);
+}
+
+/// `preview_deposit` mirrors `deposit`, so an over-cap preview panics too
+/// instead of reporting shares that `deposit` would refuse to mint.
+#[test]
+#[should_panic(expected = "Error(Contract, #31)")]
+fn test_preview_deposit_beyond_cap_panics() {
+    let te = setup();
+    te.pool.set_deposit_cap(&100_000_000);
+    te.pool.deposit(&te.lp, &50_000_000);
+    te.pool.preview_deposit(&50_000_001);
+}
+
+/// Lowering the cap below the current total only blocks new deposits;
+/// withdrawals still redeem in full.
+#[test]
+fn test_lowering_deposit_cap_below_total_deposits_blocks_new_deposits_only() {
+    let te = setup();
+    te.pool.deposit(&te.lp, &100_000_000);
+    te.pool.set_deposit_cap(&50_000_000);
+
+    assert!(te.pool.try_deposit(&te.lp, &1).is_err());
+
+    let shares = te.pool.get_lp_position(&te.lp).shares;
+    assert_eq!(te.pool.withdraw(&te.lp, &shares), 100_000_000);
+    assert_eq!(te.pool.get_stats().total_deposits, 0);
+}
+
+/// Repayments and withdrawals remain possible while the pool is at its cap.
+/// Repayment yield pushes `TotalDeposits` above the cap, after which new
+/// deposits are rejected but the LP can still redeem everything.
+#[test]
+fn test_withdrawals_and_repayments_allowed_at_deposit_cap() {
+    let te = setup();
+    te.pool.set_deposit_cap(&100_000_000_000);
+    te.pool.deposit(&te.lp, &100_000_000_000);
+
+    // Withdrawals are not deposits: room freed by a withdrawal can be reused.
+    let shares = te.pool.get_lp_position(&te.lp).shares;
+    let redeemed = te.pool.withdraw(&te.lp, &(shares / 2));
+    assert!(redeemed > 0);
+    te.pool.deposit(&te.lp, &redeemed);
+    assert_eq!(te.pool.get_stats().total_deposits, 100_000_000_000);
+
+    // Funding and repaying at the cap must both succeed.
+    let invoice_id = create_and_list(&te, &te.usdc_id);
+    assert!(te.pool.fund_invoice(&invoice_id));
+    te.invoice.mark_shipped(&invoice_id);
+    te.invoice.confirm_delivery(&invoice_id, &te.issuer);
+    te.invoice.confirm_delivery(&invoice_id, &te.buyer);
+    te.env
+        .ledger()
+        .set_timestamp(te.env.ledger().timestamp() + 86401);
+    te.invoice.repay(&invoice_id);
+
+    let stats = te.pool.get_stats();
+    assert!(
+        stats.total_deposits > 100_000_000_000,
+        "repayment yield pushes total deposits above the cap"
+    );
+
+    // Above the cap, new deposits are rejected but total redemption works.
+    assert!(te.pool.try_deposit(&te.lp, &1).is_err());
+    let shares = te.pool.get_lp_position(&te.lp).shares;
+    assert!(te.pool.withdraw(&te.lp, &shares) > 0);
+    assert_eq!(te.pool.get_stats().total_deposits, 0);
 // ---------------------------------------------------------------------------
 //  ISSUE #1180: ADMIN-SETTABLE PER-INVOICE EXPOSURE LIMIT
 // ---------------------------------------------------------------------------
@@ -9825,6 +9987,31 @@ fn test_set_max_invoice_exposure_rejects_above_10000_bps() {
 
 #[test]
 #[should_panic(expected = "Error(Auth, InvalidAction)")]
+fn test_set_deposit_cap_requires_admin_authorization() {
+    let te = setup();
+    te.env.set_auths(&[]);
+    te.pool.set_deposit_cap(&100_000_000);
+}
+
+#[test]
+fn test_set_deposit_cap_rejects_self_authorizing_non_admin() {
+    let te = setup();
+    let non_admin = Address::generate(&te.env);
+    te.env.mock_auths(&[MockAuth {
+        address: &non_admin,
+        invoke: &MockAuthInvoke {
+            contract: &te.pool_id,
+            fn_name: "set_deposit_cap",
+            args: (100_000_000u128,).into_val(&te.env),
+            sub_invokes: &[],
+        },
+    }]);
+    assert!(te.pool.try_set_deposit_cap(&100_000_000).is_err());
+    assert_eq!(te.pool.get_deposit_cap(), 0);
+}
+
+#[test]
+#[should_panic(expected = "Error(Auth, InvalidAction)")]
 fn test_set_max_invoice_exposure_requires_admin_authorization() {
     let te = setup();
     te.env.set_auths(&[]);
@@ -9846,6 +10033,35 @@ fn test_set_max_invoice_exposure_rejects_self_authorizing_non_admin() {
     }]);
     assert!(te.pool.try_set_max_invoice_exposure(&2_500).is_err());
     assert_eq!(te.pool.get_max_invoice_exposure_bps(), 0);
+}
+
+#[test]
+fn test_set_deposit_cap_emits_event_with_old_and_new_values() {
+    let te = setup();
+
+    te.pool.set_deposit_cap(&100_000_000);
+    let events = te.env.events().all();
+    assert_eq!(events.len(), 1);
+    let (contract, topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(contract, te.pool_id);
+    assert_eq!(topics.len(), 1);
+    assert_eq!(
+        Symbol::try_from_val(&te.env, &topics.get(0).unwrap()).unwrap(),
+        Symbol::new(&te.env, "deposit_cap_updated")
+    );
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (0u128, 100_000_000u128)
+    );
+
+    te.pool.set_deposit_cap(&0);
+    let events = te.env.events().all();
+    let (_contract, _topics, data) = events.get(events.len() - 1).unwrap();
+    assert_eq!(
+        <(u128, u128)>::try_from_val(&te.env, &data).unwrap(),
+        (100_000_000u128, 0u128)
+    );
+    assert_eq!(te.pool.get_deposit_cap(), 0);
 }
 
 #[test]

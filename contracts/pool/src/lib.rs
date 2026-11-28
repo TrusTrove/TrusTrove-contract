@@ -659,6 +659,10 @@ impl PoolContract {
     ///   at the current share price (prevents 0-share dust deposits).
     /// * `Overflow` if `usdc_amount * total_shares` would overflow `u128`
     ///   while computing the proportional share price.
+    /// * `DepositCapExceeded` if the deposit would take `TotalDeposits` above
+    ///   the admin-configured cap (`set_deposit_cap`, issue #1179). The check
+    ///   runs before the funding-asset transfer, so a rejected deposit moves
+    ///   no tokens and mints no shares.
     ///
     /// Successful deposits also increment the lifetime deposited-volume
     /// counter exposed by [`Self::get_lifetime_deposited_volume`]; withdrawals
@@ -2917,16 +2921,71 @@ impl PoolContract {
             .unwrap_or(0u64)
     }
 
-    /// Sets the maximum percentage of `TotalDeposits`, in basis points, that a
-    /// single newly funded invoice may consume (issue #1180).
+    /// Sets the cap on total pool deposits, in funding-asset stroops (issue
+    /// #1179). A pool operator running a pilot can use it to bound total
+    /// managed assets without pausing the pool or touching its wiring.
     ///
-    /// Authorization mirrors `set_min_discount` and `set_max_time_to_maturity`:
-    /// the *stored* admin must sign. `0` (the default, and the state of every
-    /// instance predating this feature) means unrestricted. The rule applies
-    /// only when an invoice is newly funded: invoices the pool already funded
-    /// are never re-checked, so lowering the limit cannot block their
-    /// repayment or default handling. An invoice whose funded amount equals
-    /// `total_deposits * max_bps / 10_000` is accepted.
+    /// Authorization mirrors `set_max_time_to_maturity`: the *stored* admin
+    /// must sign. `0` (the default, and the state of every instance predating
+    /// this feature) means uncapped.
+    ///
+    /// While a cap is set, `deposit` rejects any deposit that would take
+    /// `TotalDeposits` above the cap with `PoolError::DepositCapExceeded`. The
+    /// check runs before the funding-asset transfer, so a rejected deposit
+    /// moves no tokens. Deposits that land exactly on the cap are accepted.
+    /// Withdrawals, repayments, defaults and invoice funding are unaffected:
+    /// those flows are not new LP deposits, so the pool can still repay out
+    /// and LPs can always redeem. Because repayments add yield to
+    /// `TotalDeposits`, a pool can legitimately sit at or above its cap; any
+    /// subsequent deposit is then rejected until withdrawals free room or the
+    /// admin raises (or removes) the cap.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `cap` - The new cap on `TotalDeposits`, in stroops. `0` removes
+    ///   the cap.
+    ///
+    /// # Auth
+    /// Requires authorization from the stored admin.
+    ///
+    /// # Validation
+    /// Values above `i128::MAX` are rejected because token transfers use
+    /// signed `i128` amounts.
+    ///
+    /// # Panics
+    /// * `NotInitialized` if the pool is not initialized.
+    /// * `InvalidDepositCap` if `cap` exceeds `i128::MAX`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the cap is updated. Emits
+    ///   `deposit_cap_updated` with `(old_cap, new_cap)`.
+    ///
+    /// # Example
+    /// ```ignore
+    /// client.set_deposit_cap(&10_000_000_000_000u128);
+    /// ```
+    pub fn set_deposit_cap(env: Env, cap: u128) -> bool {
+        require_not_paused(&env);
+        let admin =
+            Self::admin(&env).unwrap_or_else(|| panic_with_error!(&env, PoolError::NotInitialized));
+        admin.require_auth();
+        if cap > i128::MAX as u128 {
+            panic_with_error!(&env, PoolError::InvalidDepositCap);
+        }
+        let old_cap = Self::deposit_cap(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalDepositCap, &cap);
+        events::deposit_cap_updated(&env, old_cap, cap);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    /// Sets the maximum percentage of `TotalDeposits`, in basis points,
+    /// that a single newly funded invoice may consume (issue #1180).
+    /// `0` (the default) disables this limit. Existing funded invoices are
+    /// not re-checked, so lowering the limit cannot block repayment/default
+    /// handling. An invoice at the exact configured limit is accepted.
     ///
     /// # Arguments
     /// * `env` - The Soroban environment.
@@ -2934,22 +2993,16 @@ impl PoolContract {
     ///   (`10_000` = 100%). `0` removes the limit.
     ///
     /// # Auth
-    /// Requires authorization from the stored `admin`.
+    /// Requires authorization from the stored admin.
     ///
     /// # Panics
     /// * `NotInitialized` if the pool is not initialized.
-    /// * `InvalidConfiguration` if `max_bps` exceeds `MAX_INVOICE_EXPOSURE_BPS`
-    ///   (`10_000`).
+    /// * `InvalidConfiguration` if `max_bps` exceeds
+    ///   `MAX_INVOICE_EXPOSURE_BPS`.
     ///
     /// # Returns
     /// * `bool` - `true` when the limit is updated. Emits
-    ///   `max_invoice_exposure_updated` with `(old_max_bps, new_max_bps)`.
-    ///
-    /// # Example
-    /// ```ignore
-    /// // Cap any single invoice at 25% of pool deposits.
-    /// client.set_max_invoice_exposure(&2500);
-    /// ```
+    ///   `max_invoice_exposure_updated`.
     pub fn set_max_invoice_exposure(env: Env, max_bps: u32) -> bool {
         require_not_paused(&env);
         let admin =
@@ -2971,10 +3024,15 @@ impl PoolContract {
         true
     }
 
+    /// Returns the cap on total pool deposits, in funding-asset stroops.
+    /// Defaults to `0` (uncapped) for existing instances.
+    pub fn get_deposit_cap(env: Env) -> u128 {
+        Self::deposit_cap(&env)
+    }
+
     /// Returns the maximum percentage of `TotalDeposits`, in basis points,
     /// accepted for a single newly funded invoice. Defaults to `0`
-    /// (unrestricted) when never set, so instances predating issue #1180 keep
-    /// their behavior.
+    /// (unrestricted) for existing instances.
     pub fn get_max_invoice_exposure_bps(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -3250,12 +3308,37 @@ impl PoolContract {
             .unwrap_or(DEFAULT_MIN_INITIAL_DEPOSIT)
     }
 
+    /// Stored total deposit cap, falling back to `0` (uncapped) so instances
+    /// predating issue #1179 keep their behavior.
+    fn deposit_cap(env: &Env) -> u128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalDepositCap)
+            .unwrap_or(0)
+    }
+
     fn shares_for_deposit(env: &Env, usdc_amount: u128) -> u128 {
         if usdc_amount == 0 {
             panic_with_error!(env, PoolError::InvalidAmount);
         }
 
         let totals = Self::totals(env);
+        // Admin-set total deposit cap (issue #1179). Checked here, before
+        // `deposit` touches the token, so an over-cap deposit reverts with no
+        // transfer and no share minting. `preview_deposit` shares this helper,
+        // so the preview rejects exactly what `deposit` would reject. At the
+        // default of 0 (uncapped) the check is skipped, leaving existing
+        // behavior unchanged.
+        let deposit_cap = Self::deposit_cap(env);
+        if deposit_cap > 0 {
+            let post_deposit = totals
+                .deposits
+                .checked_add(usdc_amount)
+                .unwrap_or_else(|| panic_with_error!(env, PoolError::Overflow));
+            if post_deposit > deposit_cap {
+                panic_with_error!(env, PoolError::DepositCapExceeded);
+            }
+        }
         if (totals.shares == 0 || totals.deposits == 0)
             && usdc_amount < Self::min_initial_deposit(env)
         {

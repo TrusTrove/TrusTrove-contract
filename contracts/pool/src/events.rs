@@ -203,6 +203,17 @@ pub fn max_maturity_updated(env: &Env, old_max_seconds: u64, new_max_seconds: u6
     );
 }
 
+/// Emitted by `set_deposit_cap` when the admin changes the cap on total pool
+/// deposits (issue #1179). Like `max_maturity_updated`, it carries the old
+/// value as well as the new one; `0` means uncapped. A rejected call (for
+/// example, a non-admin signer) emits nothing.
+pub fn deposit_cap_updated(env: &Env, old_cap: u128, new_cap: u128) {
+    env.events().publish(
+        (Symbol::new(env, "deposit_cap_updated"),),
+        (old_cap, new_cap),
+    );
+}
+
 /// Emitted by `set_max_invoice_exposure` when the admin changes the maximum
 /// percentage of pool deposits (in basis points) a single newly funded invoice
 /// may consume (issue #1180). Carries both the old and new values; `0` means
