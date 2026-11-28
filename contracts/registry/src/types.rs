@@ -137,6 +137,9 @@ pub enum DataKey {
     /// Active metadata key policy (#1120); see [`MetadataKeyPolicy`]. Absent
     /// means [`MetadataKeyPolicy::Unrestricted`].
     MetadataKeyPolicy,
+    /// Schema version for a registered profile, stored separately so existing
+    /// serialized `Profile` values remain unchanged.
+    ProfileSchemaVersion(Address),
 }
 
 /// A proposed admin change waiting out its delay (#1124).
