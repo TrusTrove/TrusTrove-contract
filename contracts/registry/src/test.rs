@@ -84,6 +84,54 @@ fn test_is_verified_returns_false_for_unknown() {
 }
 
 #[test]
+fn test_has_profile_for_all_verification_states_without_changing_state() {
+    let (env, admin, client) = setup();
+    let issuer = Address::generate(&env);
+    let unknown = Address::generate(&env);
+
+    assert!(!client.has_profile(&unknown));
+    assert!(!client.has_profile(&unknown));
+    assert_eq!(
+        client.get_verification_status(&unknown),
+        VerificationStatus::Unregistered
+    );
+
+    client.register_issuer(&issuer, &map![&env]);
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+    assert!(client.has_profile(&issuer));
+    assert!(client.has_profile(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Pending
+    );
+
+    client.verify_profile(&admin, &issuer, &true);
+    assert!(client.has_profile(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Verified
+    );
+
+    client.revoke(&issuer);
+    assert!(client.has_profile(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+
+    // Existence checks are public read views and do not require authorization.
+    env.set_auths(&[]);
+    assert!(client.has_profile(&issuer));
+    assert_eq!(
+        client.get_verification_status(&issuer),
+        VerificationStatus::Revoked
+    );
+}
+
+#[test]
 fn test_revoke_sets_verified_false() {
     let (env, admin, client) = setup();
     let issuer = Address::generate(&env);
