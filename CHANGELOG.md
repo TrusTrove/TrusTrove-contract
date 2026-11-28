@@ -7,8 +7,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `invoice`: `get_amount_due(invoice_id) -> u128`, the amount the buyer owes
+  now for every status: `0` for invoices that were never funded (`Created`,
+  `Listed`, `Expired`, `Cancelled`) and once `Repaid`; `remaining_balance`
+  while `Funded`, `Active` or `Confirmed`, including after partial
+  repayments; and the unpaid `remaining_balance` after `Defaulted`. Unlike
+  `get_remaining_balance`, it does not report the face value before funding.
+  Read-only, no authorization, no storage change (#1134)
+
 ### Changed
 
+- `escrow`: `default_resolved` audit event data payload updated to `(u128, u64)`
+  representing `(amount, lock_age)` to record elapsed lock seconds alongside
+  the invoice ID, pool, caller, and resolved amount. Failed default attempts
+  produce no event (#1193)
 - `pool`: `get_share_price` now documents its rounding. The 1e18 fixed-point
   price is `TotalDeposits * SHARE_PRICE_SCALE / TotalShares` truncated toward
   zero, so it is deterministic and never overstates a share. Tests pin the
@@ -32,14 +46,40 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
-- `registry`: `verify_profile_with_reason(caller, address, verify, reason_hash)`
-  accepts an optional 32-byte commitment to verification evidence, stores it
-  under `DataKey::VerificationReason(address)` and exposes it through
-  `get_verification_reason(address)` while the profile is verified. No raw
-  documents are written on chain. `verify_profile` remains as the no-hash
-  legacy path, and `profile_verified` now emits
-  `(status, Option<reason_hash>)` so the commitment is part of the
-  state-change event (#1126)
+- `escrow`: `get_last_release_recipient(invoice_id)` view returning the address
+  that received the most recent successful release or default for an invoice,
+  recorded only after the token transfer succeeds. Failed transfers never
+  update it, and the recipient lives in a new appended storage key so existing
+  records still decode (#1296)
+- `escrow`: admin-settable minimum lock amount via `set_min_lock_amount` and
+  `get_min_lock_amount`, with a `min_lock_amount_set` event. The default `0`
+  preserves the previous any-non-zero-amount behaviour, future locks below the
+  minimum fail with `AmountBelowMinimum`, and existing locks remain releasable
+  (#1297)
+- `escrow`: `get_custody_coverage(invoice_id)` preflight view returning
+  `CustodyCoverage { tracked_amount, token_balance, can_release }` without
+  transferring funds or changing storage (#1298)
+- `tooling`: `scripts/check_deployed_hashes.py`, run by both deploy scripts
+  before the first reference-setting call. It compares each deployed
+  contract's on-chain code hash with the intended release manifest (or the
+  locally built WASM) and aborts wiring on any mismatch (#1299)
+- `escrow`: `get_history_count(invoice_id)` view, returning the number of
+  history events recorded for an invoice (`u32`) or `0` when absent. Preserves
+  access after active lock removal and enables planning paginated reads
+  without loading full history vectors into memory (#1195)
+- `escrow`: admin-only `recover_token(token, to, amount)` for tokens sent to
+  the escrow by mistake. The configured funding asset is rejected with the new
+  `EscrowError::InvalidToken` (code 13), so active lock collateral is never
+  touched; zero or oversized amounts, the escrow as recipient, a non-admin
+  signer and the emergency pause are also rejected. Each recovery emits a
+  `token_recovered` audit event with the admin, token, recipient and amount
+  (#1201)
+- `tooling`: storage migration fixture (`tests/migration`,
+  `scripts/migration_fixture.sh`, CI job `storage migration fixture`). It
+  deploys the baseline Wasm, writes registry, invoice, escrow and pool state,
+  upgrades every contract to the candidate Wasm, and verifies the reads still
+  decode and stay writable, plus non-admin and unknown-hash rejection and
+  upgrade idempotency. Procedure documented in `DEPLOYMENT.md` (#1207)
 - `escrow`: `get_release_authorization(caller)` view, returning a
   `ReleaseAuthorization` that reports which escrow write entry points
   (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`,
@@ -47,6 +87,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   configuration, including the pinned invoice reference and the pause state.
   Read-only, needs no auth, and never replaces the write paths' own
   `require_auth` checks (#1198)
+- `invoice`: `get_issuer_invoice_ids(address, page, page_size)` view returning
+  a bounded page of one issuer's invoice IDs in creation order without loading
+  any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
+  otherwise it panics with `InvalidPageSize`. Out-of-range pages return empty.
+  `get_by_issuer` and the storage layout are unchanged (#1150)
 - `pool`: `share_price_updated` event emitted on successful yield-bearing
   repayments with the invoice ID and the old/new 18-decimal fixed-point share
   prices, plus the `get_share_price()` view using the same encoding. Failed and
@@ -65,6 +110,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `pool`: `get_lifetime_withdrawn_volume()` view backed by a cumulative counter
   incremented only by successful LP `withdraw` amounts. Failed calls and
   internal funding transfers leave it unchanged (#1173)
+- `invoice`: `exists(invoice_id) -> bool` view, so callers can check an ID
+  without trapping `NotFound` from `get`. It is a pure presence check on the
+  invoice record: checking a missing ID creates no storage, and checking an
+  existing one does not extend its TTL. Invoices in every status, including
+  cancelled and repaid ones, exist (#1153)
 - `pool`: `get_lifetime_repaid_volume()` view backed by a cumulative counter of
   the full amount received by successful `receive_repayment` /
   `receive_repayment_with_refund` calls, including early repayments. Replayed
@@ -76,6 +126,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   minimum discount, minimum initial deposit, batch size cap) in one read-only
   call. Unset policy keys report the same defaults the write paths use, and
   storage is unchanged (#1188)
+- `pool`: admin-settable per-invoice exposure limit for newly funded invoices.
+  `set_max_invoice_exposure(max_bps)` (stored admin only, max `10_000` bps,
+  emits `max_invoice_exposure_updated(old, new)`) and
+  `get_max_invoice_exposure_bps()`, stored as `DataKey::MaxInvoiceExposureBps`.
+  `fund_invoice` and `batch_fund_invoice` reject an invoice whose
+  `funded_amount` exceeds `total_deposits * max_bps / 10_000` with the new
+  `PoolError::InvoiceExposureLimitExceeded` (#31); an invoice exactly at the
+  limit is accepted. The default `0` means unrestricted, and already-funded
+  invoices remain valid (#1180)
 - `pool`: admin-settable maximum time to maturity for newly funded invoices.
   `set_max_time_to_maturity(max_seconds)` (stored admin only, emits
   `max_maturity_updated(old, new)`) and `get_max_time_to_maturity()`, stored
@@ -116,6 +175,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (`__constructor` since #827, formerly `initialize`: `funding_asset`,
   `registry_contract`, `treasury`, `min_initial_deposit`,
   `share_name`, `share_symbol`, `share_decimals`)
+- `invoice`: `get_buyer_invoice_ids(address, page, page_size)` view returning
+  a bounded page of one buyer's invoice IDs in creation order without loading
+  any `Invoice` record. `page_size` must be in `1..=MAX_PAGE_SIZE` (50),
+  otherwise it panics with `InvalidPageSize`. Out-of-range pages return empty.
+  `get_by_buyer` and the storage layout are unchanged (#1151)
 
 ### Changed
 

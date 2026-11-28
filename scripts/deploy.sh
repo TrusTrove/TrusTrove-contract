@@ -494,6 +494,46 @@ verify_pinned_invoice() {
 }
 
 # ---------------------------------------------------------------------------
+# 4d. Deployed code hash preflight (issue #1299)
+# ---------------------------------------------------------------------------
+
+# verify_deployed_code_hashes <KEY=CONTRACT_ID>...
+# Before any reference-setting call, compare each deployed contract's on-chain
+# code hash with the intended release: the `wasm_hashes` map in
+# $RELEASE_MANIFEST when set, otherwise the freshly built local WASM artifacts.
+# Exits non-zero without invoking a single wiring call if anything differs, so
+# a deployment can never point references at contract IDs running unexpected
+# WASM.
+verify_deployed_code_hashes() {
+  if [ "$DRY_RUN" = true ]; then
+    echo "  [DRY-RUN] Would verify deployed code hashes before wiring: $*"
+    return 0
+  fi
+
+  local -a source_args
+  if [ -n "${RELEASE_MANIFEST:-}" ]; then
+    if [ ! -f "$RELEASE_MANIFEST" ]; then
+      echo "ERROR: RELEASE_MANIFEST is set but not found: $RELEASE_MANIFEST" 1>&2
+      exit 1
+    fi
+    source_args=(--manifest "$RELEASE_MANIFEST")
+    echo "=== Preflight: comparing deployed code hashes with $RELEASE_MANIFEST ==="
+  else
+    source_args=(--wasm-dir "target/wasm32v1-none/release")
+    echo "=== Preflight: comparing deployed code hashes with locally built WASM ==="
+  fi
+
+  if ! python3 "$SCRIPT_DIR/check_deployed_hashes.py" \
+      "${source_args[@]}" \
+      --network testnet \
+      "$@"; then
+    echo "ERROR: deployed code does not match the intended release." 1>&2
+    echo "       Refusing to set contract references. No wiring call was made." 1>&2
+    exit 1
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # 5. Pre-flight checks
 # ---------------------------------------------------------------------------
 
@@ -794,6 +834,20 @@ if _should_run "pool_xlm"; then
   echo ""
 fi
 
+# Issue #1299: verify every contract ID about to be wired is running the WASM
+# this release intends, before the first reference-setting call.
+_preflight_contracts=()
+[ -n "${REGISTRY_ID:-}" ] && _preflight_contracts+=("--contract" "registry=$REGISTRY_ID")
+[ -n "${INVOICE_ID:-}" ] && _preflight_contracts+=("--contract" "invoice=$INVOICE_ID")
+[ -n "${ESCROW_USDC_ID:-}" ] && _preflight_contracts+=("--contract" "escrow_usdc=$ESCROW_USDC_ID")
+[ -n "${POOL_USDC_ID:-}" ] && _preflight_contracts+=("--contract" "pool_usdc=$POOL_USDC_ID")
+[ -n "${ESCROW_XLM_ID:-}" ] && _preflight_contracts+=("--contract" "escrow_xlm=$ESCROW_XLM_ID")
+[ -n "${POOL_XLM_ID:-}" ] && _preflight_contracts+=("--contract" "pool_xlm=$POOL_XLM_ID")
+if [ "${#_preflight_contracts[@]}" -gt 0 ]; then
+  verify_deployed_code_hashes "${_preflight_contracts[@]}"
+  echo ""
+fi
+
 if [ -z "$ONLY_CONTRACT" ] || [ "$ONLY_CONTRACT" = "usdc_pair" ]; then
   echo ""
   echo "=== Wiring USDC pool_contract into invoice_contract ==="
@@ -885,17 +939,8 @@ NEXT_PUBLIC_POOL_XLM_CONTRACT_ID=$POOL_XLM_ID # EXPERIMENTAL
 EOF
 
 JSON_OUT="deployments.json"
-cat > "$JSON_OUT" <<EOF
-{
-  "registry": "$REGISTRY_ID",
-  "invoice": "$INVOICE_ID",
-  "escrow_usdc": "$ESCROW_USDC_ID",
-  "escrow_xlm": "$ESCROW_XLM_ID",
-  "pool_usdc": "$POOL_USDC_ID",
-  "pool_xlm": "$POOL_XLM_ID",
-  "updated_at": "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
-}
-EOF
+python3 "$SCRIPT_DIR/deployment_manifest.py" write "$JSON_OUT" \
+  "$REGISTRY_ID" "$INVOICE_ID" "$ESCROW_USDC_ID" "$ESCROW_XLM_ID" "$POOL_USDC_ID" "$POOL_XLM_ID"
 
 if [ -f "scripts/maintainer/update-readme-addresses.sh" ]; then
   bash scripts/maintainer/update-readme-addresses.sh

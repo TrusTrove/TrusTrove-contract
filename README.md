@@ -163,21 +163,49 @@ repay_partial(invoice_id, amount) → bool
 repay_early(invoice_id) → bool
 trigger_default(invoice_id) → bool
 get(invoice_id) → Invoice
+exists(invoice_id) → bool  ← presence check, never errors or writes
 get_attestation(invoice_id) → Option<Attestation>
 get_attestation_age(invoice_id) → Option<AttestationAge>
 get_by_status(status, page, page_size) → Vec<Invoice>
 get_invoice_ids_by_status(status, cursor, page_size) → InvoiceIdPage  ← IDs + next cursor, 1..=50 per page
 get_by_issuer(address, page, page_size) → Vec<Invoice>
+get_issuer_invoice_ids(address, page, page_size) → Vec<invoice_id>  ← IDs only, 1..=50 per page
 get_by_buyer(address, page, page_size) → Vec<Invoice>
+get_buyer_invoice_ids(address, page, page_size) → Vec<invoice_id>  ← IDs only, 1..=50 per page
 get_invoice_count_by_issuer(address) → u32
 get_invoice_count_by_buyer(address) → u32
 get_counts() → Map<String, u64>
 get_remaining_balance(invoice_id) → u128
+get_amount_due(invoice_id) → u128  ← outstanding now: 0 unless funded and unpaid; unpaid balance after default
 get_financing_terms(invoice_id) → FinancingTerms
 get_lifecycle_timestamps(invoice_id) → LifecycleTimestamps
 get_seconds_to_maturity(invoice_id) → i128
 set_agent_registry_contract(agent_registry_contract) → bool
 ```
+
+#### `get_buyer_invoice_ids(address, page, page_size) → Vec<invoice_id>`
+- ID-only view of a buyer's invoices for buyers with too many invoices to fetch through `get_by_buyer` (#1151). It reads only the buyer index and never loads an `Invoice` record, so each call costs at most `page_size` index reads.
+- `page` is zero-based, and `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- IDs come back in creation order. The buyer index is append-only, so a page always returns the same IDs and new invoices only show up on later pages. For the same `page`/`page_size` the IDs are exactly those of `get_by_buyer`.
+- A page that starts at or past the end returns an empty `Vec`, as does a buyer with no invoices.
+- Every returned ID is an existing invoice whose `buyer` is `address` (the buyer is fixed at creation). Invoices where `address` is only the issuer are never included. Terminal invoices (repaid, cancelled, defaulted, expired) are included.
+- No authorization is required.
+
+Paging through all of a buyer's invoice IDs:
+
+```rust
+let mut page = 0;
+loop {
+    let ids = client.get_buyer_invoice_ids(&buyer, &page, &MAX_PAGE_SIZE);
+    // ... process ids ...
+    if ids.len() < MAX_PAGE_SIZE {
+        break; // last page
+    }
+    page += 1;
+}
+```
+
+`get_invoice_count_by_buyer(address)` gives the total up front if you need to size the last page.
 
 #### `list_for_financing(invoice_id, discount_bps) → bool`
 - Marks a `Created` invoice as available for financing (`Listed` status).
@@ -253,10 +281,49 @@ with `NotFound` (`#2`) for an unknown invoice.
 - `issuer` authorizes **once** for the whole batch, not once per entry.
 - Panics with `BatchSizeExceeded` (`#28`) above 50 entries.
 
+#### `exists(invoice_id) → bool`
+- Returns whether an invoice record exists for `invoice_id`, without calling `get` and trapping `NotFound` (`#2`) (#1153). For any ID, `exists` is `true` exactly when `get` succeeds.
+- An invoice exists once created, in any status: cancelled, expired, repaid and defaulted invoices still exist. Only the invoice record counts, not index or attestation entries that mention the ID.
+- A pure presence check that never writes storage. A missing ID creates nothing, and an existing ID's TTL is not extended (same as `get`).
+- No authorization is required.
+
+```rust
+// Instead of trapping the not-found error:
+// let found = client.try_get(&invoice_id).is_ok();
+if client.exists(&invoice_id) {
+    let invoice = client.get(&invoice_id);
+    // ...
+}
+```
+
 #### `batch_list_for_financing(entries) → Vec<invoice_id>`
 - `entries`: up to `MAX_BATCH_SIZE` (50) tuples of `(invoice_id, discount_bps)`.
 - **Tolerant**: entries that fail validation (already listed, no attestation, discount of 0 or above 5,000) are skipped, not reverted. Returns the IDs that failed, in entry order; an empty result means every entry listed.
 - Each listed invoice's own `issuer` authorizes, but only **once per distinct issuer** per batch.
+
+#### `get_issuer_invoice_ids(address, page, page_size) → Vec<invoice_id>`
+- ID-only view of an issuer's invoices for issuers with too many invoices to fetch through `get_by_issuer` (#1150). It reads only the issuer index and never loads an `Invoice` record, so each call costs at most `page_size` index reads.
+- `page` is zero-based, and `page_size` must be in `1..=MAX_PAGE_SIZE` (50). `0` or anything above 50 panics with `InvalidPageSize` (`#27`).
+- IDs come back in creation order. The issuer index is append-only, so a page always returns the same IDs and new invoices only show up on later pages. For the same `page`/`page_size` the IDs are exactly those of `get_by_issuer`.
+- A page that starts at or past the end returns an empty `Vec`, as does an issuer with no invoices.
+- Every returned ID is an existing invoice of `address`. Terminal invoices (repaid, cancelled, defaulted, expired) are included.
+- No authorization is required.
+
+Paging through all of an issuer's invoice IDs:
+
+```rust
+let mut page = 0;
+loop {
+    let ids = client.get_issuer_invoice_ids(&issuer, &page, &MAX_PAGE_SIZE);
+    // ... process ids ...
+    if ids.len() < MAX_PAGE_SIZE {
+        break; // last page
+    }
+    page += 1;
+}
+```
+
+`get_invoice_count_by_issuer(address)` gives the total up front if you need to size the last page.
 
 ### escrow_contract
 
@@ -271,8 +338,15 @@ pause() / unpause()                  ← admin only (issue #716)
 get_locked(invoice_id) → u128
 get_lock_record(invoice_id) → Option<EscrowRecord>
 get_lock_expiration(invoice_id) → Option<u64>
+get_custody_coverage(invoice_id) → CustodyCoverage   ← preflight only, no transfer or storage write (#1298)
+get_last_release_recipient(invoice_id) → Option<Address>   ← most recent successful release/default (#1296)
+get_min_lock_amount() → u128
 get_release_authorization(caller) → ReleaseAuthorization   ← preview only, never replaces auth (#1198)
 ```
+
+`set_min_lock_amount(min_amount)` is admin-only and applies to future `lock`
+calls (#1297); the default `0` preserves the previous non-zero-amount rule, and
+locks created earlier remain releasable.
 
 When the escrow is paused, `initialize`, `lock`, `release_to_issuer`,
 `release_to_pool`, and `handle_default` all revert with `ContractPaused`.
@@ -299,6 +373,8 @@ set_min_discount(bps) → bool               ← admin only, yield floor enforce
 get_min_discount_bps() → u32
 set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted, enforced in fund_invoice (#1184)
 get_max_time_to_maturity() → u64
+set_max_invoice_exposure(max_bps) → bool   ← admin only, 0 = unrestricted, enforced in fund_invoice (#1180)
+get_max_invoice_exposure_bps() → u32
 get_stats() → PoolStats
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
 get_max_fundable_amount() → u128        ← available principal under liquidity and utilization caps
@@ -404,6 +480,10 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `mark_funded` | `mark_funded(invoice_id: BytesN<32>, pool_address: Address, asset_address: Address, funded_amount: u128) -> bool` |
 | Invoice | `mark_shipped` | `mark_shipped(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `confirm_delivery` | `confirm_delivery(invoice_id: BytesN<32>, confirmer: Address) -> bool` |
+| Invoice | `get_issuer_confirmed_at` | `get_issuer_confirmed_at(invoice_id: BytesN<32>) -> Option<u64>` |
+| Invoice | `get_default_eligibility` | `get_default_eligibility(invoice_id: BytesN<32>) -> DefaultEligibility` |
+| Invoice | `record_delivery_evidence` | `record_delivery_evidence(invoice_id: BytesN<32>, actor: Address, evidence_hash: BytesN<32>) -> bool` |
+| Invoice | `get_delivery_evidence` | `get_delivery_evidence(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Invoice | `repay_partial` | `repay_partial(invoice_id: BytesN<32>, amount: u128) -> bool` |
 | Invoice | `repay` | `repay(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `repay_early` | `repay_early(invoice_id: BytesN<32>) -> bool` |
@@ -422,6 +502,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_face_value` | `get_face_value(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_remaining_balance` | `get_remaining_balance(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_repaid_amount` | `get_repaid_amount(invoice_id: BytesN<32>) -> u128` |
+| Invoice | `get_amount_due` | `get_amount_due(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get_discount_bps` | `get_discount_bps(invoice_id: BytesN<32>) -> u32` |
 | Invoice | `get_funding_terms` | `get_funding_terms(invoice_id: BytesN<32>) -> (u32, u128, u32)` |
 | Invoice | `get_funding_context` | `get_funding_context(invoice_id: BytesN<32>) -> FundingContext` |
@@ -434,12 +515,15 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
+| Invoice | `exists` | `exists(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_created_at_range` | `get_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_by_issuer` | `get_by_issuer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_issuer_invoice_ids` | `get_issuer_invoice_ids(address: Address, page: u32, page_size: u32) -> Vec<BytesN<32>>` |
 | Invoice | `get_by_buyer` | `get_by_buyer(address: Address, page: u32, page_size: u32) -> Vec<Invoice>` |
+| Invoice | `get_buyer_invoice_ids` | `get_buyer_invoice_ids(address: Address, page: u32, page_size: u32) -> Vec<BytesN<32>>` |
 | Invoice | `get_invoice_count_by_issuer` | `get_invoice_count_by_issuer(address: Address) -> u32` |
 | Invoice | `get_invoice_count_by_buyer` | `get_invoice_count_by_buyer(address: Address) -> u32` |
 | Invoice | `get_counts` | `get_counts() -> Map<String, u64>` |
@@ -463,9 +547,14 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `handle_default` | `handle_default(invoice_id: BytesN<32>, caller: Address) -> bool` |
 | Escrow | `set_timeout_window` | `set_timeout_window(window: u64) -> ()` |
 | Escrow | `get_timeout_window` | `get_timeout_window() -> u64` |
+| Escrow | `set_min_lock_amount` | `set_min_lock_amount(min_amount: u128) -> ()` |
+| Escrow | `get_min_lock_amount` | `get_min_lock_amount() -> u128` |
+| Escrow | `get_last_release_recipient` | `get_last_release_recipient(invoice_id: BytesN<32>) -> Option<Address>` |
+| Escrow | `get_custody_coverage` | `get_custody_coverage(invoice_id: BytesN<32>) -> CustodyCoverage` |
 | Escrow | `release_after_timeout` | `release_after_timeout(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `pause` | `pause() -> ()` |
 | Escrow | `unpause` | `unpause() -> ()` |
+| Escrow | `recover_token` | `recover_token(token: Address, to: Address, amount: u128) -> bool` |
 | Escrow | `get_lock_record` | `get_lock_record(invoice_id: BytesN<32>) -> Option<EscrowRecord>` |
 | Escrow | `has_lock` | `has_lock(invoice_id: BytesN<32>) -> bool` |
 | Escrow | `get_locked` | `get_locked(invoice_id: BytesN<32>) -> u128` |
@@ -476,6 +565,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `get_custody_balance` | `get_custody_balance() -> i128` |
 | Escrow | `get_lock_checksum` | `get_lock_checksum(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
 | Escrow | `get_history` | `get_history(invoice_id: BytesN<32>) -> Vec<EscrowEvent>` |
+| Escrow | `get_history_count` | `get_history_count(invoice_id: BytesN<32>) -> u32` |
 | Escrow | `get_history_page` | `get_history_page(invoice_id: BytesN<32>, offset: u32, limit: u32) -> (Vec<EscrowEvent>, u32)` |
 | Escrow | `get_release_authorization` | `get_release_authorization(caller: Address) -> ReleaseAuthorization` |
 | Pool | `__constructor` | `__constructor(admin: Address, invoice_contract: Address, escrow_contract: Address, funding_asset: Address, registry_contract: Address, treasury: Address, min_initial_deposit: u128, share_name: String, share_symbol: String, share_decimals: u32) -> ()` |
@@ -529,6 +619,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_treasury` | `get_treasury() -> Address` |
 | Pool | `set_max_time_to_maturity` | `set_max_time_to_maturity(max_seconds: u64) -> bool` |
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
+| Pool | `set_max_invoice_exposure` | `set_max_invoice_exposure(max_bps: u32) -> bool` |
+| Pool | `get_max_invoice_exposure_bps` | `get_max_invoice_exposure_bps() -> u32` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
 | Pool | `get_pool_config` | `get_pool_config() -> PoolConfig` |
@@ -539,7 +631,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 207 public entry points across five deployable contracts.**
+**Total: 223 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -655,6 +747,8 @@ Invoice status: → Repaid
 **Yield Floor (min_discount_bps):** Defaults to 0 bps (disabled) at deployment, so funding behavior is unchanged until an admin opts in. `fund_invoice` is permissionless and, before this mechanism, accepted any listed invoice regardless of discount — an issuer/buyer pair could list at 1 bp and deploy LP capital for near-zero yield. The stored admin can set a floor between 0 and 5000 bps via `pool.set_min_discount(bps)` (bounded by the invoice contract's 5000-bps discount cap); `fund_invoice` then rejects any invoice whose `discount_bps` is below the floor with `PoolError::DiscountBelowMinimum`, and `pool.get_min_discount_bps()` reads the current value. Choosing the actual floor value is an admin/policy decision (#829).
 
 **Maximum Time to Maturity (max_time_to_maturity):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap how far out a newly funded invoice may be due via `pool.set_max_time_to_maturity(max_seconds)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose remaining time to maturity (`due_date - now`) exceeds the maximum with `PoolError::MaturityTooLong`. An invoice exactly at the maximum is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded are unaffected by a later change. `pool.get_max_time_to_maturity()` reads the current value (#1184).
+
+**Per-Invoice Exposure Limit (max_invoice_exposure_bps):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap the maximum percentage of `TotalDeposits` (0–10,000 bps) that a single newly funded invoice may consume via `pool.set_max_invoice_exposure(max_bps)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose `funded_amount` exceeds `total_deposits * max_bps / 10_000` with `PoolError::InvoiceExposureLimitExceeded`, even when overall pool utilization is low. An invoice exactly at the limit is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded remain valid. `pool.get_max_invoice_exposure_bps()` reads the current value (#1180).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
@@ -983,7 +1077,7 @@ If you have questions, reach us on Telegram: **[t.me/trusttrove](https://t.me/tr
 | 24 | `CrossContractCallFailed` | Inter-contract call to Escrow or Pool failed |
 | 25 | `RepaymentExceedsBalance` | Repayment amount exceeds remaining invoice balance |
 | 26 | `InvalidConfiguration` | Configuration value is invalid |
-| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status` |
+| 27 | `InvalidPageSize` | `page_size` exceeds `MAX_PAGE_SIZE` on a paginated `get_by_*` query, or is `0` on `get_invoice_ids_by_status`, `get_issuer_invoice_ids`, or `get_buyer_invoice_ids` |
 | 28 | `BatchSizeExceeded` | Batch entry point was given more than `MAX_BATCH_SIZE` (50) entries |
 | 29 | `PayloadBindingMismatch` | Attestation payload bound to a different contract address or network (issue #822) |
 | 30 | `AttestationExpired` | Attestation payload/record past its `valid_until` at submission or listing (issue #823) |
