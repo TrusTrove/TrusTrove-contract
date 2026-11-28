@@ -37,48 +37,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "bF1C2wR7"
-                      },
-                      "val": {
-                        "string": "FE5WBJxJL"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_1"
-                      },
-                      "val": {
-                        "string": "value_1"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_2"
-                      },
-                      "val": {
-                        "string": "value_2"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_3"
-                      },
-                      "val": {
-                        "string": "value_3"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_4"
-                      },
-                      "val": {
-                        "string": "value_4"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -174,48 +133,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "bF1C2wR7"
-                            },
-                            "val": {
-                              "string": "FE5WBJxJL"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_1"
-                            },
-                            "val": {
-                              "string": "value_1"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_2"
-                            },
-                            "val": {
-                              "string": "value_2"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_3"
-                            },
-                            "val": {
-                              "string": "value_3"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_4"
-                            },
-                            "val": {
-                              "string": "value_4"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -347,6 +265,51 @@
                 "durability": "persistent",
                 "val": {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ProfileVersion"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ProfileVersion"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": "1"
                 }
               }
             },

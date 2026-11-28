@@ -942,6 +942,11 @@ impl RegistryContract {
         profile.set_revoked(true);
         let verified_since_key = DataKey::VerifiedSince(address.clone());
         env.storage().persistent().remove(&verified_since_key);
+        // A revoked profile has no current evidence decision; the commitment
+        // must not survive as if it still justified verification (#1126).
+        env.storage()
+            .persistent()
+            .remove(&DataKey::VerificationReason(address.clone()));
         env.storage().persistent().set(&key, &profile);
         env.storage()
             .persistent()
@@ -1026,6 +1031,11 @@ impl RegistryContract {
 
     /// Sets (or clears) the verification flag on a registered profile.
     ///
+    /// Equivalent to [`verify_profile_with_reason`](Self::verify_profile_with_reason)
+    /// with no evidence commitment. Kept so existing callers and the stored
+    /// `Profile` layout are unchanged; the emitted `profile_verified` event
+    /// carries `None` as its reason hash.
+    ///
     /// # Arguments
     /// * `env` - The Soroban environment.
     /// * `caller` - The address authorizing the call. Must be either the
@@ -1062,43 +1072,120 @@ impl RegistryContract {
     /// client.verify_profile(&verifier, &issuer, &true);
     /// ```
     pub fn verify_profile(env: Env, caller: Address, address: Address, verify: bool) -> bool {
-        require_not_paused(&env);
-        Self::require_not_frozen(&env);
-        Self::require_admin_or_verifier(&env, &caller);
-        caller.require_auth();
-        let key = DataKey::Profile(address.clone());
-        let mut profile: Profile = env
+        Self::apply_verification(&env, caller, address, verify, None)
+    }
+
+    /// Sets verification with an optional privacy-preserving evidence hash.
+    ///
+    /// Auditors need a commitment to the documents behind a KYC decision
+    /// without putting those documents on chain (#1126). `reason_hash` is a
+    /// fixed 32-byte digest (for example a SHA-256 of the evidence bundle);
+    /// only that digest is stored under `DataKey::VerificationReason(address)`
+    /// and echoed in the `profile_verified` event. Passing `None` removes any
+    /// previously stored commitment, so a decision never inherits stale
+    /// evidence. Un-verification always clears the commitment.
+    ///
+    /// The stored hash is exposed by
+    /// [`get_verification_reason`](Self::get_verification_reason) only while
+    /// the profile is currently verified. The packed `Profile` flags and the
+    /// other verification storage keys are unchanged.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `caller` - Admin or verifier authorized to make the decision.
+    /// * `address` - The registered profile being verified / un-verified.
+    /// * `verify` - `true` to verify (clears revoked), `false` to un-verify
+    ///   (sets revoked).
+    /// * `reason_hash` - Optional 32-byte evidence commitment. `None` is
+    ///   accepted and clears any previously stored commitment.
+    ///
+    /// # Auth
+    /// * Requires `caller.require_auth()`, where `caller` is the admin or the
+    ///   verifier (#732).
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    /// * `RegistryError::Unauthorized` if `caller` is neither the admin nor
+    ///   the verifier.
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    ///
+    /// # Returns
+    /// * `bool` - `true` when the profile is updated. Repeated calls remain
+    ///   audit events (#987) and re-emit `profile_verified` with the supplied
+    ///   hash.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let hash = BytesN::from_array(&env, &[7u8; 32]);
+    /// client.verify_profile_with_reason(&verifier, &issuer, &true, &Some(hash));
+    /// ```
+    pub fn verify_profile_with_reason(
+        env: Env,
+        caller: Address,
+        address: Address,
+        verify: bool,
+        reason_hash: Option<BytesN<32>>,
+    ) -> bool {
+        Self::apply_verification(&env, caller, address, verify, reason_hash)
+    }
+
+    /// Returns the evidence hash committed by the current verification.
+    ///
+    /// Read-only companion to
+    /// [`verify_profile_with_reason`](Self::verify_profile_with_reason). Only
+    /// the 32-byte digest is returned; raw documents are never placed on
+    /// chain. Like [`get_verified_since`](Self::get_verified_since), this view
+    /// reports `None` unless the profile is currently verified and not
+    /// revoked, so a commitment from an older decision cannot be mistaken for
+    /// current evidence.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `address` - The registered address to inspect.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotInitialized` if the contract has not been
+    ///   initialized.
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    ///
+    /// # Returns
+    /// * `Option<BytesN<32>>` - Evidence hash for the current verification,
+    ///   or `None` when no hash was supplied or the profile is not verified.
+    ///
+    /// # Example
+    /// ```ignore
+    /// assert_eq!(client.get_verification_reason(&issuer), Some(hash));
+    /// ```
+    pub fn get_verification_reason(env: Env, address: Address) -> Option<BytesN<32>> {
+        Self::require_initialized(&env);
+        let profile_key = DataKey::Profile(address.clone());
+        let profile: Profile = env
             .storage()
             .persistent()
-            .get(&key)
+            .get(&profile_key)
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
-        let flags_before = profile.packed_flags;
-        let verified_since_key = DataKey::VerifiedSince(address.clone());
-        profile.set_verified(verify);
-        if verify {
-            profile.set_revoked(false);
-            env.storage()
-                .persistent()
-                .set(&verified_since_key, &env.ledger().timestamp());
-            env.storage().persistent().extend_ttl(
-                &verified_since_key,
-                TTL_THRESHOLD,
-                TTL_EXTEND_TO,
-            );
-        } else {
-            profile.set_revoked(true);
-            env.storage().persistent().remove(&verified_since_key);
-        }
-        env.storage().persistent().set(&key, &profile);
         env.storage()
             .persistent()
-            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
-        events::profile_verified(&env, &address, verify);
-        if profile.packed_flags != flags_before {
-            Self::bump_profile_version(&env, &address);
+            .extend_ttl(&profile_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let reason_key = DataKey::VerificationReason(address);
+        let reason: Option<BytesN<32>> = env.storage().persistent().get(&reason_key);
+        if reason.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&reason_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         }
         Self::extend_instance_ttl(&env);
-        true
+
+        if profile.verified() && !profile.revoked() {
+            reason
+        } else {
+            None
+        }
     }
 
     /// Transfers admin ownership to a new address.
@@ -1779,5 +1866,71 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&count_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    }
+
+    /// Shared implementation of both verification entry points (#1126).
+    ///
+    /// Keeping the decision logic in one place guarantees that the legacy
+    /// `verify_profile` path and the reason-aware path apply identical auth,
+    /// profile flags, `VerifiedSince` handling and event emission.
+    fn apply_verification(
+        env: &Env,
+        caller: Address,
+        address: Address,
+        verify: bool,
+        reason_hash: Option<BytesN<32>>,
+    ) -> bool {
+        require_not_paused(env);
+        Self::require_not_frozen(env);
+        Self::require_admin_or_verifier(env, &caller);
+        caller.require_auth();
+        let key = DataKey::Profile(address.clone());
+        let mut profile: Profile = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or_else(|| panic_with_error!(env, RegistryError::NotFound));
+        let flags_before = profile.packed_flags;
+        let verified_since_key = DataKey::VerifiedSince(address.clone());
+        let reason_key = DataKey::VerificationReason(address.clone());
+        let effective_hash = if verify { reason_hash.clone() } else { None };
+
+        profile.set_verified(verify);
+        if verify {
+            profile.set_revoked(false);
+            env.storage()
+                .persistent()
+                .set(&verified_since_key, &env.ledger().timestamp());
+            env.storage().persistent().extend_ttl(
+                &verified_since_key,
+                TTL_THRESHOLD,
+                TTL_EXTEND_TO,
+            );
+            match reason_hash {
+                Some(hash) => {
+                    env.storage().persistent().set(&reason_key, &hash);
+                    env.storage().persistent().extend_ttl(
+                        &reason_key,
+                        TTL_THRESHOLD,
+                        TTL_EXTEND_TO,
+                    );
+                }
+                None => env.storage().persistent().remove(&reason_key),
+            }
+        } else {
+            profile.set_revoked(true);
+            env.storage().persistent().remove(&verified_since_key);
+            env.storage().persistent().remove(&reason_key);
+        }
+        env.storage().persistent().set(&key, &profile);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::profile_verified(env, &address, verify, &effective_hash);
+        if profile.packed_flags != flags_before {
+            Self::bump_profile_version(env, &address);
+        }
+        Self::extend_instance_ttl(env);
+        true
     }
 }

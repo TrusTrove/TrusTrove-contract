@@ -1084,16 +1084,18 @@ Emitted when a batch registration completes.
 
 ### `profile_verified`
 
-Emitted when a profile's verification status is checked/updated.
+Emitted when a profile's verification status is checked/updated, including
+repeat decisions (#987). Since #1126 the data payload also carries the optional
+evidence commitment; legacy `verify_profile()` calls always report `None`.
 
 | Field | Type | Description |
 |-------|------|-------------|
 | **Topics** | | |
 | `topic[0]` | `Symbol` | `"profile_verified"` |
 | `topic[1]` | `Address` | Profile address |
-| **Data** | `bool` | Verification status (true = verified) |
+| **Data** | `(bool, Option<BytesN<32>>)` | `(verification_status, reason_hash)`; the hash is a 32-byte digest of off-chain evidence, never a raw document |
 
-**Emitted by:** `verify_profile()` in `contracts/registry/src/lib.rs` — callable by the admin or the verifier role (#732).
+**Emitted by:** `verify_profile()` and `verify_profile_with_reason()` in `contracts/registry/src/lib.rs` — callable by the admin or the verifier role (#732).
 
 ---
 

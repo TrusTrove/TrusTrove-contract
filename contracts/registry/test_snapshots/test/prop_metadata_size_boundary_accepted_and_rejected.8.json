@@ -40,98 +40,10 @@
                   "map": [
                     {
                       "key": {
-                        "string": "V0P_hT8_e_"
+                        "string": "key_0"
                       },
                       "val": {
-                        "string": "710ix_w4aS7By"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "_6___"
-                      },
-                      "val": {
-                        "string": "fJYLNc73g_v_09F_qWEE"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_10"
-                      },
-                      "val": {
-                        "string": "value_10"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_11"
-                      },
-                      "val": {
-                        "string": "value_11"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_3"
-                      },
-                      "val": {
-                        "string": "value_3"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_4"
-                      },
-                      "val": {
-                        "string": "value_4"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_5"
-                      },
-                      "val": {
-                        "string": "value_5"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_6"
-                      },
-                      "val": {
-                        "string": "value_6"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_7"
-                      },
-                      "val": {
-                        "string": "value_7"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_8"
-                      },
-                      "val": {
-                        "string": "value_8"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "key_9"
-                      },
-                      "val": {
-                        "string": "value_9"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "nWNbx_e_a"
-                      },
-                      "val": {
-                        "string": "r1_yBhin_7R_sOW_jiE"
+                        "string": "value_0"
                       }
                     }
                   ]
@@ -233,98 +145,10 @@
                         "map": [
                           {
                             "key": {
-                              "string": "V0P_hT8_e_"
+                              "string": "key_0"
                             },
                             "val": {
-                              "string": "710ix_w4aS7By"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "_6___"
-                            },
-                            "val": {
-                              "string": "fJYLNc73g_v_09F_qWEE"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_10"
-                            },
-                            "val": {
-                              "string": "value_10"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_11"
-                            },
-                            "val": {
-                              "string": "value_11"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_3"
-                            },
-                            "val": {
-                              "string": "value_3"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_4"
-                            },
-                            "val": {
-                              "string": "value_4"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_5"
-                            },
-                            "val": {
-                              "string": "value_5"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_6"
-                            },
-                            "val": {
-                              "string": "value_6"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_7"
-                            },
-                            "val": {
-                              "string": "value_7"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_8"
-                            },
-                            "val": {
-                              "string": "value_8"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "key_9"
-                            },
-                            "val": {
-                              "string": "value_9"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "nWNbx_e_a"
-                            },
-                            "val": {
-                              "string": "r1_yBhin_7R_sOW_jiE"
+                              "string": "value_0"
                             }
                           }
                         ]
@@ -459,6 +283,51 @@
                 "durability": "persistent",
                 "val": {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ProfileVersion"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ProfileVersion"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": "1"
                 }
               }
             },

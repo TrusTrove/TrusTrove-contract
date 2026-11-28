@@ -72,6 +72,13 @@ All contracts follow a consistent TTL extension pattern:
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `Profile(Address)` | `Profile` | Profile record keyed by Stellar address |
+| `VerifiedSince(Address)` | `u64` | Timestamp of the latest verification, cleared on revocation |
+| `VerificationReason(Address)` | `BytesN<32>` | Optional commitment to the evidence for the current verification (#1126); raw documents are never stored |
+
+`VerificationReason` is written only by `verify_profile_with_reason(..., true,
+Some(hash))`, cleared by `None`, un-verification and `revoke`, and exposed by
+`get_verification_reason(address)` only while the profile is verified. It is a
+separate key, so existing `Profile` entries keep their packed-flag layout.
 
 #### Profile Update Sequence Number (#1128)
 
