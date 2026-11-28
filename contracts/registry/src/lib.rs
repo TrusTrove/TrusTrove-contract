@@ -696,6 +696,43 @@ impl RegistryContract {
         }
     }
 
+    /// Returns the ledger timestamp of the most recent verification-status
+    /// transition for `address`.
+    ///
+    /// The timestamp is retained when a profile is revoked and is updated when
+    /// `verify_profile`, `revoke`, or `reinstate` changes its status. Registration,
+    /// metadata edits, and verification calls that leave the status unchanged
+    /// do not update it. Profiles registered before this value was introduced
+    /// return `None` until their next status transition.
+    ///
+    /// # Auth
+    /// No authorization is required.
+    ///
+    /// # Panics
+    /// * `RegistryError::NotFound` if no profile is stored for `address`.
+    pub fn get_verification_changed_at(env: Env, address: Address) -> Option<u64> {
+        Self::require_initialized(&env);
+        let profile_key = DataKey::Profile(address.clone());
+        let _: Profile = env
+            .storage()
+            .persistent()
+            .get(&profile_key)
+            .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
+        env.storage()
+            .persistent()
+            .extend_ttl(&profile_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let changed_at_key = DataKey::VerificationChangedAt(address);
+        let changed_at: Option<u64> = env.storage().persistent().get(&changed_at_key);
+        if changed_at.is_some() {
+            env.storage()
+                .persistent()
+                .extend_ttl(&changed_at_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        }
+        Self::extend_instance_ttl(&env);
+        changed_at
+    }
+
     pub fn get_verification_status(env: Env, address: Address) -> VerificationStatus {
         let key = DataKey::Profile(address);
         match env.storage().persistent().get::<_, Profile>(&key) {
@@ -935,6 +972,14 @@ impl RegistryContract {
                     TTL_EXTEND_TO,
                 );
             }
+            let changed_at_key = DataKey::VerificationChangedAt(address.clone());
+            if env.storage().persistent().has(&changed_at_key) {
+                env.storage().persistent().extend_ttl(
+                    &changed_at_key,
+                    TTL_THRESHOLD,
+                    TTL_EXTEND_TO,
+                );
+            }
             Self::extend_instance_ttl(&env);
             return true;
         }
@@ -942,6 +987,13 @@ impl RegistryContract {
         profile.set_revoked(true);
         let verified_since_key = DataKey::VerifiedSince(address.clone());
         env.storage().persistent().remove(&verified_since_key);
+        let changed_at_key = DataKey::VerificationChangedAt(address.clone());
+        env.storage()
+            .persistent()
+            .set(&changed_at_key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .extend_ttl(&changed_at_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         env.storage().persistent().set(&key, &profile);
         env.storage()
             .persistent()
@@ -1014,6 +1066,13 @@ impl RegistryContract {
         env.storage()
             .persistent()
             .extend_ttl(&verified_since_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        let changed_at_key = DataKey::VerificationChangedAt(address.clone());
+        env.storage()
+            .persistent()
+            .set(&changed_at_key, &env.ledger().timestamp());
+        env.storage()
+            .persistent()
+            .extend_ttl(&changed_at_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         env.storage().persistent().set(&key, &profile);
         env.storage()
             .persistent()
@@ -1074,6 +1133,8 @@ impl RegistryContract {
             .unwrap_or_else(|| panic_with_error!(&env, RegistryError::NotFound));
         let flags_before = profile.packed_flags;
         let verified_since_key = DataKey::VerifiedSince(address.clone());
+        let should_be_revoked = !verify;
+        let status_changed = profile.verified() != verify || profile.revoked() != should_be_revoked;
         profile.set_verified(verify);
         if verify {
             profile.set_revoked(false);
@@ -1088,6 +1149,15 @@ impl RegistryContract {
         } else {
             profile.set_revoked(true);
             env.storage().persistent().remove(&verified_since_key);
+        }
+        if status_changed {
+            let changed_at_key = DataKey::VerificationChangedAt(address.clone());
+            env.storage()
+                .persistent()
+                .set(&changed_at_key, &env.ledger().timestamp());
+            env.storage()
+                .persistent()
+                .extend_ttl(&changed_at_key, TTL_THRESHOLD, TTL_EXTEND_TO);
         }
         env.storage().persistent().set(&key, &profile);
         env.storage()

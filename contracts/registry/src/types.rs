@@ -137,6 +137,8 @@ pub enum DataKey {
     /// Active metadata key policy (#1120); see [`MetadataKeyPolicy`]. Absent
     /// means [`MetadataKeyPolicy::Unrestricted`].
     MetadataKeyPolicy,
+    /// Ledger timestamp of the most recent verification-status transition.
+    VerificationChangedAt(Address),
 }
 
 /// A proposed admin change waiting out its delay (#1124).
