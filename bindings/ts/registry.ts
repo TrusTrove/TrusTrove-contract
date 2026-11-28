@@ -77,6 +77,7 @@ export interface RegistryClient {
   get_profile_count(args: { role: Role }): Promise<u32>;
   get_profile_version(args: { address: Address }): Promise<u64>;
   get_role(args: { address: Address }): Promise<Option<Role>>;
+  get_verification_reason(args: { address: Address }): Promise<Option<BytesN<32>>>;
   get_verification_status(args: { address: Address }): Promise<VerificationStatus>;
   get_verified_since(args: { address: Address }): Promise<Option<u64>>;
   get_verifier(): Promise<Option<Address>>;
@@ -103,6 +104,7 @@ export interface RegistryClient {
   update_profile(args: { address: Address; metadata: Map<string, string> }): Promise<boolean>;
   upgrade(args: { new_wasm_hash: BytesN<32> }): Promise<void>;
   verify_profile(args: { caller: Address; address: Address; verify: boolean }): Promise<boolean>;
+  verify_profile_with_reason(args: { caller: Address; address: Address; verify: boolean; reason_hash: Option<BytesN<32>> }): Promise<boolean>;
 }
 
-export const REGISTRY_METHODS = ["__constructor", "accept_admin", "batch_register_buyers", "batch_register_issuers", "cancel_admin_transfer", "freeze_admin", "get_admin", "get_allowed_metadata_keys", "get_guardian", "get_metadata_key_count", "get_metadata_key_policy", "get_pending_admin_transfer", "get_profile", "get_profile_count", "get_profile_version", "get_role", "get_verification_status", "get_verified_since", "get_verifier", "is_admin_frozen", "is_verified", "list_profiles", "pause", "propose_admin", "register_buyer", "register_issuer", "reinstate", "remove_guardian", "remove_metadata_key", "remove_verifier", "revoke", "set_guardian", "set_metadata_key_policy", "set_verifier", "transfer_admin", "transfer_ownership", "unfreeze_admin", "unpause", "update_metadata", "update_profile", "upgrade", "verify_profile"] as const;
+export const REGISTRY_METHODS = ["__constructor", "accept_admin", "batch_register_buyers", "batch_register_issuers", "cancel_admin_transfer", "freeze_admin", "get_admin", "get_allowed_metadata_keys", "get_guardian", "get_metadata_key_count", "get_metadata_key_policy", "get_pending_admin_transfer", "get_profile", "get_profile_count", "get_profile_version", "get_role", "get_verification_reason", "get_verification_status", "get_verified_since", "get_verifier", "is_admin_frozen", "is_verified", "list_profiles", "pause", "propose_admin", "register_buyer", "register_issuer", "reinstate", "remove_guardian", "remove_metadata_key", "remove_verifier", "revoke", "set_guardian", "set_metadata_key_policy", "set_verifier", "transfer_admin", "transfer_ownership", "unfreeze_admin", "unpause", "update_metadata", "update_profile", "upgrade", "verify_profile", "verify_profile_with_reason"] as const;

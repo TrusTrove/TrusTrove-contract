@@ -37,32 +37,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "string": "__m_k"
-                      },
-                      "val": {
-                        "string": "0h"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "cr_lu0o1"
-                      },
-                      "val": {
-                        "string": "P_iS3U_qfp3sfEXb"
-                      }
-                    },
-                    {
-                      "key": {
-                        "string": "kb3_1"
-                      },
-                      "val": {
-                        "string": "_tIZ506BqVNjXpwUI"
-                      }
-                    }
-                  ]
+                  "map": []
                 }
               ]
             }
@@ -159,32 +134,7 @@
                         "symbol": "metadata"
                       },
                       "val": {
-                        "map": [
-                          {
-                            "key": {
-                              "string": "__m_k"
-                            },
-                            "val": {
-                              "string": "0h"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "cr_lu0o1"
-                            },
-                            "val": {
-                              "string": "P_iS3U_qfp3sfEXb"
-                            }
-                          },
-                          {
-                            "key": {
-                              "string": "kb3_1"
-                            },
-                            "val": {
-                              "string": "_tIZ506BqVNjXpwUI"
-                            }
-                          }
-                        ]
+                        "map": []
                       }
                     },
                     {
@@ -316,6 +266,51 @@
                 "durability": "persistent",
                 "val": {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ProfileVersion"
+                },
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ProfileVersion"
+                    },
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": "1"
                 }
               }
             },
