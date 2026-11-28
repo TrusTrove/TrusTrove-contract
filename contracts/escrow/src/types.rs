@@ -52,6 +52,10 @@ pub enum EscrowAction {
 ///
 /// History is stored under [`DataKey::History`] as a `Vec<EscrowEvent>`
 /// and is append-only — see [`EscrowContract::append_history`].
+///
+/// Kept unchanged for wire/ABI and storage backwards compatibility; see
+/// [`EscrowEventV2`] for the versioned entry that also exposes the ledger
+/// sequence recorded under [`DataKey::HistoryLedgers`].
 #[contracttype]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EscrowEvent {
@@ -63,6 +67,35 @@ pub struct EscrowEvent {
     pub amount: u128,
     /// Unix timestamp (seconds) when this event was recorded.
     pub timestamp: u64,
+    /// The caller address that triggered this event (for DefaultHandled events).
+    pub caller: Option<soroban_sdk::Address>,
+}
+
+/// Versioned escrow history entry that includes the ledger sequence at which
+/// the action was recorded (#1295).
+///
+/// Returned by [`crate::EscrowContract::get_history_v2`] and
+/// [`crate::EscrowContract::get_history_page_v2`]. Multiple escrow actions executed
+/// within the same ledger or across ledgers with identical timestamps can be
+/// ordered deterministically by combining append position with
+/// `ledger_sequence`.
+///
+/// Legacy history entries written before [`DataKey::HistoryLedgers`] existed
+/// continue to decode cleanly with `ledger_sequence == 0`.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EscrowEventV2 {
+    /// 32-byte invoice identifier this event relates to.
+    pub invoice_id: BytesN<32>,
+    /// The action that produced this event. See [`EscrowAction`].
+    pub action: EscrowAction,
+    /// Amount of USDC (in stroops) involved in this action.
+    pub amount: u128,
+    /// Unix timestamp (seconds) when this event was recorded.
+    pub timestamp: u64,
+    /// Ledger sequence (`env.ledger().sequence()`) when this event was
+    /// recorded, or `0` for legacy entries created before #1295.
+    pub ledger_sequence: u32,
     /// The caller address that triggered this event (for DefaultHandled events).
     pub caller: Option<soroban_sdk::Address>,
 }
@@ -164,6 +197,25 @@ pub enum DataKey {
     /// **Storage-key layout:** appended at the end of the unnumbered enum
     /// (index 11) — see the note on [`DataKey::IssuerReleased`].
     LastReleaseRecipient(BytesN<32>),
+    /// Ledger sequence recorded for each entry in [`DataKey::History`] (#1295).
+    /// The inner `BytesN<32>` is the invoice ID. Value type: `Vec<u32>`.
+    ///
+    /// Stored alongside [`DataKey::History`] rather than adding a field to
+    /// [`EscrowEvent`] so deployed `Vec<EscrowEvent>` entries remain decodable
+    /// without migration and existing `get_history` / `get_history_page`
+    /// consumers keep their wire layout.
+    ///
+    /// Index `i` holds the `env.ledger().sequence()` (`u32`) at which
+    /// `History[i]` was appended. Entries written before this key existed have
+    /// no sequence and report `0` ("unknown") through
+    /// [`crate::EscrowContract::get_history_v2`] and
+    /// [`crate::EscrowContract::get_history_page_v2`]. When a new entry is appended to
+    /// an invoice with legacy history, missing prefix slots are padded with `0`
+    /// before pushing the new ledger sequence so indices remain aligned.
+    ///
+    /// **Storage-key layout:** appended at the end of the unnumbered enum
+    /// (index 12) — see the note on [`DataKey::IssuerReleased`].
+    HistoryLedgers(BytesN<32>),
 }
 
 /// Which escrow write entry points an address may call under the current

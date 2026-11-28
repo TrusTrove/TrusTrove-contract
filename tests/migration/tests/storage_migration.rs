@@ -336,6 +336,18 @@ fn v1_state_survives_wasm_upgrade_and_stays_writable() {
     assert_eq!(escrow.get_locked(&second_invoice), LOCK_AMOUNT);
     assert_eq!(escrow.get_locked(&d.invoice_id), LOCK_AMOUNT);
 
+    // Versioned history (#1295): pre-upgrade v1 history decodes with
+    // ledger_sequence == 0, while post-upgrade writes record the current ledger.
+    let v1_history = escrow.get_history_v2(&d.invoice_id);
+    assert_eq!(v1_history.len(), 1);
+    assert_eq!(v1_history.get(0).unwrap().ledger_sequence, 0);
+    let v2_history = escrow.get_history_v2(&second_invoice);
+    assert_eq!(v2_history.len(), 1);
+    assert_eq!(
+        v2_history.get(0).unwrap().ledger_sequence,
+        d.env.ledger().sequence()
+    );
+
     let shares_before = pool.balance(&d.lp);
     pool.deposit(&d.lp, &LP_DEPOSIT);
     assert!(pool.balance(&d.lp) > shares_before);

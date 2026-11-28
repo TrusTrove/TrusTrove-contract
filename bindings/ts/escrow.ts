@@ -53,6 +53,15 @@ export interface EscrowEvent {
   timestamp: u64;
 }
 
+export interface EscrowEventV2 {
+  action: EscrowAction;
+  amount: u128;
+  caller: Option<Address>;
+  invoice_id: BytesN<32>;
+  ledger_sequence: u32;
+  timestamp: u64;
+}
+
 export interface EscrowRecord {
   amount: u128;
   invoice_id: BytesN<32>;
@@ -77,6 +86,8 @@ export interface EscrowClient {
   get_history(args: { invoice_id: BytesN<32> }): Promise<Array<EscrowEvent>>;
   get_history_count(args: { invoice_id: BytesN<32> }): Promise<u32>;
   get_history_page(args: { invoice_id: BytesN<32>; offset: u32; limit: u32 }): Promise<readonly [Array<EscrowEvent>, u32]>;
+  get_history_page_v2(args: { invoice_id: BytesN<32>; offset: u32; limit: u32 }): Promise<readonly [Array<EscrowEventV2>, u32]>;
+  get_history_v2(args: { invoice_id: BytesN<32> }): Promise<Array<EscrowEventV2>>;
   get_invoice_contract(): Promise<Address>;
   get_last_release_recipient(args: { invoice_id: BytesN<32> }): Promise<Option<Address>>;
   get_lock_checksum(args: { invoice_id: BytesN<32> }): Promise<Option<BytesN<32>>>;
@@ -107,4 +118,4 @@ export interface EscrowClient {
   was_released_to_issuer(args: { invoice_id: BytesN<32> }): Promise<boolean>;
 }
 
-export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_custody_coverage", "get_history", "get_history_count", "get_history_page", "get_invoice_contract", "get_last_release_recipient", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_min_lock_amount", "get_pool_contract", "get_release_authorization", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "recover_token", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_min_lock_amount", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;
+export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_custody_coverage", "get_history", "get_history_count", "get_history_page", "get_history_page_v2", "get_history_v2", "get_invoice_contract", "get_last_release_recipient", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_min_lock_amount", "get_pool_contract", "get_release_authorization", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "recover_token", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_min_lock_amount", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;

@@ -1490,16 +1490,59 @@ impl EscrowContract {
     /// let history = client.get_history(&invoice_id);
     /// ```
     pub fn get_history(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEvent> {
-        let key = DataKey::History(invoice_id);
+        let key = DataKey::History(invoice_id.clone());
         match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
             Some(history) => {
                 env.storage()
                     .persistent()
                     .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                let ledger_key = DataKey::HistoryLedgers(invoice_id);
+                if env.storage().persistent().has(&ledger_key) {
+                    env.storage().persistent().extend_ttl(
+                        &ledger_key,
+                        TTL_THRESHOLD,
+                        TTL_EXTEND_TO,
+                    );
+                }
                 history
             }
             None => Vec::new(&env),
         }
+    }
+
+    /// Returns the versioned history of escrow events for an invoice, including
+    /// the ledger sequence at which each entry was recorded (#1295).
+    ///
+    /// Entries written before ledger sequence tracking was deployed decode
+    /// cleanly with `ledger_sequence == 0`. Missing history returns an empty
+    /// vector without materializing any storage keys.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// Does not panic.
+    ///
+    /// # Returns
+    /// * `Vec<EscrowEventV2>` - Append-ordered history entries with ledger
+    ///   sequences, or an empty vector if none exist.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let history = client.get_history_v2(&invoice_id);
+    /// ```
+    pub fn get_history_v2(env: Env, invoice_id: BytesN<32>) -> Vec<EscrowEventV2> {
+        let (history, ledgers) = Self::load_history_with_ledgers(&env, &invoice_id);
+        let mut entries = Vec::new(&env);
+        for (idx, event) in history.iter().enumerate() {
+            let ledger_sequence = ledgers.get(idx as u32).unwrap_or(0);
+            entries.push_back(Self::into_history_v2(event, ledger_sequence));
+        }
+        entries
     }
 
     /// Returns the number of escrow history events recorded for an invoice.
@@ -1527,12 +1570,20 @@ impl EscrowContract {
     /// let count = client.get_history_count(&invoice_id);
     /// ```
     pub fn get_history_count(env: Env, invoice_id: BytesN<32>) -> u32 {
-        let key = DataKey::History(invoice_id);
+        let key = DataKey::History(invoice_id.clone());
         match env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) {
             Some(history) => {
                 env.storage()
                     .persistent()
                     .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                let ledger_key = DataKey::HistoryLedgers(invoice_id);
+                if env.storage().persistent().has(&ledger_key) {
+                    env.storage().persistent().extend_ttl(
+                        &ledger_key,
+                        TTL_THRESHOLD,
+                        TTL_EXTEND_TO,
+                    );
+                }
                 history.len()
             }
             None => 0,
@@ -1560,6 +1611,89 @@ impl EscrowContract {
         (history.slice(start..start + page_len), total)
     }
 
+    /// Reads up to 100 versioned escrow history entries (including each entry's
+    /// `ledger_sequence`) in append order, starting at `offset` (#1295).
+    ///
+    /// Returns `(entries, total)` where `total` is the total number of stored
+    /// history events for the invoice. An `offset` at or beyond `total` returns
+    /// an empty page with the same `total`. Legacy entries written before
+    /// ledger sequence tracking decode with `ledger_sequence == 0`.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `invoice_id` - The invoice to query.
+    /// * `offset` - Zero-based index of the first entry to return.
+    /// * `limit` - Maximum number of entries to return (`1..=100`).
+    ///
+    /// # Auth
+    /// None. This is a read-only view, callable while the contract is paused.
+    ///
+    /// # Panics
+    /// * `InvalidConfig` if `limit` is outside `1..=100`.
+    ///
+    /// # Returns
+    /// * `(Vec<EscrowEventV2>, u32)` - The requested page and total entry count.
+    pub fn get_history_page_v2(
+        env: Env,
+        invoice_id: BytesN<32>,
+        offset: u32,
+        limit: u32,
+    ) -> (Vec<EscrowEventV2>, u32) {
+        if !(1..=MAX_HISTORY_PAGE_SIZE).contains(&limit) {
+            panic_with_error!(&env, EscrowError::InvalidConfig);
+        }
+
+        let (history, ledgers) = Self::load_history_with_ledgers(&env, &invoice_id);
+        let total = history.len();
+        let start = offset.min(total);
+        let page_len = limit.min(total - start);
+        let end = start + page_len;
+        let mut page = Vec::new(&env);
+        for idx in start..end {
+            if let Some(event) = history.get(idx) {
+                let ledger_sequence = ledgers.get(idx).unwrap_or(0);
+                page.push_back(Self::into_history_v2(event, ledger_sequence));
+            }
+        }
+        (page, total)
+    }
+
+    fn load_history_with_ledgers(
+        env: &Env,
+        invoice_id: &BytesN<32>,
+    ) -> (Vec<EscrowEvent>, Vec<u32>) {
+        let key = DataKey::History(invoice_id.clone());
+        let Some(history) = env.storage().persistent().get::<_, Vec<EscrowEvent>>(&key) else {
+            return (Vec::new(env), Vec::new(env));
+        };
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let ledger_key = DataKey::HistoryLedgers(invoice_id.clone());
+        let ledgers = match env.storage().persistent().get::<_, Vec<u32>>(&ledger_key) {
+            Some(stored) => {
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&ledger_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                stored
+            }
+            None => Vec::new(env),
+        };
+        (history, ledgers)
+    }
+
+    fn into_history_v2(event: EscrowEvent, ledger_sequence: u32) -> EscrowEventV2 {
+        EscrowEventV2 {
+            invoice_id: event.invoice_id,
+            action: event.action,
+            amount: event.amount,
+            timestamp: event.timestamp,
+            ledger_sequence,
+            caller: event.caller,
+        }
+    }
+
     fn append_history(
         env: &Env,
         invoice_id: &BytesN<32>,
@@ -1573,6 +1707,7 @@ impl EscrowContract {
             .persistent()
             .get(&key)
             .unwrap_or(Vec::new(env));
+        let prior_len = history.len();
         history.push_back(EscrowEvent {
             invoice_id: invoice_id.clone(),
             action,
@@ -1584,6 +1719,21 @@ impl EscrowContract {
         env.storage()
             .persistent()
             .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+
+        let ledger_key = DataKey::HistoryLedgers(invoice_id.clone());
+        let mut ledgers: Vec<u32> = env
+            .storage()
+            .persistent()
+            .get(&ledger_key)
+            .unwrap_or(Vec::new(env));
+        while ledgers.len() < prior_len {
+            ledgers.push_back(0u32);
+        }
+        ledgers.push_back(env.ledger().sequence());
+        env.storage().persistent().set(&ledger_key, &ledgers);
+        env.storage()
+            .persistent()
+            .extend_ttl(&ledger_key, TTL_THRESHOLD, TTL_EXTEND_TO);
     }
 
     /// Reports which escrow write entry points `caller` may invoke under the
