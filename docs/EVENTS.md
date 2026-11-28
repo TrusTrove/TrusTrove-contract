@@ -664,6 +664,13 @@ Emitted when the admin changes the cap on total pool deposits via
 `set_deposit_cap` (issue #1179). Like `max_maturity_updated`, the old value is
 included. `0` means uncapped. A rejected call (for example, a non-admin
 signer) emits nothing.
+### `max_invoice_exposure_updated`
+
+Emitted when the admin changes the maximum percentage of `TotalDeposits` (in
+basis points) that a single newly funded invoice may consume, via
+`set_max_invoice_exposure` (issue #1180). Carries both the old and new values;
+`0` means unrestricted. A rejected call (non-admin, or value above `10_000`
+bps) emits nothing.
 
 | Field | Type | Description |
 |-------|------|-------------|
@@ -672,6 +679,10 @@ signer) emits nothing.
 | **Data** | `(u128, u128)` | `(old_cap, new_cap)` in funding-asset stroops |
 
 **Emitted by:** `set_deposit_cap()` in `contracts/pool/src/lib.rs`  
+| `topic[0]` | `Symbol` | `"max_invoice_exposure_updated"` |
+| **Data** | `(u32, u32)` | `(old_max_bps, new_max_bps)` |
+
+**Emitted by:** `set_max_invoice_exposure()` in `contracts/pool/src/lib.rs`  
 **Source:** `contracts/pool/src/events.rs:195`
 
 ---

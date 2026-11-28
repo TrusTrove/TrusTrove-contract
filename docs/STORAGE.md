@@ -514,6 +514,7 @@ The `History` vector entries are never removed — they form an append-only log 
 | `MinDiscountBps` | `u32` | Admin-settable minimum invoice discount (yield floor, in bps) enforced by `fund_invoice`; max 5000 bps, `0` disables the check (issue #829) | `initialize() = 0` |
 | `MaxTimeToMaturity` | `u64` | Admin-settable maximum remaining time to maturity (`due_date - now`, seconds) accepted by `fund_invoice` for newly funded invoices; `0` means unrestricted (issue #1184) | not set (reads as `0`) |
 | `TotalDepositCap` | `u128` | Admin-settable cap on `TotalDeposits`, in funding-asset stroops, enforced by `deposit` before the transfer; `0` means uncapped (issue #1179). Appended last so earlier discriminants are unchanged | not set (reads as `0`) |
+| `MaxInvoiceExposureBps` | `u32` | Admin-settable maximum percentage of `TotalDeposits` (in bps, max 10000) that a single newly funded invoice may consume; `0` means unrestricted (issue #1180) | not set (reads as `0`) |
 
 ### Persistent Storage
 

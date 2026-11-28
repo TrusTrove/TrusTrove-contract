@@ -375,6 +375,8 @@ set_max_time_to_maturity(max_seconds) → bool  ← admin only, 0 = unrestricted
 get_max_time_to_maturity() → u64
 set_deposit_cap(cap) → bool                 ← admin only, 0 = uncapped, enforced in deposit (#1179)
 get_deposit_cap() → u128
+set_max_invoice_exposure(max_bps) → bool   ← admin only, 0 = unrestricted, enforced in fund_invoice (#1180)
+get_max_invoice_exposure_bps() → u32
 get_stats() → PoolStats
 get_pool_config() → PoolConfig          ← references + funding policy in one read (#1188)
 get_max_fundable_amount() → u128        ← available principal under liquidity and utilization caps
@@ -619,6 +621,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `get_max_time_to_maturity` | `get_max_time_to_maturity() -> u64` |
 | Pool | `set_deposit_cap` | `set_deposit_cap(cap: u128) -> bool` |
 | Pool | `get_deposit_cap` | `get_deposit_cap() -> u128` |
+| Pool | `set_max_invoice_exposure` | `set_max_invoice_exposure(max_bps: u32) -> bool` |
+| Pool | `get_max_invoice_exposure_bps` | `get_max_invoice_exposure_bps() -> u32` |
 | Pool | `set_min_discount` | `set_min_discount(bps: u32) -> bool` |
 | Pool | `get_min_discount_bps` | `get_min_discount_bps() -> u32` |
 | Pool | `get_pool_config` | `get_pool_config() -> PoolConfig` |
@@ -630,6 +634,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
 **Total: 222 public entry points across five deployable contracts.**
+**Total: 223 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
@@ -747,6 +752,7 @@ Invoice status: → Repaid
 **Maximum Time to Maturity (max_time_to_maturity):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap how far out a newly funded invoice may be due via `pool.set_max_time_to_maturity(max_seconds)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose remaining time to maturity (`due_date - now`) exceeds the maximum with `PoolError::MaturityTooLong`. An invoice exactly at the maximum is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded are unaffected by a later change. `pool.get_max_time_to_maturity()` reads the current value (#1184).
 
 **Total Deposit Cap (deposit_cap):** Defaults to 0 (uncapped), so behavior is unchanged until an admin opts in. A pool operator may need to bound total managed assets during a pilot; the stored admin sets that bound with `pool.set_deposit_cap(cap)` (in funding-asset stroops) and reads it back with `pool.get_deposit_cap()`. While a nonzero cap is set, `deposit` and its `preview_deposit` mirror reject any deposit that would take `TotalDeposits` above the cap with `PoolError::DepositCapExceeded`, checking **before** the funding-asset transfer so a rejected deposit moves no tokens and mints no shares. A deposit landing exactly on the cap is accepted. Withdrawals, repayments, defaults and invoice funding are never blocked by the cap — so repayment yield can push `TotalDeposits` above it, after which new deposits are rejected until withdrawals free room or the admin raises/removes the cap (`set_deposit_cap(0)`). Changes emit `deposit_cap_updated(old_cap, new_cap)` (#1179).
+**Per-Invoice Exposure Limit (max_invoice_exposure_bps):** Defaults to 0 (unrestricted), so funding behavior is unchanged until an admin opts in. The stored admin can cap the maximum percentage of `TotalDeposits` (0–10,000 bps) that a single newly funded invoice may consume via `pool.set_max_invoice_exposure(max_bps)`; `fund_invoice` and `batch_fund_invoice` then reject an invoice whose `funded_amount` exceeds `total_deposits * max_bps / 10_000` with `PoolError::InvoiceExposureLimitExceeded`, even when overall pool utilization is low. An invoice exactly at the limit is accepted, and setting `0` removes the limit. The rule is checked only when an invoice is newly funded, so invoices the pool already funded remain valid. `pool.get_max_invoice_exposure_bps()` reads the current value (#1180).
 
 Repayment does **not** rest on the funding lock: the buyer's USDC settles through escrow (`escrow.release_to_pool` consumes either a live lock or the Step 4 issuer-release marker) and lands at the pool. The escrow contract is otherwise involved in funding and issuer payout (Steps 3–4) and default handling (Step 7).
 
