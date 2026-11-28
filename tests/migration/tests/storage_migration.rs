@@ -250,13 +250,17 @@ fn snapshot(d: &Deployment) -> Snapshot {
             invoice.get_pool_contract(),
             invoice.get_escrow_contract(),
         ),
+        // History is compared by length only: #1203 added the `sequence`
+        // field to `EscrowEvent`, so events written by the baseline Wasm no
+        // longer decode as the current struct through the typed client. The
+        // migrated events themselves are asserted in the upgrade test below.
         escrow: format!(
-            "{:?} | locked={} at={} ledger={} | {:?} | {:?} | {:?}",
+            "{:?} | locked={} at={} ledger={} | history={} | {:?} | {:?}",
             escrow.get_lock_record(&d.invoice_id),
             escrow.get_locked(&d.invoice_id),
             escrow.get_locked_at(&d.invoice_id),
             escrow.get_locked_ledger(&d.invoice_id),
-            escrow.get_history(&d.invoice_id),
+            escrow.get_history_count(&d.invoice_id),
             escrow.get_invoice_contract(),
             escrow.get_usdc_asset(),
         ),
@@ -321,6 +325,12 @@ fn v1_state_survives_wasm_upgrade_and_stays_writable() {
     let invoice = InvoiceContractClient::new(&d.env, &d.invoice);
     let escrow = EscrowContractClient::new(&d.env, &d.escrow);
     let pool = PoolContractClient::new(&d.env, &d.pool);
+
+    // The upgraded escrow must decode the pre-upgrade history entries: they
+    // predate the `sequence` field added in #1203 and surface with `0`.
+    let history = escrow.get_history(&d.invoice_id);
+    assert_eq!(history.len(), 1, "upgrade lost the v1 escrow history entry");
+    assert_eq!(history.get(0).unwrap().sequence, 0);
 
     let metadata: Map<SorobanString, SorobanString> = Map::new(&d.env);
     let second_issuer = Address::generate(&d.env);

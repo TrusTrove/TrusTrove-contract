@@ -579,6 +579,14 @@
                         },
                         {
                           "key": {
+                            "symbol": "sequence"
+                          },
+                          "val": {
+                            "u64": "0"
+                          }
+                        },
+                        {
+                          "key": {
                             "symbol": "timestamp"
                           },
                           "val": {
@@ -621,6 +629,14 @@
                           },
                           "val": {
                             "bytes": "000000000000000b000000000000000000000000000000000000000000000000"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "sequence"
+                          },
+                          "val": {
+                            "u64": "1"
                           }
                         },
                         {
@@ -679,6 +695,96 @@
                 "durability": "persistent",
                 "val": {
                   "u128": "1000000000"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "LastReleaseRecipient"
+                },
+                {
+                  "bytes": "000000000000000b000000000000000000000000000000000000000000000000"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "LastReleaseRecipient"
+                    },
+                    {
+                      "bytes": "000000000000000b000000000000000000000000000000000000000000000000"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          2000000
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "ReleaseSequence"
+                },
+                {
+                  "bytes": "000000000000000b000000000000000000000000000000000000000000000000"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "ReleaseSequence"
+                    },
+                    {
+                      "bytes": "000000000000000b000000000000000000000000000000000000000000000000"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "u64": "1"
                 }
               }
             },
