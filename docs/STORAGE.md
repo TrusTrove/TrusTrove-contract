@@ -412,6 +412,7 @@ backward compatibility.
 | DataKey | Type | Description |
 |---------|------|-------------|
 | `History(BytesN<32>)` | `Vec<EscrowEvent>` | Append-only event log keyed by invoice ID. Every state transition (`lock`, `release_to_issuer`, `release_to_pool`, `handle_default`, `release_after_timeout`) appends an `EscrowEvent`. The vector grows as payments are made and is TTL-extended on every write. |
+| `HistoryLedgers(BytesN<32>)` | `Vec<u32>` | Parallel ledger sequence log for `History` (#1295). Index `i` holds `env.ledger().sequence()` when `History[i]` was appended. Absent for legacy invoices written before #1295; when a new entry is appended to a legacy history, missing prefix slots are backfilled with `0` before pushing the new sequence. TTL-extended alongside `History` on writes and reads. |
 
 ```
 EscrowEvent {
@@ -421,9 +422,20 @@ EscrowEvent {
     timestamp:  u64,
     caller:     Option<Address>, // Set for `DefaultHandled` events
 }
+
+EscrowEventV2 {
+    invoice_id:      BytesN<32>,
+    action:          EscrowAction,
+    amount:          u128,
+    timestamp:       u64,
+    ledger_sequence: u32,            // 0 for legacy entries written before #1295
+    caller:          Option<Address>,
+}
 ```
 
-The read-only `get_history_count(invoice_id)` view returns the number of history events recorded for an invoice (or `0` when absent), enabling callers to plan paginated reads via `get_history_page` without loading the full event vector into memory. History events and their count remain accessible even after the invoice's active lock is removed.
+The ledger sequence is deliberately stored in the separate `HistoryLedgers` key rather than as a new field on `EscrowEvent`, so deployed `Vec<EscrowEvent>` records remain decodable without migration and existing `get_history` / `get_history_page` callers keep their exact ABI. Callers that need deterministic ordering across actions with identical timestamps should read via `get_history_v2(invoice_id)` or `get_history_page_v2(invoice_id, offset, limit)`, which zip `History` and `HistoryLedgers` into `EscrowEventV2` entries (reporting `ledger_sequence == 0` for legacy entries).
+
+The read-only `get_history_count(invoice_id)` view returns the number of history events recorded for an invoice (or `0` when absent), enabling callers to plan paginated reads via `get_history_page` or `get_history_page_v2` without loading the full event vector into memory. History events and their count remain accessible even after the invoice's active lock is removed.
 
 #### Last Release Recipient
 
@@ -483,9 +495,9 @@ The `History` vector entries are never removed — they form an append-only log 
 
 ### Storage Key Count
 
-**Approximately 4 keys per funded invoice** — a transient `Locked` record (removed on full release/default/timeout), its `LockedLedger` sequence key, an
-`IssuerReleased` marker (live between funding and repayment, consumed on repayment), and one
-`History` vector (append-only, grows with each escrow action, shares TTL with the lock).
+**Approximately 5 keys per funded invoice** — a transient `Locked` record (removed on full release/default/timeout), its `LockedLedger` sequence key, an
+`IssuerReleased` marker (live between funding and repayment, consumed on repayment), one
+`History` vector, and its parallel `HistoryLedgers` vector (both append-only, grow with each escrow action, share TTL with the lock), plus an optional `LastReleaseRecipient` key written on the first successful release.
 
 ---
 

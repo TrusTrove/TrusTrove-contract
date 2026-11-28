@@ -20,8 +20,8 @@ use soroban_sdk::{
 
 use crate::{
     CustodyCoverage, DataKey, EscrowAction, EscrowContract, EscrowContractClient, EscrowEvent,
-    EscrowRecord, ReleaseAuthorization, DEFAULT_TIMEOUT_WINDOW_SECONDS, MAX_TIMEOUT_WINDOW_SECONDS,
-    TTL_EXTEND_TO, TTL_THRESHOLD,
+    EscrowEventV2, EscrowRecord, ReleaseAuthorization, DEFAULT_TIMEOUT_WINDOW_SECONDS,
+    MAX_TIMEOUT_WINDOW_SECONDS, TTL_EXTEND_TO, TTL_THRESHOLD,
 };
 
 #[contract]
@@ -4330,4 +4330,354 @@ fn test_recover_token_boundary_full_balance_then_overdraw_reverts() {
         .is_err());
     assert_eq!(token_client.balance(&client.address), 0);
     assert_eq!(token_client.balance(&to), 3_000);
+}
+
+// ============================================================================
+// History entry ledger sequence (issue #1295)
+// ============================================================================
+
+#[test]
+fn test_history_v2_records_ledger_sequence_with_identical_timestamps() {
+    let (env, client, admin, pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1295);
+    let amount: u128 = 1_000_000_000;
+
+    // Hold ledger timestamp constant across multiple ordered actions spanning
+    // both the same ledger sequence and advancing ledger sequences.
+    let fixed_timestamp = 1_700_000_000u64;
+    env.ledger().set_timestamp(fixed_timestamp);
+
+    env.ledger().set_sequence_number(500);
+    client.lock(&invoice_id, &amount, &issuer);
+    // Same ledger sequence AND same timestamp.
+    client.release_to_pool(&invoice_id, &300_000_000);
+
+    // Next ledger sequence, still identical timestamp.
+    env.ledger().set_sequence_number(501);
+    client.release_to_pool(&invoice_id, &700_000_000);
+
+    // Re-lock and release to issuer at another ledger with the exact same timestamp.
+    env.ledger().set_sequence_number(502);
+    client.lock(&invoice_id, &500_000_000, &issuer);
+    env.ledger().set_sequence_number(503);
+    client.release_to_issuer(&invoice_id, &issuer);
+
+    let history = client.get_history_v2(&invoice_id);
+    assert_eq!(history.len(), 5);
+    assert_eq!(client.get_history_count(&invoice_id), 5);
+    assert_eq!(client.get_history(&invoice_id).len(), 5);
+
+    let expected: [(EscrowAction, u128, u32); 5] = [
+        (EscrowAction::Locked, amount, 500),
+        (EscrowAction::ReleasedToPool, 300_000_000, 500),
+        (EscrowAction::ReleasedToPool, 700_000_000, 501),
+        (EscrowAction::Locked, 500_000_000, 502),
+        (EscrowAction::ReleasedToIssuer, 500_000_000, 503),
+    ];
+
+    for (idx, (action, expected_amount, expected_seq)) in expected.iter().enumerate() {
+        let entry = history.get(idx as u32).unwrap();
+        assert_eq!(entry.invoice_id, invoice_id);
+        assert_eq!(entry.action, *action);
+        assert_eq!(entry.amount, *expected_amount);
+        assert_eq!(entry.timestamp, fixed_timestamp);
+        assert_eq!(entry.ledger_sequence, *expected_seq);
+        assert_eq!(entry.caller, None);
+    }
+
+    // Verify paginated v2 reads preserve exact order, sequences, and total.
+    let (page0, total0) = client.get_history_page_v2(&invoice_id, &0, &2);
+    assert_eq!(total0, 5);
+    assert_eq!(page0, history.slice(0..2));
+
+    let (page1, total1) = client.get_history_page_v2(&invoice_id, &2, &2);
+    assert_eq!(total1, 5);
+    assert_eq!(page1, history.slice(2..4));
+
+    let (page2, total2) = client.get_history_page_v2(&invoice_id, &4, &10);
+    assert_eq!(total2, 5);
+    assert_eq!(page2, history.slice(4..5));
+
+    let (past_end, total_end) = client.get_history_page_v2(&invoice_id, &u32::MAX, &10);
+    assert!(past_end.is_empty());
+    assert_eq!(total_end, 5);
+
+    // Also cover DefaultHandled and TimeoutReleased ledger sequences.
+    let default_id = generate_invoice_id(&env, 1296);
+    env.ledger().set_sequence_number(600);
+    client.lock(&default_id, &amount, &issuer);
+    env.ledger().set_timestamp(fixed_timestamp + 60);
+    env.ledger().set_sequence_number(605);
+    assert!(client.handle_default(&default_id, &admin));
+
+    let default_hist = client.get_history_v2(&default_id);
+    assert_eq!(default_hist.len(), 2);
+    assert_eq!(default_hist.get(0).unwrap().ledger_sequence, 600);
+    let default_entry = default_hist.get(1).unwrap();
+    assert_eq!(default_entry.action, EscrowAction::DefaultHandled);
+    assert_eq!(default_entry.ledger_sequence, 605);
+    assert_eq!(default_entry.caller, Some(admin));
+
+    let timeout_id = generate_invoice_id(&env, 1297);
+    client.set_timeout_window(&3600);
+    env.ledger().set_sequence_number(700);
+    client.lock(&timeout_id, &amount, &issuer);
+    env.ledger().set_timestamp(env.ledger().timestamp() + 3600);
+    env.ledger().set_sequence_number(750);
+    assert!(client.release_after_timeout(&timeout_id));
+
+    let timeout_hist = client.get_history_v2(&timeout_id);
+    assert_eq!(timeout_hist.len(), 2);
+    assert_eq!(timeout_hist.get(0).unwrap().ledger_sequence, 700);
+    let timeout_entry = timeout_hist.get(1).unwrap();
+    assert_eq!(timeout_entry.action, EscrowAction::TimeoutReleased);
+    assert_eq!(timeout_entry.ledger_sequence, 750);
+    assert_eq!(timeout_entry.caller, None);
+
+    let _ = pool;
+}
+
+#[test]
+fn test_history_v2_decodes_legacy_entries_and_aligns_post_upgrade_appends() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1298);
+    let amount: u128 = 1_000_000_000;
+
+    // Seed pre-#1295 storage: DataKey::History exists, DataKey::HistoryLedgers does not.
+    let mut legacy_history = Vec::new(&env);
+    legacy_history.push_back(EscrowEvent {
+        invoice_id: invoice_id.clone(),
+        action: EscrowAction::Locked,
+        amount,
+        timestamp: 100,
+        caller: None,
+    });
+    legacy_history.push_back(EscrowEvent {
+        invoice_id: invoice_id.clone(),
+        action: EscrowAction::ReleasedToPool,
+        amount,
+        timestamp: 100,
+        caller: None,
+    });
+    let ledger_key = DataKey::HistoryLedgers(invoice_id.clone());
+    env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .set(&DataKey::History(invoice_id.clone()), &legacy_history);
+    });
+
+    // Legacy read decodes both entries with ledger_sequence == 0 and does not
+    // materialize DataKey::HistoryLedgers.
+    let decoded = client.get_history_v2(&invoice_id);
+    assert_eq!(decoded.len(), 2);
+    assert_eq!(
+        decoded.get(0).unwrap(),
+        EscrowEventV2 {
+            invoice_id: invoice_id.clone(),
+            action: EscrowAction::Locked,
+            amount,
+            timestamp: 100,
+            ledger_sequence: 0,
+            caller: None,
+        }
+    );
+    assert_eq!(
+        decoded.get(1).unwrap(),
+        EscrowEventV2 {
+            invoice_id: invoice_id.clone(),
+            action: EscrowAction::ReleasedToPool,
+            amount,
+            timestamp: 100,
+            ledger_sequence: 0,
+            caller: None,
+        }
+    );
+    let (paged, total) = client.get_history_page_v2(&invoice_id, &0, &10);
+    assert_eq!(total, 2);
+    assert_eq!(paged, decoded);
+    assert!(!env.as_contract(&client.address, || {
+        env.storage().persistent().has(&ledger_key)
+    }));
+
+    // Appending a post-upgrade action backfills 0 for the legacy prefix and
+    // records the current ledger sequence for the new entry.
+    env.ledger().set_timestamp(100);
+    env.ledger().set_sequence_number(888);
+    client.lock(&invoice_id, &amount, &issuer);
+
+    let after = client.get_history_v2(&invoice_id);
+    assert_eq!(after.len(), 3);
+    assert_eq!(after.get(0).unwrap().ledger_sequence, 0);
+    assert_eq!(after.get(1).unwrap().ledger_sequence, 0);
+    assert_eq!(after.get(2).unwrap().ledger_sequence, 888);
+    assert_eq!(after.get(2).unwrap().action, EscrowAction::Locked);
+    assert_eq!(after.get(2).unwrap().timestamp, 100);
+
+    // Original v1 view stays intact and matches length.
+    assert_eq!(client.get_history(&invoice_id).len(), 3);
+}
+
+#[test]
+fn test_history_v2_missing_storage_ttl_extension_and_paused_read() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup();
+    let missing_id = generate_invoice_id(&env, 1299);
+    let history_key = DataKey::History(missing_id.clone());
+    let ledger_key = DataKey::HistoryLedgers(missing_id.clone());
+
+    assert!(client.get_history_v2(&missing_id).is_empty());
+    assert_eq!(client.get_history_page_v2(&missing_id, &0, &10).1, 0);
+    assert!(!env.as_contract(&client.address, || {
+        env.storage().persistent().has(&history_key) || env.storage().persistent().has(&ledger_key)
+    }));
+
+    // Lock an invoice and drain TTL below threshold to verify both History and
+    // HistoryLedgers TTLs are extended on read.
+    let invoice_id = generate_invoice_id(&env, 1300);
+    env.ledger().set_sequence_number(42);
+    client.lock(&invoice_id, &1_000_000_000, &issuer);
+
+    let h_key = DataKey::History(invoice_id.clone());
+    let l_key = DataKey::HistoryLedgers(invoice_id.clone());
+    let ttl_before_drain: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&l_key)
+    });
+    env.ledger()
+        .set_sequence_number(env.ledger().sequence() + ttl_before_drain - 50);
+
+    let l_ttl_before: u32 = env.as_contract(&client.address, || {
+        env.storage().persistent().get_ttl(&l_key)
+    });
+    assert!(l_ttl_before < TTL_THRESHOLD);
+
+    // Views remain readable while paused and extend both keys' TTLs.
+    client.pause();
+    let entries = client.get_history_v2(&invoice_id);
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries.get(0).unwrap().ledger_sequence, 42);
+    client.unpause();
+
+    let (h_ttl_after, l_ttl_after): (u32, u32) = env.as_contract(&client.address, || {
+        (
+            env.storage().persistent().get_ttl(&h_key),
+            env.storage().persistent().get_ttl(&l_key),
+        )
+    });
+    assert!(h_ttl_after > l_ttl_before);
+    assert!(l_ttl_after > l_ttl_before);
+}
+
+#[test]
+fn test_history_v2_rejected_calls_do_not_mutate_balances_or_storage() {
+    let (env, client, _admin, pool, issuer, usdc_id) = setup();
+    let invoice_id = generate_invoice_id(&env, 1301);
+    let amount: u128 = 1_000_000_000;
+
+    env.ledger().set_timestamp(2_000);
+    env.ledger().set_sequence_number(900);
+    client.lock(&invoice_id, &amount, &issuer);
+    client.set_timeout_window(&3600);
+
+    let pool_bal_before = get_balance(&env, &usdc_id, &pool);
+    let issuer_bal_before = get_balance(&env, &usdc_id, &issuer);
+    let escrow_bal_before = get_balance(&env, &usdc_id, &client.address);
+    let history_v1_before = client.get_history(&invoice_id);
+    let history_v2_before = client.get_history_v2(&invoice_id);
+    let count_before = client.get_history_count(&invoice_id);
+    let ledgers_before: Vec<u32> = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::HistoryLedgers(invoice_id.clone()))
+            .unwrap()
+    });
+
+    // 1. Invalid-input failures: page limit 0 / >100 and zero-amount lock.
+    assert_eq!(
+        client.try_get_history_page_v2(&invoice_id, &0, &0),
+        Err(Ok(escrow_error(crate::EscrowError::InvalidConfig)))
+    );
+    assert_eq!(
+        client.try_get_history_page_v2(&invoice_id, &0, &101),
+        Err(Ok(escrow_error(crate::EscrowError::InvalidConfig)))
+    );
+    let other_invoice = generate_invoice_id(&env, 1302);
+    env.ledger().set_sequence_number(901);
+    assert_eq!(
+        client.try_lock(&other_invoice, &0, &issuer),
+        Err(Ok(escrow_error(crate::EscrowError::InvalidAmount)))
+    );
+
+    // 2. Authorization failure: unauthorized caller attempting handle_default.
+    let stranger = Address::generate(&env);
+    env.ledger().set_timestamp(2_100);
+    env.ledger().set_sequence_number(902);
+    assert_eq!(
+        client.try_handle_default(&invoice_id, &stranger),
+        Err(Ok(escrow_error(crate::EscrowError::NotAuthorized)))
+    );
+
+    // 3. Time-boundary failures: handle_default 1s before grace period and
+    //    release_after_timeout 1s before timeout window.
+    env.ledger().set_timestamp(2_059);
+    env.ledger().set_sequence_number(903);
+    assert_eq!(
+        client.try_handle_default(&invoice_id, &pool),
+        Err(Ok(escrow_error(crate::EscrowError::NotAuthorized)))
+    );
+    env.ledger().set_timestamp(2_000 + 3599);
+    env.ledger().set_sequence_number(904);
+    assert_eq!(
+        client.try_release_after_timeout(&invoice_id),
+        Err(Ok(escrow_error(crate::EscrowError::TimeoutNotElapsed)))
+    );
+
+    // Assert zero mutation to balances, active lock, and all history storage.
+    assert_eq!(get_balance(&env, &usdc_id, &pool), pool_bal_before);
+    assert_eq!(get_balance(&env, &usdc_id, &issuer), issuer_bal_before);
+    assert_eq!(
+        get_balance(&env, &usdc_id, &client.address),
+        escrow_bal_before
+    );
+    assert_eq!(client.get_locked(&invoice_id), amount);
+    assert_eq!(client.get_history(&invoice_id), history_v1_before);
+    assert_eq!(client.get_history_v2(&invoice_id), history_v2_before);
+    assert_eq!(client.get_history_count(&invoice_id), count_before);
+    let ledgers_after: Vec<u32> = env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .get(&DataKey::HistoryLedgers(invoice_id.clone()))
+            .unwrap()
+    });
+    assert_eq!(ledgers_after, ledgers_before);
+    assert!(!env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .has(&DataKey::History(other_invoice.clone()))
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::HistoryLedgers(other_invoice))
+    }));
+}
+
+#[test]
+fn test_history_v2_no_auth_required_and_unauthenticated_lock_leaves_history_empty() {
+    let (env, client, _admin, _pool, issuer, _usdc_id) = setup_without_auths();
+    let invoice_id = generate_invoice_id(&env, 1303);
+
+    assert!(client.get_history_v2(&invoice_id).is_empty());
+    assert_eq!(client.get_history_page_v2(&invoice_id, &0, &10).1, 0);
+    assert!(env.auths().is_empty());
+
+    // Unauthenticated lock fails and leaves history storage uncreated.
+    assert!(client.try_lock(&invoice_id, &1_000_000, &issuer).is_err());
+    assert!(client.get_history_v2(&invoice_id).is_empty());
+    assert!(!env.as_contract(&client.address, || {
+        env.storage()
+            .persistent()
+            .has(&DataKey::History(invoice_id.clone()))
+            || env
+                .storage()
+                .persistent()
+                .has(&DataKey::HistoryLedgers(invoice_id))
+    }));
 }

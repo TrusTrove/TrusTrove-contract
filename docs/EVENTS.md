@@ -863,7 +863,7 @@ When `release_to_pool` is called with an amount less than the total locked amoun
 3. The residual locked amount remains in escrow, and `get_locked()` will return the remaining balance.
 4. A subsequent `release_to_pool` call can repay the remaining amount, at which point the `Locked` record is fully removed.
 
-This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time.
+This append-only history means the `EscrowEvent` log records every `ReleasedToPool` action, allowing indexers to track the cumulative repayment progress and the residual lock state over time. Every history entry also records its ledger sequence (`env.ledger().sequence()`) in a companion storage key (#1295), exposed via `get_history_v2(invoice_id)` and `get_history_page_v2(invoice_id, offset, limit)` as `EscrowEventV2` so actions with identical timestamps remain unambiguously ordered; legacy entries recorded before #1295 decode with `ledger_sequence == 0`. Emitted contract events keep their existing schemas for backwards compatibility.
 
 `get_total_returned_to_pool(invoice_id)` returns that running total on-chain:
 it sums `ReleasedToPool` and `DefaultHandled` amounts with checked `u128`
