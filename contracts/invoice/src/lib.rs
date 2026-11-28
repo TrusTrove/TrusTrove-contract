@@ -1311,6 +1311,11 @@ impl InvoiceContract {
         if invoice.status != InvoiceStatus::Created {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
+        if Self::get_buyer_acknowledgement(env.clone())
+            && !Self::has_buyer_listing_acknowledged(&env, &invoice_id)
+        {
+            panic_with_error!(&env, InvoiceError::BuyerAcknowledgementRequired);
+        }
 
         let registry_id: Address = env
             .storage()
@@ -1472,6 +1477,11 @@ impl InvoiceContract {
             authorized.push_back(invoice.issuer.clone());
         }
         if invoice.status != InvoiceStatus::Created {
+            return false;
+        }
+        if Self::get_buyer_acknowledgement(env.clone())
+            && !Self::has_buyer_listing_acknowledged(env, invoice_id)
+        {
             return false;
         }
         if !Self::is_verified_in(env, registry_id, &invoice.issuer)
@@ -2696,22 +2706,69 @@ impl InvoiceContract {
         Self::extend_instance_ttl(&env);
     }
 
-    /// Previews when a listed invoice can be expired.
+    /// Enables or disables the optional buyer acknowledgement gate for future listings.
     ///
-    /// The boundary matches `expire_listing`: the invoice is expired
-    /// when `now >= listed_at + expiry_window`. This view reads the invoice
-    /// and current window without changing invoice storage.
+    /// Acknowledgement is disabled by default for backwards compatibility.
+    /// Disabling the gate never changes invoices already listed.
+    pub fn set_buyer_acknowledgement(env: Env, required: bool) {
+        require_not_paused(&env);
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .unwrap_or_else(|| panic_with_error!(&env, InvoiceError::NotInitialized));
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::BuyerAcknowledgementRequired, &required);
+        events::buyer_acknowledgement_set(&env, required);
+        Self::extend_instance_ttl(&env);
+    }
+
+    /// Returns whether buyer acknowledgement is required before listing.
+    /// Defaults to `false` so existing contracts and workflows remain valid.
+    pub fn get_buyer_acknowledgement(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::BuyerAcknowledgementRequired)
+            .unwrap_or(false)
+    }
+
+    /// Records the invoice buyer's acknowledgement before financing listing.
     ///
-    /// # Panics
-    /// * `InvoiceError::NotFound` if the invoice does not exist.
-    /// * `InvoiceError::InvalidStatusTransition` if the invoice is not listed.
-    /// * `InvoiceError::MathOverflow` if the expiry timestamp overflows.
-    pub fn get_listing_expiry_preview(env: Env, invoice_id: BytesN<32>) -> ListingExpiryPreview {
-        let invoice = Self::get_invoice(&env, invoice_id);
-        if invoice.status != InvoiceStatus::Listed {
+    /// The buyer is derived from the invoice and must authorize this call.
+    /// Repeating an acknowledgement while the invoice is still `Created` is
+    /// idempotent and emits no additional event.
+    pub fn acknowledge_listing(env: Env, invoice_id: BytesN<32>) -> bool {
+        require_not_paused(&env);
+        let invoice = Self::get_invoice(&env, invoice_id.clone());
+        if invoice.status != InvoiceStatus::Created {
             panic_with_error!(&env, InvoiceError::InvalidStatusTransition);
         }
-        listing_expiry_preview(&env, &invoice)
+        invoice.buyer.require_auth();
+        let key = DataKey::BuyerListingAcknowledgement(invoice_id.clone());
+        if env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&key)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+        events::buyer_listing_acknowledged(&env, &invoice_id, &invoice.buyer);
+        Self::extend_instance_ttl(&env);
+        true
+    }
+
+    fn has_buyer_listing_acknowledged(env: &Env, invoice_id: &BytesN<32>) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::BuyerListingAcknowledgement(invoice_id.clone()))
+            .unwrap_or(false)
     }
 
     /// Returns the current listing expiry window in seconds.
@@ -3494,46 +3551,20 @@ impl InvoiceContract {
         Self::get_invoice(&env, invoice_id)
     }
 
-    /// Returns whether an invoice with `invoice_id` exists (issue #1153).
-    ///
-    /// Lets callers check an ID without calling `get` and trapping
-    /// `InvoiceError::NotFound`. For any ID, `exists` returns `true` exactly
-    /// when `get` would succeed.
-    ///
-    /// An invoice exists once `create` has stored its record, in any status.
-    /// Cancelled, expired, repaid and defaulted invoices still exist: no code
-    /// path deletes invoice records. Only the invoice record itself
-    /// (`DataKey::Invoice`) counts, so an ID that appears only in an index or
-    /// an attestation key does not.
-    ///
-    /// This is a pure presence check (`has` on the invoice key). It does not
-    /// decode the invoice and never writes storage: checking a missing ID
-    /// creates nothing, and, like `get`, checking an existing ID does not
-    /// extend its TTL.
-    ///
-    /// # Arguments
-    /// * `env` - The Soroban environment.
-    /// * `invoice_id` - The invoice ID to look up.
-    ///
-    /// # Auth
-    /// No authorization is required.
-    ///
-    /// # Panics
-    /// Does not panic.
-    ///
-    /// # Returns
-    /// * `bool` - `true` if the invoice record exists, `false` otherwise.
-    ///
-    /// # Example
-    /// ```ignore
-    /// if client.exists(&invoice_id) {
-    ///     let invoice = client.get(&invoice_id);
-    /// }
-    /// ```
-    pub fn exists(env: Env, invoice_id: BytesN<32>) -> bool {
+    /// Returns the lifecycle revision for an invoice (zero before its first
+    /// status transition, including legacy invoices without revision data).
+    pub fn get_status_revision(env: Env, invoice_id: BytesN<32>) -> u64 {
+        Self::get_invoice(&env, invoice_id.clone());
         env.storage()
             .persistent()
-            .has(&DataKey::Invoice(invoice_id))
+            .get(&DataKey::StatusRevision(invoice_id))
+            .unwrap_or(0)
+    }
+
+    /// Returns whether the buyer has acknowledged this invoice before listing.
+    pub fn get_buyer_listing_acknowledged(env: Env, invoice_id: BytesN<32>) -> bool {
+        Self::get_invoice(&env, invoice_id.clone());
+        Self::has_buyer_listing_acknowledged(&env, &invoice_id)
     }
 
     /// Lists a page of invoices for a given status.
@@ -4566,6 +4597,18 @@ fn move_status_index(env: &Env, invoice_id: &BytesN<32>, from: InvoiceStatus, to
     // marker is a silent no-op, matching the pre-marker behavior.
     remove_from_status_index(env, from, invoice_id);
     extend_status_index(env, to, invoice_id);
+    let revision_key = DataKey::StatusRevision(invoice_id.clone());
+    let revision: u64 = env.storage().persistent().get(&revision_key).unwrap_or(0);
+    let next_revision = revision
+        .checked_add(1)
+        .unwrap_or_else(|| panic_with_error!(env, InvoiceError::MathOverflow));
+    env.storage()
+        .persistent()
+        .set(&revision_key, &next_revision);
+    env.storage()
+        .persistent()
+        .extend_ttl(&revision_key, TTL_THRESHOLD, TTL_EXTEND_TO);
+    events::invoice_status_changed(env, invoice_id, from, to, next_revision);
 }
 
 /// Removes an invoice from the `StatusIndexEntry` array for `status` using a

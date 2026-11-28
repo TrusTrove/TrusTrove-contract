@@ -50,6 +50,7 @@ export interface EscrowEvent {
   amount: u128;
   caller: Option<Address>;
   invoice_id: BytesN<32>;
+  sequence: u64;
   timestamp: u64;
 }
 
@@ -88,6 +89,7 @@ export interface EscrowClient {
   get_min_lock_amount(): Promise<u128>;
   get_pool_contract(): Promise<Address>;
   get_release_authorization(args: { caller: Address }): Promise<ReleaseAuthorization>;
+  get_release_sequence(args: { invoice_id: BytesN<32> }): Promise<u64>;
   get_timeout_window(): Promise<u64>;
   get_total_returned_to_pool(args: { invoice_id: BytesN<32> }): Promise<u128>;
   get_usdc_asset(): Promise<Address>;
@@ -107,4 +109,4 @@ export interface EscrowClient {
   was_released_to_issuer(args: { invoice_id: BytesN<32> }): Promise<boolean>;
 }
 
-export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_custody_coverage", "get_history", "get_history_count", "get_history_page", "get_invoice_contract", "get_last_release_recipient", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_min_lock_amount", "get_pool_contract", "get_release_authorization", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "recover_token", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_min_lock_amount", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;
+export const ESCROW_METHODS = ["__constructor", "get_admin", "get_custody_balance", "get_custody_coverage", "get_history", "get_history_count", "get_history_page", "get_invoice_contract", "get_last_release_recipient", "get_lock_checksum", "get_lock_expiration", "get_lock_record", "get_locked", "get_locked_at", "get_locked_ledger", "get_min_lock_amount", "get_pool_contract", "get_release_authorization", "get_release_sequence", "get_timeout_window", "get_total_returned_to_pool", "get_usdc_asset", "handle_default", "has_lock", "lock", "pause", "recover_token", "release_after_timeout", "release_to_issuer", "release_to_pool", "set_invoice_contract", "set_min_lock_amount", "set_timeout_window", "unpause", "upgrade", "was_released_to_issuer"] as const;

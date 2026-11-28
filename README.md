@@ -490,7 +490,9 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_default_grace_seconds` | `get_default_grace_seconds() -> u64` |
 | Invoice | `mark_defaulted` | `mark_defaulted(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `set_expiry_window` | `set_expiry_window(window: u64) -> ()` |
-| Invoice | `get_listing_expiry_preview` | `get_listing_expiry_preview(invoice_id: BytesN<32>) -> ListingExpiryPreview` |
+| Invoice | `set_buyer_acknowledgement` | `set_buyer_acknowledgement(required: bool) -> ()` |
+| Invoice | `get_buyer_acknowledgement` | `get_buyer_acknowledgement() -> bool` |
+| Invoice | `acknowledge_listing` | `acknowledge_listing(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `get_expiry_window` | `get_expiry_window() -> u64` |
 | Invoice | `set_max_invoice_lifetime` | `set_max_invoice_lifetime(lifetime: u64) -> ()` |
 | Invoice | `get_max_invoice_lifetime` | `get_max_invoice_lifetime() -> u64` |
@@ -513,7 +515,8 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Invoice | `get_funding_asset` | `get_funding_asset(invoice_id: BytesN<32>) -> Address` |
 | Invoice | `get_funded_amount` | `get_funded_amount(invoice_id: BytesN<32>) -> u128` |
 | Invoice | `get` | `get(invoice_id: BytesN<32>) -> Invoice` |
-| Invoice | `exists` | `exists(invoice_id: BytesN<32>) -> bool` |
+| Invoice | `get_status_revision` | `get_status_revision(invoice_id: BytesN<32>) -> u64` |
+| Invoice | `get_buyer_listing_acknowledged` | `get_buyer_listing_acknowledged(invoice_id: BytesN<32>) -> bool` |
 | Invoice | `get_by_status` | `get_by_status(status: InvoiceStatus, page: u32, page_size: u32) -> Vec<Invoice>` |
 | Invoice | `get_invoice_ids_by_status` | `get_invoice_ids_by_status(status: InvoiceStatus, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
 | Invoice | `get_ids_by_created_at_range` | `get_ids_by_created_at_range(start_time: u64, end_time: u64, cursor: Option<u32>, page_size: u32) -> InvoiceIdPage` |
@@ -559,6 +562,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Escrow | `get_locked_at` | `get_locked_at(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_lock_expiration` | `get_lock_expiration(invoice_id: BytesN<32>) -> Option<u64>` |
 | Escrow | `get_locked_ledger` | `get_locked_ledger(invoice_id: BytesN<32>) -> u64` |
+| Escrow | `get_release_sequence` | `get_release_sequence(invoice_id: BytesN<32>) -> u64` |
 | Escrow | `get_total_returned_to_pool` | `get_total_returned_to_pool(invoice_id: BytesN<32>) -> u128` |
 | Escrow | `get_custody_balance` | `get_custody_balance() -> i128` |
 | Escrow | `get_lock_checksum` | `get_lock_checksum(invoice_id: BytesN<32>) -> Option<BytesN<32>>` |
@@ -599,6 +603,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool | `balance` | `balance(id: Address) -> i128` |
 | Pool | `total_supply` | `total_supply() -> i128` |
 | Pool | `get_stats` | `get_stats() -> PoolStats` |
+| Pool | `get_pool_state_hash` | `get_pool_state_hash() -> BytesN<32>` |
 | Pool | `get_realized_loss_ratio_bps` | `get_realized_loss_ratio_bps() -> u32` |
 | Pool | `backfill_cumulative_funded` | `backfill_cumulative_funded(total_funded: u128) -> ()` |
 | Pool | `get_share_price` | `get_share_price() -> u128` |
@@ -629,7 +634,7 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Pool Factory | `get_aggregate_stats` | `get_aggregate_stats() -> Vec<(Address, PoolStats)>` |
 | Pool Factory | `list_assets` | `list_assets() -> Vec<Address>` |
 
-**Total: 223 public entry points across five deployable contracts.**
+**Total: 228 public entry points across five deployable contracts.**
 
 The shared TTL crate (contracts/ttl/src/lib.rs) exports only the THRESHOLD and EXTEND_TO constants. It is a workspace utility, not a callable contract API, so it has no entry-point group in this table.
 <!-- END GENERATED CONTRACT API -->
