@@ -425,6 +425,9 @@ These are client-facing signatures: the framework-provided env: Env parameter is
 | Registry | `revoke` | `revoke(address: Address) -> bool` |
 | Registry | `reinstate` | `reinstate(address: Address) -> bool` |
 | Registry | `verify_profile` | `verify_profile(caller: Address, address: Address, verify: bool) -> bool` |
+| Registry | `submit_verification_nonce` | `submit_verification_nonce(address: Address, nonce: BytesN<32>, expires_at: u64) -> bool` |
+| Registry | `get_verification_nonce` | `get_verification_nonce(address: Address) -> Option<(BytesN<32>, u64)>` |
+| Registry | `verify_profile_with_nonce` | `verify_profile_with_nonce(caller: Address, address: Address, verify: bool, nonce: BytesN<32>) -> bool` |
 | Registry | `transfer_ownership` | `transfer_ownership(new_admin: Address) -> ()` |
 | Registry | `transfer_admin` | `transfer_admin(new_admin: Address) -> ()` |
 | Registry | `set_verifier` | `set_verifier(verifier: Address) -> ()` |

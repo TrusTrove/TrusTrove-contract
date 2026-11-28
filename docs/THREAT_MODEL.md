@@ -254,7 +254,9 @@ Notes:
 
 | Function | Who may call | Exact authorization | Source |
 |----------|--------------|---------------------|--------|
-| [`verify_profile`](../contracts/registry/src/lib.rs) | Stored admin **or** stored verifier (#732) | `caller.require_auth()` after a role check; any other caller panics with `Unauthorized` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`verify_profile`](../contracts/registry/src/lib.rs) | Stored admin **or** stored verifier (#732) | `caller.require_auth()` after a role check; any other caller panics with `Unauthorized`. Verification (`true`) is rejected with `NonceRequired` once the account has submitted a challenge (#1130) | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`submit_verification_nonce`](../contracts/registry/src/lib.rs) | The registered account itself (#1130) | `address.require_auth()`; unregistered addresses and expired/replayed nonces are rejected before storage is written | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
+| [`verify_profile_with_nonce`](../contracts/registry/src/lib.rs) | Stored admin **or** stored verifier (#732), spending the account's nonce (#1130) | `caller.require_auth()` plus a matching, unexpired, unspent challenge; the profile and nonce are updated atomically | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
 | [`revoke`](../contracts/registry/src/lib.rs) | Stored admin only | `admin.require_auth()` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
 | [`reinstate`](../contracts/registry/src/lib.rs) | Stored admin only | `admin.require_auth()` | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |
 | [`transfer_ownership`](../contracts/registry/src/lib.rs) | Current admin **and** incoming admin | Dual auth: `admin.require_auth()` + `new_admin.require_auth()`, so ownership cannot be transferred to a non-consenting address | [`contracts/registry/src/lib.rs`](../contracts/registry/src/lib.rs) |

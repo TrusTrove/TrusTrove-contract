@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Map, String};
+use soroban_sdk::{contracttype, Address, BytesN, Map, String};
 
 #[contracttype]
 #[derive(Clone, Debug, PartialEq)]
@@ -83,6 +83,17 @@ impl Profile {
             self.packed_flags &= !4;
         }
     }
+}
+
+/// One-time proof-of-possession challenge for an account (#1130).
+///
+/// Only a fixed-size 32-byte nonce and its absolute expiry ledger timestamp
+/// are stored; the account signs the submission itself.
+#[contracttype]
+#[derive(Clone, Debug, PartialEq)]
+pub struct VerificationNonce {
+    pub hash: BytesN<32>,
+    pub expires_at: u64,
 }
 
 #[contracttype]
