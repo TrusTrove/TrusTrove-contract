@@ -7,3 +7,6 @@
 
 pub use trusttrove_ttl::EXTEND_TO as TTL_EXTEND_TO;
 pub use trusttrove_ttl::THRESHOLD as TTL_THRESHOLD;
+
+/// Schema version written for newly registered profiles.
+pub const PROFILE_SCHEMA_VERSION: u32 = 1;

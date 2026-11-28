@@ -11,6 +11,7 @@ pub enum RegistryError {
     AlreadyRegistered = 2,
     NotFound = 3,
     NotInitialized = 4,
+    /// A registration or verification-status batch exceeds its 50-entry cap.
     BatchSizeExceeded = 5,
     InvalidMetadata = 6,
     NotRegistered = 7,
