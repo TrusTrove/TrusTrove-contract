@@ -31,6 +31,11 @@ const MAX_METADATA_VALUE_LEN: u32 = 512;
 /// matter how many profiles a role accumulates. Callers page through the index
 /// with `start` / `limit` instead of asking for everything at once.
 const MAX_LIST_LIMIT: u32 = 50;
+/// Maximum number of addresses a single `batch_get_roles` call may inspect.
+///
+/// Kept equal to the other batch caps so a compliance screen can fetch roles
+/// for many accounts per transaction without an unbounded storage walk.
+const MAX_ROLE_LOOKUPS: u32 = 50;
 /// Minimum delay, in seconds of ledger time, between `propose_admin` and the
 /// earliest `accept_admin` (#1124). One day gives operators time to notice a
 /// proposal made with a compromised key and cancel it (or have the guardian
@@ -760,6 +765,65 @@ impl RegistryContract {
             }
             None => None,
         }
+    }
+
+    /// Returns the decoded roles of up to 50 addresses in one call.
+    ///
+    /// Compliance screens need the role of many accounts but none of their
+    /// metadata. This view reads only the existing `DataKey::Profile(address)`
+    /// entries and decodes their role with [`Profile::role`], so the private
+    /// `packed_flags` layout never crosses the contract boundary. It is the
+    /// batch counterpart of [`get_role`](Self::get_role).
+    ///
+    /// One result is returned per input address, in the same order, including
+    /// duplicates. A missing profile is an explicit `None` for that address
+    /// rather than an error, so a screen can mix registered and unregistered
+    /// accounts in a single bounded request.
+    ///
+    /// # Arguments
+    /// * `env` - The Soroban environment.
+    /// * `addresses` - Addresses to look up. At most `MAX_ROLE_LOOKUPS` (50)
+    ///   entries; an empty vector returns an empty result.
+    ///
+    /// # Auth
+    /// * No `require_auth()` call is made — this is a read-only view.
+    ///
+    /// # Panics
+    /// * `RegistryError::BatchSizeExceeded` if more than 50 addresses are
+    ///   supplied. No storage is read or written before the size check.
+    ///
+    /// # Returns
+    /// * `Vec<(Address, Option<Role>)>` - Input address paired with
+    ///   `Some(role)` when a profile exists, or `None` when it does not.
+    ///   Existing profiles have their TTL extended; missing entries do not
+    ///   create storage.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let roles = client.batch_get_roles(&vec![&env, issuer.clone(), unknown]);
+    /// assert_eq!(roles.get(0), Some((issuer, Some(Role::Issuer))));
+    /// assert_eq!(roles.get(1), Some((unknown, None)));
+    /// ```
+    pub fn batch_get_roles(env: Env, addresses: Vec<Address>) -> Vec<(Address, Option<Role>)> {
+        if addresses.len() > MAX_ROLE_LOOKUPS {
+            panic_with_error!(&env, RegistryError::BatchSizeExceeded);
+        }
+
+        let mut results: Vec<(Address, Option<Role>)> = Vec::new(&env);
+        for address in addresses.iter() {
+            let key = DataKey::Profile(address.clone());
+            let role = match env.storage().persistent().get::<_, Profile>(&key) {
+                Some(profile) => {
+                    env.storage()
+                        .persistent()
+                        .extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
+                    Some(profile.role())
+                }
+                None => None,
+            };
+            results.push_back((address, role));
+        }
+        results
     }
 
     /// Returns how many profiles are registered for `role`.

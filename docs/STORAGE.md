@@ -221,6 +221,11 @@ let status = if !profile_exists {
   rewritten or freed, and revoked profiles stay enumerated.
 - `get_profile(address)` returns the full `Profile` struct or panics with
   `NotFound` if absent.
+- `batch_get_roles(addresses)` reads only existing `Profile` entries and
+  returns `(address, Some(role))` / `(address, None)` pairs in input order, so
+  callers never decode `packed_flags` themselves. It accepts at most 50
+  addresses (`BatchSizeExceeded`, `#5`) and, like `get_role`, TTL-extends only
+  the profiles it finds; missing addresses create no entry (#1123).
 - `get_verification_status(address)` returns a three-valued enum
   (`Unregistered`, `Verified`, `Revoked`).
 

@@ -63,6 +63,7 @@ export interface Profile {
 export interface RegistryClient {
   __constructor(args: { admin: Address }): Promise<void>;
   accept_admin(): Promise<void>;
+  batch_get_roles(args: { addresses: Array<Address> }): Promise<Array<readonly [Address, Option<Role>]>>;
   batch_register_buyers(args: { entries: Array<readonly [Address, Map<string, string>]> }): Promise<Array<Address>>;
   batch_register_issuers(args: { entries: Array<readonly [Address, Map<string, string>]> }): Promise<Array<Address>>;
   cancel_admin_transfer(args: { caller: Address }): Promise<void>;
@@ -105,4 +106,4 @@ export interface RegistryClient {
   verify_profile(args: { caller: Address; address: Address; verify: boolean }): Promise<boolean>;
 }
 
-export const REGISTRY_METHODS = ["__constructor", "accept_admin", "batch_register_buyers", "batch_register_issuers", "cancel_admin_transfer", "freeze_admin", "get_admin", "get_allowed_metadata_keys", "get_guardian", "get_metadata_key_count", "get_metadata_key_policy", "get_pending_admin_transfer", "get_profile", "get_profile_count", "get_profile_version", "get_role", "get_verification_status", "get_verified_since", "get_verifier", "is_admin_frozen", "is_verified", "list_profiles", "pause", "propose_admin", "register_buyer", "register_issuer", "reinstate", "remove_guardian", "remove_metadata_key", "remove_verifier", "revoke", "set_guardian", "set_metadata_key_policy", "set_verifier", "transfer_admin", "transfer_ownership", "unfreeze_admin", "unpause", "update_metadata", "update_profile", "upgrade", "verify_profile"] as const;
+export const REGISTRY_METHODS = ["__constructor", "accept_admin", "batch_get_roles", "batch_register_buyers", "batch_register_issuers", "cancel_admin_transfer", "freeze_admin", "get_admin", "get_allowed_metadata_keys", "get_guardian", "get_metadata_key_count", "get_metadata_key_policy", "get_pending_admin_transfer", "get_profile", "get_profile_count", "get_profile_version", "get_role", "get_verification_status", "get_verified_since", "get_verifier", "is_admin_frozen", "is_verified", "list_profiles", "pause", "propose_admin", "register_buyer", "register_issuer", "reinstate", "remove_guardian", "remove_metadata_key", "remove_verifier", "revoke", "set_guardian", "set_metadata_key_policy", "set_verifier", "transfer_admin", "transfer_ownership", "unfreeze_admin", "unpause", "update_metadata", "update_profile", "upgrade", "verify_profile"] as const;
